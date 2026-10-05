@@ -330,4 +330,118 @@ Regression
 
 Models should not be permanently tied to job titles.
 
+Instead, models are selected according to task complexity, ambiguity and risk.
+
+A starting configuration might use:
+
+Complex planning / architecture / security
+    → high-reasoning model
+
+Routine implementation / QA / orchestration
+    → execution model
+
+Lint / format / tests / build / scanning
+    → deterministic tooling
+
+PR review
+    → independent provider
+
+Routing is configured centrally under models/.
+
+The objective is not minimum token usage at any cost.
+
+The objective is:
+
+Minimum cost per successfully completed engineering task.
+
+Context and Token Efficiency
+
+The system follows progressive disclosure.
+
+Agents should load only the information required for the current task.
+
+Stable engineering instructions, project architecture, current work state and execution evidence should remain separate.
+
+Prefer:
+
+concise specifications
+
+targeted retrieval
+
+cached stable context
+
+deterministic tools
+
+summarized logs
+
+bounded retries
+
+escalation when necessary
+
+parallel execution of independent work
+
+compressed durable learning
+
+Repository files are durable memory.
+
+Conversation history is temporary working context.
+
+Repository Structure
+
+ai-engineering-system/
+├── AGENTS.md
+├── agents/
+├── rules/
+├── workflows/
+├── templates/
+├── models/
+├── tooling/
+├── versions/
+├── CONTRIBUTING.md
+└── README.md
+
+Status
+
+Current version:
+
+v0.1.0
+
+This version establishes the engineering model, agent responsibilities, guardrails, workflows, knowledge model and model-routing strategy.
+
+The next stage is provider integration, beginning with Claude Code.
+
+That integration will connect these concepts to practical mechanisms such as:
+
+CLAUDE.md
+
+Claude Code subagents
+
+skills
+
+commands
+
+hooks
+
+permissions
+
+worktrees
+
+model routing
+
+concurrent work sessions
+
+automated quality gates
+
+Philosophy
+
+AI should not replace engineering discipline.
+
+It should make engineering discipline easier to apply consistently.
+
+The system therefore favors:
+
+evidence over confidence, simplicity over unnecessary abstraction, explicit decisions over hidden assumptions, and durable learning over repeatedly solving the same problem.
+
+Models should not be permanently tied to job titles.
+
 Instead, models are selected according to task complexity,
