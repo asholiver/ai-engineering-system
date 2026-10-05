@@ -1,6 +1,6 @@
 # ADR-0001: Claude Code native architecture for v0.2
 ## Status
-Accepted
+Accepted. Gate execution amended by [ADR-0002](ADR-0002-gate-execution-trust-boundary.md).
 ## Context
 v0.1 was advisory prose: role descriptions, rules, workflows and a model routing file that nothing executed or enforced. Only the root `AGENTS.md` was loaded by Claude Code. Claude Code now provides plugins, marketplaces, subagents, skills, hooks, permissions, per-agent model selection, worktree isolation and executable workflows.
 ## Decision
@@ -28,7 +28,7 @@ Rejected: correlated reasoning failures; the requirement is a genuinely differen
 - Hooks are guardrails, not a sandbox; hard boundaries need OS sandboxing, least-privilege credentials and CI/CD protections.
 - Hook `ask` is treated as deny where no human can answer (`claude -p`); behaviour under `bypassPermissions` is unverified.
 - Teammates must trust the project folder before the project-declared marketplace applies.
-- Configured gate and review commands run outside Claude Code's permission checks and sandbox; they are read from committed config (gates at `HEAD`, external review at the base ref) and refused when high-impact.
+- Configured gate and review commands execute project code with the user's privileges. They are read from committed config (gates at `HEAD`, or at the base ref during review; external review at the base ref) and refused when high-impact. Gate execution and the trust boundary are set out in ADR-0002.
 - QA and security-reviewer cannot be made strictly read-only while keeping Bash; the limitation is documented and a tamper-evidence hook is proposed.
 - Projects pin the marketplace to a release tag with auto-update off; marketplace refs cannot be commit SHAs, so this is reproducible but not tamper-proof.
 - Open decisions: the external review provider and integration; whether to add executable workflows; pinned model IDs versus aliases once evaluation data exists.

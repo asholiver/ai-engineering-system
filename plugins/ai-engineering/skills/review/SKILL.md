@@ -10,7 +10,7 @@ Arguments: `$ARGUMENTS` - the work ID, then optionally the base ref (default `ma
 
 ## Steps
 1. Read the work spec `.agents/specs/active/<WORK-ID>.md` (if present) and `git diff <base>...HEAD --stat`.
-2. Full gate: run `"${CLAUDE_PLUGIN_ROOT}/scripts/run-gate.sh" full` and take its verdict line verbatim.
+2. Full gate: run `"${CLAUDE_PLUGIN_ROOT}/scripts/run-gate.sh" full . <base>` and take its verdict line verbatim. The gate command is read from `.agents/gates.json` as committed at the base ref, so the change cannot define the gate that certifies it. If the verdict line says `THIS CHANGE MODIFIES THE "full" GATE`, list that under open items for the human. The gate still executes the change's code with your privileges; if the change comes from an untrusted source, stop and ask the user to run the review in an isolated environment instead.
 3. Internal checks: delegate to `ai-engineering:security-reviewer` and `ai-engineering:qa` with the spec path and base ref. These are internal checks by Claude; they never count as the independent review.
 4. External independent review: commit the change first. Run `"${CLAUDE_PLUGIN_ROOT}/scripts/external-review.sh" <base> HEAD <spec-path>` and take its final `EXTERNAL REVIEW:` line verbatim. The reviewer command is read from `.agents/gates.json` as committed at the base ref, so a change cannot alter its own reviewer; report any NOTE the script prints. Never substitute a Claude review when it is NOT CONFIGURED or ERROR.
 5. Record the status block under "Review state" in the spec.

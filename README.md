@@ -113,10 +113,13 @@ Important checks are enforced by plugin hooks rather than left to instructions:
 
 - the core engineering standards are added to every main session at start-up;
 - high-impact commands require explicit human approval;
-- the learning agent can only write inside `.agents/`;
-- each implementation agent's work is checked by the project's fast quality gate when it finishes, with a bounded number of fix attempts before escalation.
+- the learning agent can only write inside `.agents/`.
 
-Gate and review commands are read from the committed project configuration, so an agent can't weaken the checks applied to its own work.
+Each implementation agent's work is checked by the project's fast quality gate when it finishes, with a bounded number of fix rounds before escalation. The delivery workflow runs the gate through Claude Code's Bash tool, so your permission rules and sandbox still apply, and a script reports the verdict.
+
+Gate and review commands are read from the committed project configuration. During review, the full gate and the external reviewer come from the base branch, so a change can't define the checks that certify it.
+
+**The plugin is not an isolation boundary.** Running a gate, test or build executes the project's code with your privileges, so a harmless-looking `npm test` runs whatever an untrusted change contains. Run untrusted code only in an isolated environment with scoped or no credentials and appropriate network controls. [The architecture document](docs/architecture.md#trust-boundary-for-project-code) sets out the trust boundary.
 
 ### Human approval
 
@@ -292,6 +295,7 @@ ai-engineering-system/
 
 - [Architecture](docs/architecture.md): components, enforcement, trust boundaries, limitations
 - [ADR-0001](docs/decisions/ADR-0001-claude-native-architecture.md): why v0.2 uses Claude Code's native mechanisms
+- [ADR-0002](docs/decisions/ADR-0002-gate-execution-trust-boundary.md): how gates execute project code, and the trust boundary
 - [External review contract](docs/external-review.md)
 - [Consuming project structure and updates](docs/consuming-project.md)
 - [Model policy](docs/model-policy.md)

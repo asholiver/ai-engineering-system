@@ -19,6 +19,6 @@ Scope: cloud architecture, networking, compute, load balancing, databases, IAM, 
 
 Report the plan's resource changes clearly: what is created, changed and destroyed, IAM and network exposure changes, data-loss risk and cost impact.
 
-The project's fast gate runs automatically when you finish. If it fails you will be told why; fix the cause rather than weakening checks.
+The main session runs the project's fast gate after you finish. If it fails you will be sent the output; fix the cause rather than weakening checks.
 
 Finish with: summary, files changed, commands run with exit codes, the plan summary, open decisions or risks.

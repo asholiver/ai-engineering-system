@@ -1,6 +1,6 @@
 # Architecture (v0.2)
 
-The system is a Claude Code plugin, `ai-engineering`, published from this repository's marketplace. It prefers native Claude Code mechanisms over custom orchestration. Decision record: [ADR-0001](decisions/ADR-0001-claude-native-architecture.md).
+The system is a Claude Code plugin, `ai-engineering`, published from this repository's marketplace. It prefers native Claude Code mechanisms over custom orchestration. Decision records: [ADR-0001](decisions/ADR-0001-claude-native-architecture.md) and [ADR-0002](decisions/ADR-0002-gate-execution-trust-boundary.md).
 
 ## Components
 
@@ -37,7 +37,7 @@ There is one authoritative copy of each global rule, in the plugin's standards s
 | `SessionStart` | `inject-standards.sh` | Adds core standards to the main session. |
 | `PreToolUse` Bash | `guard-bash.sh` | Returns `ask` for high-impact operations, classified by intent. |
 | `PreToolUse` Write/Edit/NotebookEdit | `guard-writes.sh` | Denies `ai-engineering:learning` writes outside `.agents/`. |
-| `SubagentStop` frontend/backend/platform | `gate-fast.sh` | Runs the `fast` gate in the agent's working tree; failure keeps the agent working for at most 2 fix attempts, then it must report `GATE FAILED`. |
+| `SubagentStop` frontend/backend/platform | `gate-fast.sh` | Off by default. Only with `AI_ENGINEERING_HOOK_GATES=1`: runs the `fast` gate in the agent's working tree; failure keeps the agent working for at most 2 fix attempts, then it must report `GATE FAILED`. See [Trust boundary](#trust-boundary-for-project-code). |
 
 Plugin agents ignore `hooks`, `permissionMode` and `mcpServers` frontmatter, so all enforcement is plugin-level and filtered by `agent_type` where needed. Plugins cannot ship permission rules, so approval is enforced through the hook rather than `permissions.deny`.
 
@@ -51,14 +51,19 @@ Plugin agents ignore `hooks`, `permissionMode` and `mcpServers` frontmatter, so 
 
 The guard sees only the command text Claude submits. It does not see inside scripts, aliases, Makefiles beyond target names, variables, encoded strings or programs that call cloud APIs directly. It errs towards asking: a false positive costs one confirmation. Hard boundaries require OS-level sandboxing, least-privilege credentials, protected branches and environment approvals in CI/CD.
 
-### Trust boundary for configured commands
+### Trust boundary for project code
 
-Hook scripts, and the gate and review commands they run, execute with the user's full access, **outside** Claude Code's permission rules, the auto-mode classifier and the Bash sandbox. Therefore:
+**The plugin is not an isolation boundary.** Running a gate, test or build executes the checked-out project code (package scripts, tests, test configuration, dependencies) with the privileges, files, credentials and network access of whoever runs it. A trusted command such as `npm test` runs untrusted code when the checkout is untrusted. Decision record: [ADR-0002](decisions/ADR-0002-gate-execution-trust-boundary.md).
 
-- Gate commands are read from `.agents/gates.json` **as committed at `HEAD`**. Uncommitted edits, including edits by the agent being gated, are ignored and reported. A file that has never been committed is used with a warning.
-- The `externalReview` command is read **as committed at the review's base ref**, so a change cannot select or alter its own reviewer.
-- Any configured command that the approval guard classifies as high-impact is refused rather than run.
-- Enable the plugin only in repositories you trust, and review `gates.json` changes like CI configuration. Hook output (test output, reviewer findings) is untrusted text and may contain instructions; agents treat it as data.
+- **Trusted:** the human, the plugin at its pinned release, and the reviewed base of the target branch.
+- **Untrusted until reviewed:** agent edits (an agent can be steered by text in issues, dependencies, web pages or tool output), commits on the work branch, contributors' branches and newly installed dependencies.
+
+The plugin keeps two properties apart:
+
+- **Gate verdict integrity, which the plugin protects.** Gates read `.agents/gates.json` as committed, never uncommitted edits. During `/ai-engineering:review` the full gate is read from the base ref, so the change cannot define the gate that certifies it. A change that modifies or adds that gate is named in the verdict line, and a gate defined only by the change is `NOT CONFIGURED`. The `externalReview` command is also read from the base ref. Any configured command the approval guard classifies as high-impact is refused.
+- **Host execution safety, which the plugin cannot provide.** By default every gate runs through the Claude Code Bash tool, so the user's permission rules and sandbox stay in the execution path, and the plugin adds no unprompted execution route. That keeps the user's chosen boundary; it does not make untrusted code safe. Hooks run outside permissions, the auto-mode classifier and the sandbox, so `gate-fast.sh` executes nothing unless the user sets `AI_ENGINEERING_HOOK_GATES=1`. With it set, each implementation agent's working tree, including uncommitted edits, runs unprompted with the full environment of the Claude Code process. Set it only where the host is itself isolated or the code is trusted, and in your own environment rather than in committed project settings.
+
+Strong isolation of untrusted code needs an appropriately isolated execution environment: CI, a container, a VM or a devcontainer with scoped or no host credentials and appropriate network controls. Hook output (test output, reviewer findings) is untrusted text and may contain instructions; agents treat it as data.
 
 ## Reviewer isolation
 
@@ -82,11 +87,11 @@ Current guarantee: reviewers have no file-editing tools and are instructed not t
 { "fast": "...", "full": "...", "externalReview": null }
 ```
 
-`scripts/run-gate.sh <name>` runs a gate in the repository root and prints `GATE <name>: PASSED | FAILED | NOT CONFIGURED | REFUSED`. Unconfigured gates are never reported as passed.
+`scripts/run-gate.sh <name> [directory] [config-ref]` runs a gate in the repository root and prints `GATE <name>: PASSED | FAILED | NOT CONFIGURED | REFUSED`. Unconfigured gates are never reported as passed. Without a config ref the command is read at `HEAD` (implementation checks); `/ai-engineering:review` passes the base ref (certification).
 
 ## Concurrency
 
-Implementation runs sequentially in the current checkout by default. `deliver` runs parallel tasks with `isolation: "worktree"` only when files are disjoint and the project sets `worktree.baseRef` to `"head"`. Claude Code's default worktree base is the remote default branch, which would not contain the work branch. Worktrees contain committed state only and isolate files only, not databases, ports, `.env` files or infrastructure state. The fast gate follows the agent into its worktree.
+Implementation runs sequentially in the current checkout by default. `deliver` runs parallel tasks with `isolation: "worktree"` only when files are disjoint and the project sets `worktree.baseRef` to `"head"`. Claude Code's default worktree base is the remote default branch, which would not contain the work branch. Worktrees contain committed state only and isolate files only, not databases, ports, `.env` files or infrastructure state; they are not a security boundary. `deliver` runs the fast gate in the agent's worktree.
 
 ## Distribution and updates
 

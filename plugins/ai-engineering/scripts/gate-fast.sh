@@ -1,9 +1,18 @@
 #!/bin/bash
-# SubagentStop hook for implementation agents. Runs the project's fast gate in the
-# agent's working directory (which follows it into a worktree). On failure it keeps the
-# agent working, up to a bounded number of fix attempts, then instructs it to report
-# GATE FAILED so the main session escalates.
+# SubagentStop hook for implementation agents. Disabled unless AI_ENGINEERING_HOOK_GATES=1.
+#
+# Hooks run outside Claude Code's permission checks, auto-mode classifier and sandbox, so
+# running the gate here would execute the agent's working tree (including uncommitted
+# edits) unprompted with the user's full privileges. By default the deliver skill runs
+# the gate through the Bash tool instead, keeping the user's permissions and sandbox in
+# the execution path. See docs/decisions/ADR-0002-gate-execution-trust-boundary.md.
+#
+# When opted in: runs the project's fast gate in the agent's working directory (which
+# follows it into a worktree). On failure it keeps the agent working, up to a bounded
+# number of fix attempts, then instructs it to report GATE FAILED so the main session
+# escalates.
 set -u
+[ "${AI_ENGINEERING_HOOK_GATES:-}" = "1" ] || exit 0
 script_directory="$(cd "$(dirname "$0")" && pwd)"
 source "$script_directory/lib.sh"
 maximum_fix_attempts=2
