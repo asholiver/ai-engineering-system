@@ -1,12 +1,12 @@
 # Project AI Engineering Context
 
-Keep this concise.
+Keep this concise. Project-specific facts only: global engineering standards come from the ai-engineering plugin and are not copied here.
 
 ## Project
 <name and purpose>
 
 ## Canonical commands
-- Check:
+Quality gates (`fast`, `full`, `externalReview`) are defined only in `.agents/gates.json`.
 - Test:
 - Build:
 - Lint/format:

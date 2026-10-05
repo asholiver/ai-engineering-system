@@ -1,0 +1,15 @@
+{
+  "extraKnownMarketplaces": {
+    "ai-engineering-system": {
+      "source": {
+        "source": "github",
+        "repo": "asholiver/ai-engineering-system",
+        "ref": "v{{PLUGIN_VERSION}}"
+      },
+      "autoUpdate": false
+    }
+  },
+  "enabledPlugins": {
+    "ai-engineering@ai-engineering-system": true
+  }
+}
