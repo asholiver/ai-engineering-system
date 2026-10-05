@@ -27,7 +27,7 @@ Coordinate approved work efficiently. You are the coordinator, not the architect
 
 ## Prove
 - Run the full gate: `"${CLAUDE_PLUGIN_ROOT}/scripts/run-gate.sh" full` and report its verdict line verbatim.
-- Delegate to `ai-engineering:qa` with the spec path. Delegate to `ai-engineering:security-reviewer` when the change touches authentication, authorization, input handling, secrets, dependencies, IAM or infrastructure exposure.
+- Delegate to `ai-engineering:qa` with the spec path. Delegate to `ai-engineering:security-reviewer` when the change touches authentication, authorisation, input handling, secrets, dependencies, IAM or infrastructure exposure.
 - Update "Implementation state" with results.
 
 ## Boundaries

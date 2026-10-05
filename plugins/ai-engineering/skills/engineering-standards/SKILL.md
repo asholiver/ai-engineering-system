@@ -24,9 +24,9 @@ Priorities, in order: security, correctness, reliability, scalability, accessibi
 - When the project configures a formatter or linter (for example Biome), it is authoritative.
 
 ## Security baseline
-- Treat external input as untrusted. Authentication is not authorization.
+- Treat external input as untrusted. Authentication is not authorisation.
 - Never commit credentials or log sensitive data unnecessarily.
-- Security-sensitive behavior requires negative tests. Deeper guidance: `security-standards`.
+- Security-sensitive behaviour requires negative tests. Deeper guidance: `security-standards`.
 
 ## Reliability and scalability
 - Assume networks, databases, APIs, queues, caches and processes fail. Use timeouts, bounded retries, safe idempotency, graceful shutdown, explicit failure handling and useful observability. Never silently swallow meaningful errors.
@@ -34,7 +34,7 @@ Priorities, in order: security, correctness, reliability, scalability, accessibi
 - Consider connection pools, lock contention, retry storms, duplicate requests, restarts, deploys during traffic and downstream failures. Working for 5 concurrent requests does not make a design acceptable for 100,000+.
 
 ## Testing
-- Meaningful functionality requires meaningful tests: behavior, business rules, error paths, edge cases, authorization, concurrency and integrations as relevant.
+- Meaningful functionality requires meaningful tests: behaviour, business rules, error paths, edge cases, authorisation, concurrency and integrations as relevant.
 - Choose unit, integration, E2E, regression, security and load testing according to risk. Add regression coverage for defects where practical.
 
 ## Context efficiency

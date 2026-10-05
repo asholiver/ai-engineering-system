@@ -22,7 +22,7 @@ Draft <!-- Draft | Approved (by <human>, <date>) | Delivered | Accepted | Archiv
 ## Security
 <threats/auth/authz/validation>
 ## Scalability and reliability
-<load assumptions/limits/failure behavior/concurrency>
+<load assumptions/limits/failure behaviour/concurrency>
 ## Observability
 <logs/metrics/traces/alerts>
 ## Testing

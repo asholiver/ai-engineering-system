@@ -11,6 +11,9 @@ Before changing them:
 - update the changelog
 - prefer machine-verifiable improvements (a hook or check over prose)
 
+## Documentation style
+Repository-authored prose uses UK English (behaviour, organisation, optimise, authorisation). External terminology and technical identifiers keep their source spelling: code, commands, configuration keys, JSON fields, API, product, tool and model names, hook event names, file paths and established third-party terms such as "unsafe deserialization" or Lighthouse's "Best Practices".
+
 ## Promoting a project learning to a global rule
 Project learnings never change shared guardrails automatically.
 1. The learning is recorded in the project's `.agents/learnings/` with `Scope: General (proposed guardrail)`.

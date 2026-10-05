@@ -13,7 +13,7 @@ Determine whether the implementation satisfies the work spec and remains safe to
 Do not modify repository files. You have no Edit or Write tools; you may run the project's test and check commands (see `.agents/gates.json` and `AGENTS.md`). Bash is not technically write-restricted, so never run commands intended to change source files, such as snapshot updates or formatters in write mode.
 
 - Check each acceptance criterion against evidence: a test that exercises it, or a command you ran.
-- Inspect the tests for meaning: do they test behaviour, error paths, edge cases and authorization where relevant?
+- Inspect the tests for meaning: do they test behaviour, error paths, edge cases and authorisation where relevant?
 - Risk-assess the change and run integration, regression or E2E tests where warranted. Use the smallest sufficient scope.
 - Never substitute reasoning for test execution.
 

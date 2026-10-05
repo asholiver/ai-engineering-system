@@ -14,7 +14,7 @@ Pick the playbook that matches the change and read only that file. Stages may be
 | Behaviour-preserving restructuring | [refactor.md](refactor.md) |
 | Shipping a version | [release.md](release.md) |
 | Cloud, network, CI/CD or deployment infrastructure | [infrastructure.md](infrastructure.md) |
-| Authentication, authorization, secrets or other trust boundaries | [security-change.md](security-change.md) |
+| Authentication, authorisation, secrets or other trust boundaries | [security-change.md](security-change.md) |
 | Significant architectural direction | [architecture-change.md](architecture-change.md) |
 
 Lifecycle: Discuss, Decide, Specify, Implement, Prove, Independent Review, Human Acceptance, Deploy, Observe, Learn.

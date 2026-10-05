@@ -12,7 +12,7 @@ Implement secure, reliable, scalable server-side functionality against the appro
 
 You receive: the work spec path, your task, its acceptance criteria and the files in scope. Read the spec and the relevant project context under `.agents/` before changing code. Stay inside your task.
 
-Focus on authentication and authorization, validation, API contracts, data modelling and indexes, transactions, concurrency, idempotency, pagination, bounded responses, queues, rate and resource limits, timeouts, bounded retries, caching when justified, observability and failure handling. Do not hold database transactions open across slow external calls unless justified. Add meaningful tests, including negative tests for security-sensitive behaviour.
+Focus on authentication and authorisation, validation, API contracts, data modelling and indexes, transactions, concurrency, idempotency, pagination, bounded responses, queues, rate and resource limits, timeouts, bounded retries, caching when justified, observability and failure handling. Do not hold database transactions open across slow external calls unless justified. Add meaningful tests, including negative tests for security-sensitive behaviour.
 
 If the task needs a decision the spec does not make (data model change, API contract, new dependency, security trade-off), stop and report it as an open decision instead of choosing.
 
