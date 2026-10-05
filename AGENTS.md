@@ -1,25 +1,15 @@
-# AI Engineering System
+# AI Engineering System (repository instructions)
 
-Reusable operating rules for AI-assisted software engineering.
+This repository is the ai-engineering system itself: a Claude Code marketplace (`.claude-plugin/marketplace.json`) publishing one plugin (`plugins/ai-engineering/`). Read `docs/architecture.md` before structural changes.
 
-## Non-negotiables
-- Security, correctness, reliability, scalability, accessibility, maintainability, performance, and applicable SEO are first-class concerns.
-- Prefer the smallest correct solution. Do not over-engineer.
-- Code must be human-readable; use descriptive names and avoid cryptic abbreviations.
-- Use semantic markup and native controls where applicable.
-- Applicable web pages target Lighthouse Performance, Accessibility, Best Practices, and SEO >=98 without suppressing audits.
-- Prefer feature/domain encapsulation; shared code is shared only when genuinely reused.
-- Meaningful functionality requires meaningful tests.
-- Work is not done until implementation, required tests, quality/security checks, and build are complete and passing.
-- Design for concurrency and growth; avoid unbounded work and resources.
-- Never claim a check passed unless it was actually run.
-- Prefer deterministic tools over LLM reasoning for deterministic checks.
-- Use the least expensive model capable of reliably completing the task.
-- Agents implement agreed intent but escalate major architectural, security, destructive, or materially costly decisions.
-- Record durable decisions and lessons so future agents do not rediscover them.
+The engineering standards below apply to work on this repository too:
 
-## Context discipline
-Load only relevant rules and project knowledge. Keep stable context separate from dynamic task context. Summarise evidence first and expand on demand.
+@plugins/ai-engineering/skills/engineering-standards/SKILL.md
 
-## Lifecycle
-Discuss → Decide → Specify → Implement → Prove → Independently Review → Accept → Deploy → Observe → Learn
+## Working on this repository
+- Each global rule has exactly one authoritative home in `plugins/ai-engineering/skills/*-standards/`. Do not restate rules in docs, agents or templates; link to them.
+- Model routing lives only in agent frontmatter.
+- Keep always-loaded text small: the core standards, agent descriptions and model-invocable skill descriptions are paid for in every session. `scripts/check.sh` enforces budgets.
+- Hook scripts are bash + jq. Every behaviour change needs a case in `tests/run.sh`.
+- Changes to global standards follow `CONTRIBUTING.md`; they are never made automatically from a project learning.
+- Run `scripts/check.sh` before declaring work done, and update `versions/CHANGELOG.md` and the plugin version for releases.
