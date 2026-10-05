@@ -1,0 +1,2 @@
+# Infrastructure Playbook
+Discover current architecture → establish workload/availability/security/recovery/cost/compliance/operations requirements → present options and recommend → record decisions → human approval for major/destructive decisions → IaC implementation → format/validate/security/policy/plan → review IAM/network/secrets/backups/observability/rollback → independent review → apply through environment gates → health verification.

@@ -1,6 +1,6 @@
 # AI Engineering System
 
-A reusable engineering system for planning, building, reviewing, testing and learning with AI agents across software projects.
+A reusable engineering system for planning, building, reviewing, testing and learning with AI agents across software projects. v0.2 turns it into an executable Claude Code plugin.
 
 ## Why I built this
 
@@ -16,8 +16,6 @@ This repository is my attempt at that: a reusable system for how agents plan, bu
 
 ## What it does
 
-The AI Engineering System provides a shared operating model for AI-assisted software development.
-
 Instead of asking one agent to understand a request, make every decision, write the code and declare the result finished, the system separates those responsibilities.
 
 It provides:
@@ -26,8 +24,8 @@ It provides:
 - collaborative planning before implementation;
 - specialist responsibilities for frontend, backend, platform, security and QA;
 - work specifications and architectural decision records;
-- deterministic quality gates;
-- independent review;
+- deterministic quality gates and approval guardrails;
+- independent review from a different provider;
 - project-level knowledge and regression tracking;
 - and a learning process for turning failures and discoveries into durable knowledge.
 
@@ -37,68 +35,48 @@ The goal isn't to make agents generate more code. It's to make AI-assisted engin
 
 ### Agents have autonomy over implementation, not authority over intent
 
-Once requirements and architecture are agreed, implementation agents should be able to work without asking about every small coding decision.
-
-They shouldn't silently redefine the product, architecture, security model or other important human decisions.
+Once requirements and architecture are agreed, implementation agents should be able to work without asking about every small coding decision. They shouldn't silently redefine the product, architecture, security model or other important human decisions.
 
 ### Planning comes before implementation
 
-Planning is a collaborative engineering activity, not just prompt preparation.
-
-Requirements, assumptions, architecture, risks and acceptance criteria should be understood before implementation begins.
+Planning is a collaborative engineering activity, not just prompt preparation. Requirements, assumptions, architecture, risks and acceptance criteria should be understood before implementation begins.
 
 ### Challenge assumptions
 
-A proposed solution is input to the discussion, not automatically the correct implementation.
-
-When realistic alternatives exist, the system should explain the trade-offs and recommend an approach rather than simply agreeing.
+A proposed solution is input to the discussion, not automatically the correct implementation. When realistic alternatives exist, the system should explain the trade-offs and recommend an approach rather than simply agreeing.
 
 ### Local correctness isn't enough
 
-Code can look perfectly reasonable in isolation and still be wrong within the wider system.
-
-Agents need enough project context to consider existing architecture, data flows, state, side effects, security boundaries and established behaviour before changing them.
+Code can look perfectly reasonable in isolation and still be wrong within the wider system. Agents need enough project context to consider existing architecture, data flows, state, side effects, security boundaries and established behaviour before changing them.
 
 ### Prefer evidence over confidence
 
-Tests, builds, linters, security tools and performance measurements are stronger evidence than an agent saying something looks correct.
-
-If a required check hasn't run, the system shouldn't claim it passed.
+Tests, builds, linters, security tools and performance measurements are stronger evidence than an agent saying something looks correct. If a required check hasn't run, the system doesn't claim it passed.
 
 ### Independent review matters
 
-The model that implemented a change shouldn't be treated as genuinely independent evidence that the change is correct.
-
-Important changes should pass automated validation and, where configured, independent review from a different provider before final human acceptance.
+The model that implemented a change isn't independent evidence that the change is correct. Work is only marked ready for final human acceptance after an independent review from a genuinely different provider; Claude reviewing Claude doesn't count.
 
 ### Prefer the simplest solution that meets the requirements
 
-Avoid speculative abstractions, unnecessary dependencies, unrelated refactors and architecture designed for hypothetical future problems.
-
-Simplicity matters, but not at the expense of security, correctness or reliability.
+Avoid speculative abstractions, unnecessary dependencies, unrelated refactors and architecture designed for hypothetical future problems. Simplicity matters, but not at the expense of security, correctness or reliability.
 
 ### Humans retain high-impact authority
 
-Agents can have substantial autonomy without having unlimited authority.
-
-Architectural uncertainty, destructive operations, releases, merges and other consequential actions should return to a human when appropriate.
+Agents can have substantial autonomy without having unlimited authority. Architectural uncertainty, destructive operations, releases, merges and other consequential actions return to a human.
 
 ## How it works
 
-A typical piece of work moves through a lifecycle like this:
+A typical piece of work moves through this lifecycle:
 
 ```text
-Conversation
+Conversation and planning
     ↓
-Planning
+Approved work specification
     ↓
-Work specification
+Delivery by specialist agents
     ↓
-Human approval
-    ↓
-Implementation
-    ↓
-Automated quality gates
+Deterministic quality gates
     ↓
 Security / QA
     ↓
@@ -109,27 +87,51 @@ Human acceptance
 Learning
 ```
 
-The exact workflow depends on the type and risk of the change, but the principle remains the same: **understand the work, implement it, prove it and preserve what was learned.**
+The exact path depends on the type and risk of the change, but the principle stays the same: **understand the work, implement it, prove it and preserve what was learned.**
 
-## Specialist responsibilities
+### Responsibilities in Claude Code
 
-The system separates different engineering concerns rather than expecting one agent to reason equally well about everything at once.
+Planning is the main conversational interface: it runs in your interactive Claude Code session, not in a background agent. Implementation and review responsibilities use Claude Code's native subagents and skills.
 
-- **Planning** clarifies requirements, challenges assumptions, explores architecture and produces an agreed work specification.
-- **Orchestration** coordinates approved work, dependencies, specialists and quality gates.
-- **Frontend** focuses on UI architecture, accessibility, browser behaviour, performance and design fidelity.
-- **Backend** focuses on APIs, data, authentication, authorisation, concurrency, reliability and scalability.
-- **Platform** covers infrastructure, cloud architecture, networking, deployment, observability, capacity and recovery.
-- **Security** reviews changes adversarially and looks for ways assumptions and boundaries can fail.
-- **QA** validates the implementation against acceptance criteria and real test evidence.
-- **Learning** turns useful discoveries, failures and regressions into durable project knowledge.
-- **Independent review** provides a separate challenge after implementation rather than allowing the implementing agent to review itself.
+| Responsibility | What it does | Claude Code mechanism |
+| :- | :- | :- |
+| Planning | Clarifies requirements, challenges assumptions, explores architecture and produces an agreed work specification | Main session with `/ai-engineering:plan` |
+| Orchestration | Coordinates approved work, dependencies, specialists and gates | Main session with `/ai-engineering:deliver` |
+| Frontend | UI architecture, accessibility, browser behaviour, performance and design fidelity | `frontend` agent |
+| Backend | APIs, data, authentication, authorisation, concurrency, reliability and scalability | `backend` agent |
+| Platform | Implements approved infrastructure as code up to a reviewed plan; design stays in the main session | `platform` agent |
+| Security | Adversarial review of assumptions and boundaries | `security-reviewer` agent |
+| QA | Validates acceptance criteria against real test evidence | `qa` agent |
+| Learning | Turns discoveries, failures and regressions into durable project knowledge | `learning` agent with `/ai-engineering:learn` |
+| Independent review | A separate challenge from a different provider | `/ai-engineering:review` plus a configurable external command |
 
-The detailed responsibilities live under [`agents/`](agents/).
+The agent definitions live in [`plugins/ai-engineering/agents/`](plugins/ai-engineering/agents/) and the skills in [`plugins/ai-engineering/skills/`](plugins/ai-engineering/skills/). The security and QA agents have no file-editing tools, but Claude Code can't make a Bash-enabled agent strictly read-only; [the architecture document](docs/architecture.md#reviewer-isolation) explains the limits.
+
+### Deterministic enforcement
+
+Important checks are enforced by plugin hooks rather than left to instructions:
+
+- the core engineering standards are added to every main session at start-up;
+- high-impact commands require explicit human approval;
+- the learning agent can only write inside `.agents/`.
+
+Each implementation agent's work is checked by the project's fast quality gate when it finishes, with a bounded number of fix rounds before escalation. The delivery workflow runs the gate through Claude Code's Bash tool, so your permission rules and sandbox still apply, and a script reports the verdict.
+
+Implementation checks read gate commands from the committed project configuration, falling back to the uncommitted file, with a warning, only while none is committed. During review, the full gate and the external reviewer come from the base branch, so a change can't define the checks that certify it.
+
+**The plugin is not an isolation boundary.** Running a gate, test or build executes the project's code with your privileges, so a harmless-looking `npm test` runs whatever an untrusted change contains. Run untrusted code only in an isolated environment with scoped or no credentials and appropriate network controls. [The architecture document](docs/architecture.md#trust-boundary-for-project-code) sets out the trust boundary.
+
+### Human approval
+
+Infrastructure apply/destroy, cloud and Kubernetes deletions, SQL `DROP`/`TRUNCATE`, force pushes, pushes to `main`/`master`, PR merges, releases, package publishing and deploy/release tasks require explicit human approval in every environment. In an interactive session, including auto mode, Claude Code shows a permission prompt; where no human can answer, the operation is denied. Behaviour under `bypassPermissions` hasn't been verified.
+
+**Hooks are guardrails, not a security sandbox.** They see only the command text Claude submits and can be evaded by indirection. Use real sandboxing, least-privilege credentials, protected branches and CI/CD approvals for hard boundaries.
+
+### Independent review
+
+The system stays provider-neutral: a project configures any command as `externalReview` in `.agents/gates.json` ([contract](docs/external-review.md)). When none is configured, review reports `EXTERNAL REVIEW: NOT CONFIGURED` and the work isn't marked ready for final acceptance. That doesn't block implementation, local testing, commits or draft pull requests.
 
 ## Engineering standards
-
-The system applies a shared set of engineering guardrails across projects.
 
 When priorities conflict, the default order is:
 
@@ -145,91 +147,57 @@ When priorities conflict, the default order is:
 
 These aren't an excuse for unnecessary complexity. The preferred implementation is still the simplest one that satisfies the higher-priority requirements.
 
-The detailed standards live under [`rules/`](rules/), covering architecture, security, scalability, accessibility, testing, reliability, frontend, backend, platform and code quality.
+Each rule has one authoritative home in the plugin's standards skills: [engineering](plugins/ai-engineering/skills/engineering-standards/SKILL.md), [security](plugins/ai-engineering/skills/security-standards/SKILL.md), [frontend](plugins/ai-engineering/skills/frontend-standards/SKILL.md) and [platform](plugins/ai-engineering/skills/platform-standards/SKILL.md). Process guidance for each type of change lives in the [playbooks](plugins/ai-engineering/skills/playbooks/SKILL.md).
 
 ## Project knowledge
 
-The global system describes **how software should be engineered**.
-
-Each application separately records **what that particular system is and why it works the way it does**.
-
-A consuming project can maintain durable knowledge under `.agents/`:
+The global system describes **how software should be engineered**. Each application separately records **what that particular system is and why it works the way it does**, under `.agents/`:
 
 ```text
 .agents/
-├── project/
-│   ├── system-overview.md
-│   ├── architecture/
-│   ├── domains/
-│   ├── data/
-│   └── design/
-├── decisions/
+├── gates.json          # fast, full and externalReview commands
+├── project/            # system overview, architecture, domains, data, design
+├── decisions/          # ADRs
 ├── specs/
-│   ├── active/
+│   ├── active/         # planning sessions and work specifications
 │   └── archive/
 ├── learnings/
 ├── failures/
 └── regressions/
 ```
 
-This gives agents relevant project context without forcing every future session to reconstruct the application from conversation history.
+This gives agents relevant project context without forcing every future session to reconstruct the application from conversation history. The project's `AGENTS.md` holds project-specific facts only; the global standards come from the plugin and are never copied into it.
 
-**Repository files are durable memory. Conversation history is temporary working context.**
+**Repository files are durable memory. Conversation history is temporary working context.** Claude Code's automatic memory is a personal convenience, not a replacement for this reviewed, version-controlled knowledge.
 
 ## Work specifications and decisions
 
-Each meaningful feature, bug fix, migration, refactor or architectural change can have its own work specification.
-
-A specification captures the objective, requirements, important decisions, risks, tests and acceptance criteria for that piece of work.
-
-Long-lived architectural decisions belong in ADRs rather than disappearing into a chat transcript.
-
-Templates are provided under [`templates/`](templates/).
+Each meaningful feature, bug fix, migration, refactor or architectural change has its own work specification, capturing the objective, requirements, decisions, risks, tests and acceptance criteria. Long-lived architectural decisions belong in ADRs rather than disappearing into a chat transcript. Templates live with the skills that use them: [planning](plugins/ai-engineering/skills/plan/templates/) and [learning](plugins/ai-engineering/skills/learn/templates/).
 
 ## Learning from mistakes
 
-One of the main goals of the system is to avoid paying repeatedly for the same mistake.
+One of the main goals of the system is to avoid paying repeatedly for the same mistake. Implementation failures, incidents, security findings, regressions, review findings and human corrections can become project knowledge, an ADR, a regression record or a proposed engineering guardrail.
 
-Implementation failures, incidents, security findings, regressions, review findings and human corrections can produce durable learnings.
-
-Those learnings may eventually become:
-
-- project knowledge;
-- an ADR;
-- a regression test or record;
-- or a proposed engineering guardrail.
-
-They don't automatically rewrite the rules. Permanent guardrails should be deliberate, reviewed decisions rather than an accumulation of reactions to individual failures.
+They don't automatically rewrite the rules. Permanent guardrails are deliberate, reviewed decisions, made through a pull request to this repository ([process](CONTRIBUTING.md)).
 
 ## Context and token efficiency
 
-More context isn't automatically better.
+More context isn't automatically better. The system aims to use the minimum reasoning and context necessary to complete work reliably, through progressive disclosure, relevant project knowledge rather than entire histories, deterministic tools for deterministic questions, concise work specifications, explicit task state, bounded retries, parallel work where it's genuinely independent, and compressed durable learnings.
 
-The system aims to use the minimum reasoning and context necessary to complete work reliably, using techniques such as:
-
-- progressive disclosure;
-- relevant project knowledge rather than entire histories;
-- deterministic tools for deterministic questions;
-- concise work specifications;
-- explicit task state;
-- bounded retries;
-- parallel work where it is genuinely independent;
-- and compressed durable learnings.
+In v0.2 this is built in: only the core standards and short skill and agent descriptions are always loaded; domain standards, playbooks and templates load on demand; lifecycle skills cost nothing until invoked; and agents receive the work specification and their task rather than the conversation history. A repository check enforces a budget on always-loaded context.
 
 The objective isn't the lowest token usage at any cost. It's the **lowest practical cost per successfully completed engineering task at the required quality**.
 
 ## Model routing
 
-Models are selected according to task complexity and risk rather than permanently tied to job titles.
-
-A sensible starting point is:
+Models are selected according to task complexity and risk rather than permanently tied to job titles:
 
 ```text
 Planning / complex architecture / security
-    → high-reasoning model
+    → high-reasoning model (Opus)
 
 Routine implementation / orchestration / QA / learning
-    → capable execution model
+    → capable execution model (Sonnet)
 
 Lint / format / typecheck / tests / builds / security scans
     → deterministic tools
@@ -238,57 +206,100 @@ Pull-request review
     → independent provider
 ```
 
-Routing should evolve as model capabilities change rather than hard-coding today's model names into the architecture.
+Each agent's `model` field is the single source of routing configuration. Model aliases are used rather than pinned model IDs, so routing follows model improvements without hard-coding today's names. See the [model policy](docs/model-policy.md).
 
-## Using v0.1
+## Getting started
 
-v0.1 is the **reference architecture** for the AI Engineering System.
+### Prerequisites
 
-It defines the engineering standards, responsibilities, workflows, project knowledge structure and model-routing approach that the system is built around.
+- [Claude Code](https://code.claude.com/docs) (v0.2 was developed and tested with v2.1.289)
+- `git`, `bash` and [`jq`](https://jqlang.org/) on the `PATH`; the hooks are bash scripts
+- The project you apply it to should be a git repository
 
-It can be used as a reference for establishing AI-assisted engineering practices, but it doesn't yet provide a packaged installation or automated setup process.
+### Try it from a local checkout (available now)
 
-To explore it:
+v0.2 isn't released yet, so the supported path today is loading the plugin directly from a local checkout of the v0.2 source, for development and testing only. (`main` currently holds v0.1, which has no plugin.)
 
-1. Start with [`AGENTS.md`](AGENTS.md) for the system's core instructions.
-2. Explore [`agents/`](agents/) for specialist responsibilities.
-3. Review [`rules/`](rules/) for the engineering guardrails.
-4. See [`workflows/`](workflows/) for the lifecycle of different types of change.
-5. Use [`templates/`](templates/) for work specifications, ADRs, learnings and regressions.
-6. See [`project-structure.md`](project-structure.md) for the suggested structure of a consuming project's knowledge.
+Start Claude Code in your project with the plugin loaded for that session only:
+
+```text
+cd /path/to/your-project
+claude --plugin-dir /path/to/ai-engineering-system/plugins/ai-engineering
+```
+
+### Install from the marketplace (after the v0.2.0 release)
+
+This repository is also a Claude Code marketplace (`ai-engineering-system`) containing one plugin (`ai-engineering`). Once v0.2 is merged to `main` and tagged `v0.2.0`, the normal installation will be:
+
+```text
+claude plugin marketplace add asholiver/ai-engineering-system@v0.2.0
+claude plugin install ai-engineering@ai-engineering-system
+```
+
+This doesn't work yet: `main` still holds v0.1 and the `v0.2.0` tag doesn't exist.
+
+### Apply it to a project
+
+In your project, run:
+
+```text
+/ai-engineering:setup
+```
+
+It never overwrites existing files without showing you the change first, and it creates:
+
+- the `.agents/` knowledge layout shown above;
+- `.agents/gates.json`, after confirming your `fast` and `full` gate commands with you (`externalReview` stays empty until you configure one);
+- a project-specific `AGENTS.md`, and a `CLAUDE.md` that imports it so it keeps loading;
+- `.claude/settings.json` entries that register the marketplace pinned to the plugin's release tag, with auto-update off, and enable the plugin for teammates once they trust the folder;
+- optionally, the worktree setting needed for parallel delivery.
+
+Until `v0.2.0` is tagged, the pinned marketplace entry can't resolve. When testing from a local checkout, decline that settings step or expect Claude Code to report that the marketplace or plugin can't be found.
+
+Review and commit what it creates. Until `.agents/gates.json` is committed, implementation checks use the uncommitted file with a warning, and review reads the full gate and the external review command only from the base branch.
+
+### Start a piece of work
+
+```text
+/ai-engineering:plan WORK-001      discuss, decide, then write the work specification and ADRs
+/ai-engineering:deliver WORK-001   implement the approved specification through specialist agents
+/ai-engineering:review WORK-001    full gate, security and QA checks, independent review
+/ai-engineering:learn              record a learning, regression or incident
+```
+
+Planning ends with a work specification you explicitly approve. Delivery stops at any decision the specification doesn't make. Review reports whether the work is ready for your final acceptance.
+
+Multiple unrelated work streams can run in the same repository, each with its own specification and state. Parallel implementation uses git worktree isolation once the project opts in.
+
+## Status
+
+**v0.1** established the reference architecture: principles, responsibilities, guardrails, workflows, knowledge model and model-routing approach.
+
+**v0.2** implements the Claude Code integration. The implementation is complete locally and passes the repository's checks (plugin validation, automated hook tests and context budgets). It hasn't yet been independently reviewed, merged, tagged or released, so it isn't ready for general use beyond local testing. Known limitations and open items are listed in the [architecture document](docs/architecture.md) and the [changelog](versions/CHANGELOG.md).
 
 ## Repository structure
 
 ```text
 ai-engineering-system/
-├── AGENTS.md
-├── README.md
-├── agents/                 # specialist responsibilities
-├── rules/                  # engineering guardrails
-├── workflows/              # change lifecycles
-├── templates/              # specs, ADRs and learning records
-├── models/                 # model policy and routing
-├── tooling/                # quality, security and infrastructure guidance
-├── project-structure.md    # consuming-project knowledge structure
-└── versions/
-    └── CHANGELOG.md
+├── .claude-plugin/marketplace.json   # marketplace listing the plugin
+├── plugins/ai-engineering/           # the plugin: agents, skills, hooks, scripts
+├── docs/                             # architecture, policies, contracts, ADRs
+├── tests/run.sh                      # automated tests for the hook scripts
+├── scripts/check.sh                  # this repository's quality gate
+├── AGENTS.md                         # instructions for working on this repository
+├── CONTRIBUTING.md
+└── versions/CHANGELOG.md
 ```
 
-## What's next
+## Documentation
 
-### v0.1 — reference architecture
-
-The current `main` branch establishes the principles, roles, guardrails, workflows and knowledge model.
-
-### v0.2 — Claude Code integration
-
-v0.2 turns the reference architecture into an executable Claude Code integration.
-
-It introduces native agents and skills, project setup, deterministic quality gates, approval guardrails, progressive context loading and a provider-neutral independent-review integration.
-
-v0.2 is currently under development and will replace the v0.1 reference implementation on `main` when it has completed review and release.
-
-Once the v0.2 branch is public, this section will link directly to it.
+- [Architecture](docs/architecture.md): components, enforcement, trust boundaries, limitations
+- [ADR-0001](docs/decisions/ADR-0001-claude-native-architecture.md): why v0.2 uses Claude Code's native mechanisms
+- [ADR-0002](docs/decisions/ADR-0002-gate-execution-trust-boundary.md): how gates execute project code, and the trust boundary
+- [External review contract](docs/external-review.md)
+- [Consuming project structure and updates](docs/consuming-project.md)
+- [Model policy](docs/model-policy.md)
+- [Contributing](CONTRIBUTING.md): rule promotion, releases, documentation style
 
 ## Philosophy
 
@@ -296,9 +307,7 @@ AI makes writing code faster. That doesn't remove the need for engineering disci
 
 The aim of this project is to give agents enough autonomy to be genuinely useful while surrounding that autonomy with planning, context, verification, independent challenge and human judgement.
 
-A good result isn't simply that the agent produced working code quickly.
-
-It's that the right thing was built, the implementation fits the wider system, important claims were verified, unintended consequences were considered and useful knowledge survives for the next piece of work.
+A good result isn't simply that the agent produced working code quickly. It's that the right thing was built, the implementation fits the wider system, important claims were verified, unintended consequences were considered and useful knowledge survives for the next piece of work.
 
 ## About
 

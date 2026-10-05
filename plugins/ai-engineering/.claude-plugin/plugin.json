@@ -1,0 +1,10 @@
+{
+  "name": "ai-engineering",
+  "displayName": "AI Engineering System",
+  "version": "0.2.0",
+  "description": "Engineering standards, specialist agents, lifecycle skills and deterministic guardrails for AI-assisted software engineering.",
+  "author": {
+    "name": "Ashley Oliver"
+  },
+  "repository": "https://github.com/asholiver/ai-engineering-system"
+}

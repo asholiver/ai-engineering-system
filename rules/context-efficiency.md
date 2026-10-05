@@ -1,2 +1,0 @@
-# Context / Token Efficiency
-Use minimum context/reasoning necessary for reliable completion. Load only relevant rules. Keep project context and specs concise. Retrieve relevant learnings instead of injecting all history. Summarise tool output and expand on demand. Use prompt caching for stable context where supported. Prefer deterministic tools. Use bounded retries and escalation. Stop when gates are satisfied. Compress duplicate learnings. Optimise for minimum cost per successfully completed task, not minimum tokens at any cost.

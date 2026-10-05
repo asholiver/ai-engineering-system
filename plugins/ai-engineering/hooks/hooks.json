@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/inject-standards.sh\"" } ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/guard-bash.sh\"" } ]
+      },
+      {
+        "matcher": "Write|Edit|NotebookEdit",
+        "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/guard-writes.sh\"" } ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "^ai-engineering:(frontend|backend|platform)$",
+        "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/gate-fast.sh\"" } ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "name": "ai-engineering-system",
+  "description": "Reusable AI engineering operating system for Claude Code.",
+  "owner": { "name": "Ashley Oliver" },
+  "plugins": [
+    {
+      "name": "ai-engineering",
+      "source": "./plugins/ai-engineering",
+      "description": "Engineering standards, specialist agents, lifecycle skills and deterministic guardrails."
+    }
+  ]
+}

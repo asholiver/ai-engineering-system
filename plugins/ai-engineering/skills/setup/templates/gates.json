@@ -1,0 +1,5 @@
+{
+  "fast": "<lint + typecheck + unit tests, e.g. npm run lint && npm run typecheck && npm test>",
+  "full": "<everything required before review, e.g. npm run check>",
+  "externalReview": null
+}
