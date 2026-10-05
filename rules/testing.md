@@ -1,2 +1,0 @@
-# Testing
-Meaningful functionality requires meaningful tests. Test behavior, business rules, error paths, edge cases, security boundaries, authorization, concurrency, and integrations as relevant. Use unit/component, integration, E2E, regression, security, and load testing according to risk. Add regression coverage for defects where practical. Work is not done until required tests pass and the build succeeds.
