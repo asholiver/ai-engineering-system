@@ -47,7 +47,10 @@ read_gate_command() {
 }
 
 # Succeeds when the approval guard classifies a command as a high-impact operation.
-# Configured commands run from hooks outside Claude Code's permission checks, so they
+# Configured commands are not individually checked by Claude Code's permission rules:
+# the opt-in hook-run fast gate runs outside them, and gates or external review invoked
+# through the Bash tool are checked only as the outer script call. Either way they run
+# with the user's privileges and credentials and are not an isolation boundary, so they
 # must never perform operations that would otherwise need human approval.
 is_high_impact_command() {
   local command_text="$1" directory="$2" script_directory decision
