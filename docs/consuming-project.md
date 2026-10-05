@@ -56,7 +56,7 @@ Limits: a marketplace `ref` can be a branch or tag but not a commit SHA, and tag
   "externalReview": null
 }
 ```
-`fast` runs whenever an implementation agent finishes, so keep it to seconds. `full` runs before review. The main session runs gates through the Bash tool with `bash -c` from the repository root, so your permission rules and sandbox apply. Gates use the committed file (uncommitted edits are ignored and reported); during review the full gate is read from the base ref. Commands containing high-impact operations are refused. See [external-review.md](external-review.md) for `externalReview`.
+`fast` runs whenever an implementation agent finishes, so keep it to seconds. `full` runs before review. The main session runs gates through the Bash tool with `bash -c` from the repository root, so your permission rules and sandbox apply. Gates use the file committed at `HEAD` (uncommitted edits are ignored and reported). Until it is committed, implementation checks fall back to the working-tree file and print a `NOTE`, so commit it. During review the full gate is read only from the base ref, with no fallback. Commands containing high-impact operations are refused. See [external-review.md](external-review.md) for `externalReview`.
 
 Every gate executes the project's code with the privileges of whoever runs it; see the [trust boundary](architecture.md#trust-boundary-for-project-code).
 
