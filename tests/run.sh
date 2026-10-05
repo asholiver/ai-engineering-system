@@ -8,6 +8,7 @@ work_directory="$(mktemp -d "${TMPDIR:-/tmp}/ai-engineering-tests.XXXXXX")"
 trap 'rm -rf "$work_directory"' EXIT
 export CLAUDE_PLUGIN_DATA="$work_directory/plugin-data"
 export CLAUDE_PROJECT_DIR="$work_directory/no-project"
+unset AI_ENGINEERING_HOOK_GATES
 
 passed=0
 failed=0
@@ -165,9 +166,69 @@ output="$("$scripts/run-gate.sh" fast "$risky_repository")"; exit_code=$?
 expect_equal "run-gate: high-impact gate command is refused" 5 "$exit_code"
 expect_contains "run-gate: refusal verdict" "GATE fast: REFUSED" "$output"
 
+# Regression (F2): with a trusted config ref, a committed change cannot define the gate
+# that certifies it, and any change to that gate is surfaced in the verdict line.
+certify_repository="$(new_repository certify-repo main)"
+mkdir -p "$certify_repository/.agents"
+printf '%s\n' '{ "full": "exit 1" }' >"$certify_repository/.agents/gates.json"
+commit_all "$certify_repository" "base gate"
+git -C "$certify_repository" checkout -q -b contribution
+printf '%s\n' '{ "full": "true" }' >"$certify_repository/.agents/gates.json"
+commit_all "$certify_repository" "contribution weakens its own gate"
+output="$("$scripts/run-gate.sh" full "$certify_repository" main)"; exit_code=$?
+expect_equal "run-gate: change cannot weaken the gate that certifies it" 1 "$exit_code"
+expect_contains "run-gate: base gate command is used" "GATE full: FAILED (exit 1) command: exit 1 [gate config: committed at main;" "$output"
+expect_contains "run-gate: modified gate is surfaced" "THIS CHANGE MODIFIES THE \"full\" GATE - review it: true" "$output"
+output="$("$scripts/run-gate.sh" full "$certify_repository")"; exit_code=$?
+expect_equal "run-gate: without a config ref HEAD is used" 0 "$exit_code"
+git -C "$certify_repository" checkout -q main
+output="$("$scripts/run-gate.sh" full "$certify_repository" main)"; exit_code=$?
+expect_contains "run-gate: unchanged gate is attributed to the config ref" "[gate config: committed at main]" "$output"
+case "$output" in *MODIFIES*) fail "run-gate: unchanged gate reported as modified" ;; *) pass ;; esac
+
+git -C "$certify_repository" checkout -q -b gate-added-by-change
+git -C "$certify_repository" rm -q .agents/gates.json
+commit_all "$certify_repository" "no gates at base"
+git -C "$certify_repository" checkout -q -b adds-own-gate
+mkdir -p "$certify_repository/.agents"
+printf '%s\n' '{ "full": "true" }' >"$certify_repository/.agents/gates.json"
+commit_all "$certify_repository" "change adds its own gate"
+output="$("$scripts/run-gate.sh" full "$certify_repository" gate-added-by-change)"; exit_code=$?
+expect_equal "run-gate: gate added only by the change is not configured" 3 "$exit_code"
+expect_contains "run-gate: added gate is surfaced" "THIS CHANGE MODIFIES THE \"full\" GATE" "$output"
+git -C "$certify_repository" checkout -q gate-added-by-change
+mkdir -p "$certify_repository/.agents"
+printf '%s\n' '{ "full": "true" }' >"$certify_repository/.agents/gates.json"
+output="$("$scripts/run-gate.sh" full "$certify_repository" gate-added-by-change)"; exit_code=$?
+expect_equal "run-gate: uncommitted gate never stands in for the config ref" 3 "$exit_code"
+output="$("$scripts/run-gate.sh" full "$certify_repository" no-such-ref)"; exit_code=$?
+expect_equal "run-gate: unknown config ref is an error" 4 "$exit_code"
+
 # ---------------------------------------------------------------- gate-fast (SubagentStop)
 stop_input() { jq -n --arg id "$1" --arg cwd "$2" '{hook_event_name: "SubagentStop", agent_id: $id, agent_type: "ai-engineering:backend", cwd: $cwd}'; }
-run_stop_hook() { stop_input "$1" "$2" | "$scripts/gate-fast.sh" 2>"$work_directory/stderr"; }
+run_stop_hook() { stop_input "$1" "$2" | AI_ENGINEERING_HOOK_GATES=1 "$scripts/gate-fast.sh" 2>"$work_directory/stderr"; }
+
+# Regression (F1): by default the hook never executes project code. Reproduces the
+# reported path: a trusted committed gate command runs a script the agent edited.
+hook_repository="$(new_repository hook-repo main)"
+mkdir -p "$hook_repository/.agents" "$hook_repository/scripts"
+printf '%s\n' '{ "fast": "bash scripts/test.sh" }' >"$hook_repository/.agents/gates.json"
+printf '%s\n' 'exit 0' >"$hook_repository/scripts/test.sh"
+commit_all "$hook_repository" "trusted gate"
+printf 'touch "%s"\nexit 1\n' "$work_directory/hook-executed" >"$hook_repository/scripts/test.sh"
+for opt_in_value in unset 0 true yes; do
+  if [ "$opt_in_value" = unset ]; then
+    stdout="$(stop_input agent-g "$hook_repository" | "$scripts/gate-fast.sh" 2>"$work_directory/stderr")"; exit_code=$?
+  else
+    stdout="$(stop_input agent-g "$hook_repository" | AI_ENGINEERING_HOOK_GATES="$opt_in_value" "$scripts/gate-fast.sh" 2>"$work_directory/stderr")"; exit_code=$?
+  fi
+  expect_equal "gate-fast: AI_ENGINEERING_HOOK_GATES=$opt_in_value lets the agent stop" 0 "$exit_code"
+  expect_equal "gate-fast: AI_ENGINEERING_HOOK_GATES=$opt_in_value is silent" "" "$stdout$(cat "$work_directory/stderr")"
+  if [ -e "$work_directory/hook-executed" ]; then fail "gate-fast: AI_ENGINEERING_HOOK_GATES=$opt_in_value executed project code"; else pass; fi
+done
+run_stop_hook agent-g "$hook_repository" >/dev/null; exit_code=$?
+expect_equal "gate-fast: explicit opt-in runs the gate" 2 "$exit_code"
+if [ -e "$work_directory/hook-executed" ]; then pass; else fail "gate-fast: explicit opt-in did not run the gate"; fi
 
 stdout="$(run_stop_hook agent-a "$gate_repository")"; exit_code=$?
 expect_equal "gate-fast: first failure blocks" 2 "$exit_code"

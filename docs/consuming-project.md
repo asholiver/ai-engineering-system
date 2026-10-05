@@ -56,4 +56,9 @@ Limits: a marketplace `ref` can be a branch or tag but not a commit SHA, and tag
   "externalReview": null
 }
 ```
-`fast` runs automatically whenever an implementation agent finishes, so keep it to seconds. `full` runs before review. Commands run with `bash -c` from the repository root, outside Claude Code's permission checks and sandbox. Gates use the committed file (uncommitted edits are ignored and reported); commands containing high-impact operations are refused. See [external-review.md](external-review.md) for `externalReview`.
+`fast` runs whenever an implementation agent finishes, so keep it to seconds. `full` runs before review. The main session runs gates through the Bash tool with `bash -c` from the repository root, so your permission rules and sandbox apply. Gates use the committed file (uncommitted edits are ignored and reported); during review the full gate is read from the base ref. Commands containing high-impact operations are refused. See [external-review.md](external-review.md) for `externalReview`.
+
+Every gate executes the project's code with the privileges of whoever runs it; see the [trust boundary](architecture.md#trust-boundary-for-project-code).
+
+### Optional: hook-run fast gate
+Setting `AI_ENGINEERING_HOOK_GATES=1` in the environment that launches Claude Code makes a `SubagentStop` hook run the fast gate inside each implementation agent's run, giving it up to 2 automatic fix attempts. Hooks run **outside** Claude Code's permission checks, auto-mode classifier and sandbox, so this executes the agent's working tree, including uncommitted edits, unprompted with your full credentials and network access. Use it only where the host is itself isolated or the code is trusted. Set it in your own environment, not in committed project settings.

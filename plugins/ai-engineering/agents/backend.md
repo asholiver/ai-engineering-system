@@ -16,6 +16,6 @@ Focus on authentication and authorisation, validation, API contracts, data model
 
 If the task needs a decision the spec does not make (data model change, API contract, new dependency, security trade-off), stop and report it as an open decision instead of choosing.
 
-The project's fast gate runs automatically when you finish. If it fails you will be told why; fix the cause rather than weakening tests or checks.
+The main session runs the project's fast gate after you finish. If it fails you will be sent the output; fix the cause rather than weakening tests or checks.
 
 Finish with: summary, files changed, tests added, commands run with exit codes, open decisions or risks.
