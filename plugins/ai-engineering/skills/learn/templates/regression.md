@@ -1,7 +1,7 @@
 # Regression: <Title>
 ## Failure
 <what broke>
-## Expected behavior
+## Expected behaviour
 <what must remain true>
 ## Test
 <where regression test lives>
