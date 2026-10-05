@@ -117,7 +117,7 @@ Important checks are enforced by plugin hooks rather than left to instructions:
 
 Each implementation agent's work is checked by the project's fast quality gate when it finishes, with a bounded number of fix rounds before escalation. The delivery workflow runs the gate through Claude Code's Bash tool, so your permission rules and sandbox still apply, and a script reports the verdict.
 
-Gate and review commands are read from the committed project configuration. During review, the full gate and the external reviewer come from the base branch, so a change can't define the checks that certify it.
+Implementation checks read gate commands from the committed project configuration, falling back to the uncommitted file, with a warning, only while none is committed. During review, the full gate and the external reviewer come from the base branch, so a change can't define the checks that certify it.
 
 **The plugin is not an isolation boundary.** Running a gate, test or build executes the project's code with your privileges, so a harmless-looking `npm test` runs whatever an untrusted change contains. Run untrusted code only in an isolated environment with scoped or no credentials and appropriate network controls. [The architecture document](docs/architecture.md#trust-boundary-for-project-code) sets out the trust boundary.
 
@@ -256,7 +256,7 @@ It never overwrites existing files without showing you the change first, and it 
 
 Until `v0.2.0` is tagged, the pinned marketplace entry can't resolve. When testing from a local checkout, decline that settings step or expect Claude Code to report that the marketplace or plugin can't be found.
 
-Review and commit what it creates: the gates use the committed `.agents/gates.json`, and the external review command is read from the base branch.
+Review and commit what it creates. Until `.agents/gates.json` is committed, implementation checks use the uncommitted file with a warning, and review reads the full gate and the external review command only from the base branch.
 
 ### Start a piece of work
 
