@@ -299,3 +299,9 @@ The aim of this project is to give agents enough autonomy to be genuinely useful
 A good result isn't simply that the agent produced working code quickly.
 
 It's that the right thing was built, the implementation fits the wider system, important claims were verified, unintended consequences were considered and useful knowledge survives for the next piece of work.
+
+## About
+
+Built by **[Ashley Oliver](https://www.linkedin.com/in/ashleyioliver/), Senior Product Engineer**.
+
+I build software products and explore how AI-assisted engineering can become more reliable, maintainable and effective in real-world development.
