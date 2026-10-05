@@ -1,0 +1,2 @@
+# Scalability
+Design beyond the smallest working load. Avoid unbounded memory, queries, results, fan-out, retries, queues, request sizes, external calls, transaction duration, and cache size. Use pagination, indexes, batching, bounded concurrency, idempotency, rate limiting, backpressure, timeouts, and bounded retries where appropriate. Consider connection pools, lock contention, retry storms, duplicate requests, restarts, deploys during traffic, and downstream failures. A design that works for 5 concurrent requests is not automatically acceptable for 100,000+.
