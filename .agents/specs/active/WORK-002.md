@@ -38,8 +38,9 @@ Included:
    - Tokens expire (for example 30 minutes, same session) and are consumed on use.
    - If the event is unavailable on the running Claude Code version, owner-only transitions fail closed with an explanation. They never fall back to conversation.
 4. **One new human-only command:** `/ai-engineering:approve <WORK-ID> [spec | accept <finding-id> | defer <finding-id> | tier <increment-id> <0|1|2> | revoke]` with `disable-model-invocation: true` (D2). `/ai-engineering:deliver <WORK-ID>` authorises, or resumes a paused item. A scope extension means amending the spec, then `approve`, then `deliver`.
-   - `accept` records acceptance or waiver of a finding's risk. `defer` records an owner decision to defer a finding to later work. Each sub-action corresponds to an owner-only transition in the table in Scope item 2, and each owner-only transition has a sub-action.
-   - **Approval and delivery authorisation stay distinct.** An `approve` token can never authorise or resume delivery. A `deliver` token can never approve a spec, accept risk, lower a tier or revoke. `deliver` on an item that isn't `approved` (or `paused`) is refused.
+   - `accept` records acceptance or waiver of a finding's risk. `defer` records an owner decision to defer a finding to later work. Each `approve` sub-action corresponds to exactly one of the owner-only transitions assigned to `approve` in the table in Scope item 2: approving a spec, accepting or waiving risk, deferring a finding, lowering a tier and revoking. Each of those transitions has a sub-action.
+   - `/ai-engineering:deliver` performs the owner-only delivery transitions in that table: `approved → authorised → delivering`, and resuming a paused item. These transitions have no `approve` sub-action.
+   - **Approval and delivery authorisation stay distinct.** An `approve` token can never authorise or resume delivery. A `deliver` token can never approve a spec, accept or waive risk, defer a finding, lower a tier or revoke. `deliver` on an item that isn't `approved` (or `paused`) is refused.
 5. **`/plan` changes.**
    - New spec template: intent only, plus three new sections:
      - Increments, with the proposed tier and reasons for each;
@@ -205,7 +206,7 @@ Deterministic cases in `tests/run.sh`:
   - minted only for `approve` and `deliver` expansions of plugin commands;
   - not minted for other commands, or for plain prompt text containing "/ai-engineering:deliver" or "approved";
   - an expired, reused, wrong-work-id or wrong-session token is refused;
-  - an `approve` token can't authorise or resume delivery, and a `deliver` token can't approve, accept risk, lower a tier or revoke;
+  - an `approve` token can't authorise or resume delivery, and a `deliver` token can't approve, accept or waive risk, defer a finding, lower a tier or revoke;
   - every `approve` sub-action (`spec`, `accept`, `defer`, `tier`, `revoke`) maps to its owner-only transition, and `defer` without a token is refused;
   - an owner-only transition without a token is refused.
 - **Intent/implementation boundary:**
