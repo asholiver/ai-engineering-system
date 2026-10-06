@@ -15,7 +15,14 @@ Governing principle: agents have autonomy over implementation, not authority ove
   - `.agents/specs/active/WORK-NNN.state.json` holds the lifecycle status, approval, delivery authority and policy, increments, decisions, planned owner actions, tiers and the review ledger.
   - Only a single transition script changes it.
   - The spec (`WORK-NNN.md`) holds intent only. The append-only narrative goes in `WORK-NNN.log.md`, which isn't loaded by default.
-- **Lifecycle:** `proposed → approved → authorised → delivering → (blocked | paused) → done → archived`.
+- **Lifecycle** (the normative transition table is in `WORK-002`):
+  ```text
+  proposed → approved → authorised → delivering → done → archived
+  delivering → blocked → delivering
+  authorised | delivering | blocked → paused → (owner resumes) → the status it was paused from
+  any change to the spec content → proposed
+  ```
+  Only `delivering` leads to `done`. `blocked` and `paused` never lead directly to `done`.
   - Approving and authorising are owner-only transitions.
   - So are accepting or waiving risk, lowering a tier, extending scope and revoking.
   - Approval binds a spec content hash. Any change to the spec returns the item to `proposed`.

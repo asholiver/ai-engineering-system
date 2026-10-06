@@ -57,7 +57,11 @@ Included:
    - `absent`: no gate at HEAD or at base.
    - `provisional`: defined at HEAD but not at base. Verdicts are labelled `PROVISIONAL`, drive fix loops, and never certify.
    - `trusted`: defined at base, and HEAD has the same definition and `definedBy` content.
-   - `proposed-change`: base and HEAD differ in the gate definition or any `definedBy` file. The base definition certifies. The difference is printed verbatim in the readiness report, and the increment is tier 2.
+   - `proposed-change`: base and HEAD differ in the gate definition or any `definedBy` file. The difference is printed verbatim in the readiness report, and the increment is tier 2. What happens next depends on which part changed:
+     - **Only the gate definition in `.agents/gates.json` differs, and every `definedBy` file is identical to base:** the base definition certifies, because the change can't alter the command that checks it.
+     - **Any `definedBy` file differs from base** (modified, added, deleted or renamed): certify mode produces the explicit non-certifying verdict `NOT CERTIFIABLE (definedBy changed: <paths>)`. It never reports `PASSED`, whatever the command's exit code, because the change has altered the implementation of the gate that would check it.
+       - The gate may still run as a labelled non-certifying check to guide fixes.
+       - Readiness follows the gate-change route in item 5: structural evidence, safe canaries or the review fallback, external review, and owner acceptance at merge. The change becomes trusted only after it is merged into the base.
 
    The v0.2 working-tree fallback and the `CLAUDE_PROJECT_DIR` lookup are removed. An uncommitted gate file is `absent`, with a hint to commit it.
 5. **Bootstrap verification** for an increment whose gates are `provisional`, or that changes gate definitions:
@@ -76,7 +80,8 @@ Included:
      The step must fail. Canary worktrees are never committed to the work branch, pushed or left behind.
    - **No canary** for steps that touch databases, infrastructure, credentials, networks or external resources. Those get structural verification plus explicit review evidence. Real data or resources are never mutated to make a gate fail.
    - Evidence (step, fixture description, exit code, worktree base SHA) is recorded in the ledger.
-   - Readiness for a bootstrap increment is `READY FOR BOOTSTRAP ACCEPTANCE` only with structural, canary-or-fallback and external evidence, and it names owner acceptance at merge as the trust boundary. The gates become `trusted` only once merged to the base.
+   - The same route applies to an increment that changes any `definedBy` file of a trusted gate.
+   - Readiness for a bootstrap or gate-change increment is `READY FOR BOOTSTRAP ACCEPTANCE` only with structural, canary-or-fallback and external evidence, and it names owner acceptance at merge as the trust boundary. The gates become `trusted` only once merged to the base.
 6. **Certification.**
    - Certifying runs need a committed, clean tree (no modified, staged or untracked non-ignored files) with HEAD equal to the head being certified. Otherwise the verdict is `NOT CERTIFIABLE (dirty tree)` and never `PASSED`.
    - `prelude` runs first.
@@ -101,13 +106,36 @@ Included:
    Internal reviews are briefed with the range since the last reviewed head and cover only that delta, unless the classifier reports a tier increase that needs a wider look.
 9. **External evidence adapters** (provider-neutral). The adapter configuration is read from the base ref.
    - **Invocation:** the adapter receives base SHA, head SHA, optional PR number and spec path.
-   - **Output:** strict JSON:
-     ```
-     { provider, status: complete|pending|none|error,
-       reviewedRanges: [{base, head}],
-       findings: [{id, severity, actionable, resolved, path, line, summary, url}] }
-     ```
-     It is validated against the schema and treated as untrusted data.
+   - **Output:** one strict JSON object, validated against the schema and treated as untrusted data.
+     - Schema notation (explanatory only, not JSON; `a|b` lists the allowed values):
+       ```text
+       { provider, status: complete|pending|none|error,
+         reviewedRanges: [{base, head}],
+         findings: [{id, severity, actionable, resolved, path, line, summary, url}] }
+       ```
+     - Valid JSON example of complete evidence with one unresolved actionable finding (illustrative values):
+       ```json
+       {
+         "provider": "coderabbit",
+         "status": "complete",
+         "reviewedRanges": [
+           { "base": "1111111111111111111111111111111111111111", "head": "2222222222222222222222222222222222222222" }
+         ],
+         "findings": [
+           {
+             "id": "thread-1",
+             "severity": "minor",
+             "actionable": true,
+             "resolved": false,
+             "path": "src/example.ts",
+             "line": 42,
+             "summary": "Example finding text",
+             "url": "https://github.com/example/repo/pull/1#discussion_r1"
+           }
+         ]
+       }
+       ```
+     - The implementation adds a fixture test proving that this example parses and validates.
    - **Legacy command:** the v0.2 `externalReview` command string is kept unchanged as the `command` adapter. Exit 0 or 1 maps to complete evidence for the exact head, with no findings or with one blocking finding carrying the truncated text. Other exit codes are `error`, and the old environment variables are still provided.
    - **`provider`** must differ from the implementation provider. Claude reviewing Claude never counts, and internal reviews never satisfy the external requirement.
    - **Reusable adapter** `github-pr-reviews` (D6), shipped with the plugin:
@@ -254,6 +282,15 @@ Deterministic cases in `tests/run.sh`:
 - **`riskPaths` and `copyPaths`:** read from base; values changed on the branch are ignored for this increment's classification.
 - **Effective tier:** max rule; an owner-lowered tier is still floored; an agent attempt to lower is refused.
 - **Gate states:** absent, provisional, trusted and proposed-change, each with the correct verdict label. Provisional never yields a certifying `PASSED`. A `definedBy` change gives proposed-change and tier 2, and the diff is shown.
+- **`definedBy` self-certification regression** (hermetic temporary repository, no external effects):
+  - Base `gates.json` has `"full": "./gate-check.sh"` with `"definedBy": ["gate-check.sh"]`. The base `gate-check.sh` exits 1.
+  - The change replaces `gate-check.sh` with `true` (exit 0) and is committed on a clean tree.
+  - Certify mode against base → `NOT CERTIFIABLE (definedBy changed: gate-check.sh)`, never `PASSED`, with a non-zero exit, and readiness is `NO`.
+  - The same for a deleted, renamed or newly added `definedBy` file.
+  - **Controls:**
+    - a change that touches no `definedBy` file and passes → certifying `PASSED`;
+    - a change that edits only the `gates.json` command while `definedBy` files are unchanged → the base command is used and the change is shown;
+    - a non-certifying run in implementation mode is labelled and never recorded as certifying in the ledger.
 - **Removed fallback:** an uncommitted `gates.json` → `absent`/`NOT CONFIGURED`, with a hint.
 - **Structural verifier:** `|| true`, `set +e`, a masked pipe, and a package script without its manifest in `definedBy` are each flagged. A clean explicit gate passes.
 - **Canaries:** a fixture project with a test-runner gate fails on the canary and passes without it. The canary worktree is removed afterwards, and the work branch and remotes are untouched. A step marked as external gets no canary and requires the review-evidence fallback.
@@ -293,7 +330,7 @@ End-to-end scenario in a scratch project (self-development protocol, evidence in
 ## Acceptance criteria
 1. The classifier is deterministic, reads project configuration only from base, and raises on uncertainty. It never puts `.agents/**` (other than the active item's bookkeeping) in tier 0, and never puts instruction-bearing files in tier 0; they are tier 1 or 2 by what they can influence (D4 regression cases pass).
 2. Effective tier follows the max rule. Agents can't lower it, and owner lowering is recorded and floored.
-3. Gate trust states are computed and labelled correctly. Provisional and proposed-change definitions never certify themselves.
+3. Gate trust states are computed and labelled correctly. Provisional and proposed-change definitions never certify themselves. When any `definedBy` file differs from base, certify mode returns `NOT CERTIFIABLE`, never `PASSED` (regression fixture above).
 4. Bootstrap acceptance requires structural evidence, safe canaries (or the structural-plus-review fallback), external review and owner acceptance at merge. No real resource is touched.
 5. Certification refuses dirty trees, and `prelude` is applied.
 6. The gate ledger labels reruns after failure, and readiness requires a recorded cause.

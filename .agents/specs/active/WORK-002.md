@@ -22,7 +22,7 @@ Included:
    | accept or waive risk, defer a finding, lower a tier, revoke | owner | `approve` token with that sub-action |
    | raise a tier, record a finding fixed or invalid (non-security), record gate or review evidence | coordinator | none |
    | pause | owner or coordinator | none (pausing is always safe) |
-   | resume a paused item | owner | `deliver` token |
+   | resume a paused item | owner | `deliver` token; returns the item to the status it was paused from |
    | delivering → done | coordinator | every increment merged (observed through Git) |
    | any change to the spec content | anyone | status returns to `proposed`, and delivery stops at the next transition check |
 
@@ -37,7 +37,8 @@ Included:
    - The hook never blocks, never prompts and emits no output beyond optional debug logging.
    - Tokens expire (for example 30 minutes, same session) and are consumed on use.
    - If the event is unavailable on the running Claude Code version, owner-only transitions fail closed with an explanation. They never fall back to conversation.
-4. **One new human-only command:** `/ai-engineering:approve <WORK-ID> [spec | accept <finding-id> | tier <increment-id> <0|1|2> | revoke]` with `disable-model-invocation: true` (D2). `/ai-engineering:deliver <WORK-ID>` authorises, or resumes a paused item. A scope extension means amending the spec, then `approve`, then `deliver`.
+4. **One new human-only command:** `/ai-engineering:approve <WORK-ID> [spec | accept <finding-id> | defer <finding-id> | tier <increment-id> <0|1|2> | revoke]` with `disable-model-invocation: true` (D2). `/ai-engineering:deliver <WORK-ID>` authorises, or resumes a paused item. A scope extension means amending the spec, then `approve`, then `deliver`.
+   - `accept` records acceptance or waiver of a finding's risk. `defer` records an owner decision to defer a finding to later work. Each sub-action corresponds to an owner-only transition in the table in Scope item 2, and each owner-only transition has a sub-action.
    - **Approval and delivery authorisation stay distinct.** An `approve` token can never authorise or resume delivery. A `deliver` token can never approve a spec, accept risk, lower a tier or revoke. `deliver` on an item that isn't `approved` (or `paused`) is refused.
 5. **`/plan` changes.**
    - New spec template: intent only, plus three new sections:
@@ -55,14 +56,17 @@ Included:
 
    Production deployment can never be expressed in policy: validation rejects it, and the guard's `production-deploy` class always asks.
 7. **Guard integration for delivery policy.** This is the only guard change in this spec. It is an isolated commit with its own security review, built on WORK-001's classes.
+   - **Delivery authority is bound to the approved spec content, not to a status value.** At the moment the guard decides on any deploy command, it computes the SHA-256 of the spec file's current content itself. It never trusts a stored "current" hash. It compares that value with both `approval.specSha256` and `delivery.specSha256`.
+     - If either differs, or the spec file can't be read, the policy grants nothing and the command asks. This holds even if the state still says `delivering`, and even before any later lifecycle transition notices the change.
    - **`ephemeral-deploy`:** produces no decision when all of these hold:
+     - the freshly computed spec hash matches both recorded hashes;
      - the command is alone (a context prefix is allowed);
      - exactly one work item in the repository is `delivering`;
      - its active increment is listed in `ephemeralDeploy`;
      - its state was written by the transition script, not edited by a tool (tool writes are denied by WORK-001).
 
      Otherwise it asks.
-   - **`persistentEnvironments`:** produces no decision only on an exact match of an approved `exactCommand`, run alone.
+   - **`persistentEnvironments`:** produces no decision only on an exact match of an approved `exactCommand`, run alone, and only when the freshly computed spec hash matches both recorded hashes.
    - Anything else in a deploy class still asks.
 8. **`/deliver` rewrite.**
    - Preconditions read state, not prose.
@@ -202,6 +206,7 @@ Deterministic cases in `tests/run.sh`:
   - not minted for other commands, or for plain prompt text containing "/ai-engineering:deliver" or "approved";
   - an expired, reused, wrong-work-id or wrong-session token is refused;
   - an `approve` token can't authorise or resume delivery, and a `deliver` token can't approve, accept risk, lower a tier or revoke;
+  - every `approve` sub-action (`spec`, `accept`, `defer`, `tier`, `revoke`) maps to its owner-only transition, and `defer` without a token is refused;
   - an owner-only transition without a token is refused.
 - **Intent/implementation boundary:**
   - (a) A UserPromptExpansion-free prompt "we also need to update the README" mints nothing. A `proposed` item stays `proposed`, and `deliver` preconditions refuse it.
@@ -211,6 +216,8 @@ Deterministic cases in `tests/run.sh`:
   - `vercel deploy` → none when delivering and the increment is listed;
   - → ask when the item is `authorised` but not `delivering`, when the increment isn't listed, when two items are delivering, or when the command is compound with another effectful command;
   - `vercel --prod` → always ask;
+  - with the item still `delivering` and the increment listed, but the spec file edited (committed or not) since approval → `vercel deploy` asks, and a persistent exact match asks. The state is left untouched, proving the check happens at the deploy decision itself;
+  - a missing or unreadable spec file → ask;
   - a persistent exact match → none; a near-miss → ask.
 - **Import:** v0.2 spec fixtures (Draft, Approved, legacy state sections, Approved with a partially delivered history):
   - the resulting state is never `authorised` or `delivering`;
@@ -244,7 +251,7 @@ End-to-end scenarios run deliberately in a scratch project, using unreleased sou
 9. Parallel worktrees are the default, and the opt-out is documented.
 10. Specialist handoffs exclude the log and legacy state sections.
 11. Stalls are recovered once automatically. External waits run in the background, authenticated, validated and bounded.
-12. Ephemeral preview deployment runs autonomously only under the conditions in Scope item 7. Production always asks.
+12. Ephemeral preview deployment runs autonomously only under the conditions in Scope item 7, including a spec hash computed fresh at the deploy decision that matches the approved hash. A spec changed since approval never keeps deploy authority, whatever the recorded status. Production always asks.
 13. v0.2 work items import without fabricated authority.
 14. The session banner shows the active plugin version and root.
 15. `scripts/check.sh` passes.

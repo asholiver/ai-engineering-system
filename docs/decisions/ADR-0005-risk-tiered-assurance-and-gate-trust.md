@@ -41,6 +41,8 @@ v0.2 applied the same assurance depth to every change.
   - Certifying gates are read only from the base ref.
   - Provisional gates guide fix loops but never certify.
   - A change never certifies its own gate definitions. That includes the files listed in `definedBy`, whose changes put the increment in tier 2 and are shown verbatim.
+  - If any `definedBy` file differs from base, certify mode returns an explicit `NOT CERTIFIABLE` verdict, never `PASSED`. The increment then follows the gate-change route: structural evidence, safe canaries or the review fallback, external review, and owner acceptance at merge.
+  - Only when nothing in `definedBy` changed does the base gate definition certify the change.
   - **Bootstrap trust** requires all of:
     - structural verification;
     - safe deterministic canaries, where the gate type supports a controlled failure without touching real data, infrastructure, credentials or external resources (otherwise structural verification plus explicit review evidence);
