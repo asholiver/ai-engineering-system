@@ -1,0 +1,5 @@
+{
+  "fast": "tests/run.sh",
+  "full": "scripts/check.sh",
+  "externalReview": null
+}
