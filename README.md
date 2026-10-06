@@ -216,31 +216,32 @@ Each agent's `model` field is the single source of routing configuration. Model 
 - `git`, `bash` and [`jq`](https://jqlang.org/) on the `PATH`; the hooks are bash scripts
 - The project you apply it to should be a git repository
 
-### Try it from a local checkout (available now)
+### Install
 
-v0.2 isn't released yet, so the supported path today is loading the plugin directly from a local checkout of the v0.2 source, for development and testing only. (`main` currently holds v0.1, which has no plugin.)
+Installation has two steps, done once rather than every session.
 
-Start Claude Code in your project with the plugin loaded for that session only:
-
-```text
-cd /path/to/your-project
-claude --plugin-dir /path/to/ai-engineering-system/plugins/ai-engineering
-```
-
-### Install from the marketplace (after the v0.2.0 release)
-
-This repository is also a Claude Code marketplace (`ai-engineering-system`) containing one plugin (`ai-engineering`). Once v0.2 is merged to `main` and tagged `v0.2.0`, the normal installation will be:
+1. **Register the marketplace.** This repository is a Claude Code marketplace named `ai-engineering-system`. Registering it records where to fetch the plugin from, pinned to a release tag. It doesn't enable anything yet.
+2. **Install the plugin.** This fetches the `ai-engineering` plugin from that marketplace and enables it.
 
 ```text
 claude plugin marketplace add asholiver/ai-engineering-system@v0.2.0
 claude plugin install ai-engineering@ai-engineering-system
 ```
 
-This doesn't work yet: `main` still holds v0.1 and the `v0.2.0` tag doesn't exist.
+The example pins `v0.2.0`. Releases are tagged `v<version>` and listed in the [changelog](versions/CHANGELOG.md), so substitute the release you want.
 
-### Apply it to a project
+The marketplace registration applies to every project on your machine. The plugin's install scope decides where it is enabled:
 
-In your project, run:
+- `--scope user` (the default): enabled in every project you open. Its session-start standards and command guards then apply everywhere, not only in projects you've set up.
+- `--scope local`: enabled only in the project you run the command from, and only for you.
+
+Either way it persists across sessions until you uninstall or disable it. Install changes take effect in a new session or after `/reload-plugins`. Auto-update is off for this marketplace, so you stay on the pinned release until you upgrade deliberately; see [Updating](docs/consuming-project.md#updating).
+
+Opening this repository's source doesn't load the plugin. The `/ai-engineering:*` commands are available only in sessions where the plugin is installed and enabled, or loaded with `--plugin-dir`.
+
+### Set up each project
+
+In each project that should use the system, run this once:
 
 ```text
 /ai-engineering:setup
@@ -251,12 +252,12 @@ It never overwrites existing files without showing you the change first, and it 
 - the `.agents/` knowledge layout shown above;
 - `.agents/gates.json`, after confirming your `fast` and `full` gate commands with you (`externalReview` stays empty until you configure one);
 - a project-specific `AGENTS.md`, and a `CLAUDE.md` that imports it so it keeps loading;
-- `.claude/settings.json` entries that register the marketplace pinned to the plugin's release tag, with auto-update off, and enable the plugin for teammates once they trust the folder;
+- `.claude/settings.json` entries that enable the plugin for everyone who clones the project once they trust the folder, and register the marketplace pinned to the installed plugin's release tag, with auto-update off, on machines that don't already have a marketplace named `ai-engineering-system`. A machine that already has one keeps its existing registration, which may point at a different release; check with `/plugin`;
 - optionally, the worktree setting needed for parallel delivery.
 
-Until `v0.2.0` is tagged, the pinned marketplace entry can't resolve. When testing from a local checkout, decline that settings step or expect Claude Code to report that the marketplace or plugin can't be found.
-
 Review and commit what it creates. Until `.agents/gates.json` is committed, implementation checks use the uncommitted file with a warning, and review reads the full gate and the external review command only from the base branch.
+
+After setup, nothing else needs installing: open the project in Claude Code and use the `/ai-engineering:*` commands below.
 
 ### Start a piece of work
 
@@ -271,11 +272,31 @@ Planning ends with a work specification you explicitly approve. Delivery stops a
 
 Multiple unrelated work streams can run in the same repository, each with its own specification and state. Parallel implementation uses git worktree isolation once the project opts in.
 
+### Develop or test unreleased changes
+
+To try source that hasn't been released, load the plugin from a local checkout for a single session:
+
+```text
+cd /path/to/a-test-project
+claude --plugin-dir /path/to/ai-engineering-system/plugins/ai-engineering
+```
+
+For that session the local copy replaces any installed `ai-engineering` plugin, unless managed settings list `ai-engineering` under `enabledPlugins`. In that case the local copy isn't loaded, the installed release keeps running, and Claude Code reports `--plugin-dir copy of "ai-engineering" ignored: plugin is locked by managed settings`. Nothing is installed or recorded, so the next session without the flag goes back to the installed release.
+
+### Developing this repository
+
+Work on the system itself is governed by an installed, released version, not by the source being edited:
+
+1. Install a released version (`--scope local` in this repository is enough).
+2. Develop the next version in this repository with that release active, so the workflow guiding the work doesn't change halfway through it.
+3. Test the changed plugin in a separate session with `--plugin-dir`, ideally against a test project.
+4. Release it by following [CONTRIBUTING.md](CONTRIBUTING.md), then upgrade the installed version.
+
 ## Status
 
 **v0.1** established the reference architecture: principles, responsibilities, guardrails, workflows, knowledge model and model-routing approach.
 
-**v0.2** implements the Claude Code integration. The implementation is complete locally and passes the repository's checks (plugin validation, automated hook tests and context budgets). It hasn't yet been independently reviewed, merged, tagged or released, so it isn't ready for general use beyond local testing. Known limitations and open items are listed in the [architecture document](docs/architecture.md) and the [changelog](versions/CHANGELOG.md).
+**v0.2** implements the Claude Code integration as a plugin, released as `v0.2.0`. Each release is tagged `v<version>`; the [changelog](versions/CHANGELOG.md) records what it contains, and known limitations and open items are listed in the [architecture document](docs/architecture.md).
 
 ## Repository structure
 
