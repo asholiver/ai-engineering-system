@@ -252,7 +252,7 @@ It never overwrites existing files without showing you the change first, and it 
 - the `.agents/` knowledge layout shown above;
 - `.agents/gates.json`, after confirming your `fast` and `full` gate commands with you (`externalReview` stays empty until you configure one);
 - a project-specific `AGENTS.md`, and a `CLAUDE.md` that imports it so it keeps loading;
-- `.claude/settings.json` entries that register the marketplace pinned to the installed plugin's release tag, with auto-update off, and enable the plugin for everyone who clones the project once they trust the folder;
+- `.claude/settings.json` entries that enable the plugin for everyone who clones the project once they trust the folder, and register the marketplace pinned to the installed plugin's release tag, with auto-update off, on machines that don't already have a marketplace named `ai-engineering-system`. A machine that already has one keeps its existing registration, which may point at a different release; check with `/plugin`;
 - optionally, the worktree setting needed for parallel delivery.
 
 Review and commit what it creates. Until `.agents/gates.json` is committed, implementation checks use the uncommitted file with a warning, and review reads the full gate and the external review command only from the base branch.
@@ -281,7 +281,7 @@ cd /path/to/a-test-project
 claude --plugin-dir /path/to/ai-engineering-system/plugins/ai-engineering
 ```
 
-For that session the local copy replaces any installed `ai-engineering` plugin. Nothing is installed or recorded, so the next session without the flag goes back to the installed release.
+For that session the local copy replaces any installed `ai-engineering` plugin, unless managed settings list `ai-engineering` under `enabledPlugins`. In that case the local copy isn't loaded, the installed release keeps running, and Claude Code reports `--plugin-dir copy of "ai-engineering" ignored: plugin is locked by managed settings`. Nothing is installed or recorded, so the next session without the flag goes back to the installed release.
 
 ### Developing this repository
 
