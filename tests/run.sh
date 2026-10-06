@@ -393,6 +393,319 @@ none|ai-engineering:backend|$feature_repository/src/app.ts
 none||$feature_repository/src/app.ts
 CASES
 
+# ---------------------------------------------------------------- agent_type policy, authority store, shell-edit hint
+# Table cases are "agent|expected|command". Agents: m main session (no agent_type), b backend,
+# f frontend, p platform, q qa, s security-reviewer, l learning, o another agent type.
+agent_repository="$(new_repository agent-repo feature)"
+mkdir -p "$agent_repository/src" "$agent_repository/.agents/specs/active"
+printf 'x\n' >"$agent_repository/src/app.ts"
+git -C "$agent_repository" add -A && git -C "$agent_repository" -c user.name=test -c user.email=test@example.com commit -q -m files
+agent_name() {
+  case "$1" in
+    m) echo "" ;; b) echo ai-engineering:backend ;; f) echo ai-engineering:frontend ;; p) echo ai-engineering:platform ;;
+    q) echo ai-engineering:qa ;; s) echo ai-engineering:security-reviewer ;; l) echo ai-engineering:learning ;;
+    *) echo ai-engineering:other ;;
+  esac
+}
+agent_input() { jq -n --arg command "${1//\\n/$'\n'}" --arg cwd "$2" --arg agent "$(agent_name "$3")" '{tool_input: {command: $command}, cwd: $cwd} + (if $agent == "" then {} else {agent_type: $agent} end)'; }
+agent_output() { agent_input "$1" "$2" "$3" | "$scripts/guard-bash.sh"; }
+hint_of() { jq -r '.hookSpecificOutput.additionalContext // "none"' 2>/dev/null <<<"$1" | grep . || echo none; }
+
+# Git writes by subagents: denied for specialists, unaffected for the main session and other agents.
+while IFS='|' read -r agent expected command_text; do
+  [ -n "$expected" ] || continue
+  expect_equal "agent policy ($agent): $command_text" "$expected" "$(decision_of "$(agent_output "$command_text" "$agent_repository" "$agent")")"
+done <<'CASES'
+b|deny|git commit -m x
+b|deny|git push -u origin work
+b|deny|git push origin main
+b|none|git status
+b|none|git diff --stat
+m|none|git commit -m x
+m|none|git add . && git commit -m x
+o|none|git commit -m x
+q|deny|git stash
+f|deny|git commit -m x
+p|deny|git commit -m x
+q|deny|git commit -m x
+s|deny|git commit -m x
+l|deny|git commit -m x
+b|none|git log --oneline -5
+b|none|git show HEAD
+b|none|git blame src/app.ts
+b|none|git grep needle
+b|none|git ls-files
+b|none|git rev-parse HEAD
+b|none|git merge-base main HEAD
+b|none|git branch
+b|none|git branch --list
+b|none|git branch -a
+b|none|git branch --show-current
+b|none|git stash list
+b|none|git stash show
+b|none|git tag
+b|none|git tag -l
+b|none|git worktree list
+b|none|git checkout
+b|deny|git add .
+b|deny|git merge other
+b|deny|git rebase main
+b|deny|git reset --hard
+b|deny|git restore src/app.ts
+b|deny|git checkout -- src/app.ts
+b|deny|git checkout other
+b|deny|git checkout -b newbranch
+b|deny|git switch other
+b|deny|git switch -c newbranch
+b|deny|git branch -d old
+b|deny|git branch -D old
+b|deny|git branch -m old new
+b|deny|git branch newbranch
+b|deny|git tag v1
+b|deny|git tag -a v1 -m release
+b|deny|git stash
+b|deny|git stash pop
+b|deny|git cherry-pick abc
+b|deny|git revert abc
+b|deny|git am patch.mbox
+b|deny|git apply change.patch
+b|deny|git worktree add ../other
+b|deny|git worktree remove ../other
+b|deny|git update-ref refs/heads/x HEAD
+b|deny|git gc
+b|deny|git prune
+b|deny|git pull
+b|deny|git -C elsewhere commit -m x
+b|deny|git -c user.name=a commit -m x
+b|deny|git --no-pager add .
+b|deny|bash -c 'git push origin work'
+b|deny|sh -c "git commit -m x"
+b|deny|env git commit -m x
+b|deny|/usr/bin/git add .
+b|deny|GIT add .
+b|deny|'git' "commit" -m x
+b|deny|command git commit -m x
+b|deny|sudo git commit -m x
+b|deny|cd src && git add .
+b|deny|git status && git commit -m x
+b|deny|git status; git add .
+b|deny|echo $(git add .)
+b|deny|(git add .)
+b|deny|for f in a b; do git add $f; done
+b|deny|git log | git commit -F -
+b|deny|git status\ngit add .
+CASES
+reason="$(agent_input 'git commit -m x' "$agent_repository" b | "$scripts/guard-bash.sh" | jq -r '.hookSpecificOutput.permissionDecisionReason')"
+expect_contains "agent policy: reason names the operation" "git commit" "$reason"
+expect_contains "agent policy: reason says the coordinator owns Git" "coordinator owns Git" "$reason"
+expect_contains "agent policy: reason states guardrail limits" "not a sandbox" "$reason"
+
+# Authority store: denied for every caller, reads are not.
+while IFS='|' read -r agent expected command_text; do
+  [ -n "$expected" ] || continue
+  expect_equal "authority store ($agent): $command_text" "$expected" "$(decision_of "$(agent_output "$command_text" "$agent_repository" "$agent")")"
+done <<'CASES'
+m|deny|echo '{}' > .agents/specs/active/WORK-9.state.json
+b|deny|echo '{}' > .agents/specs/active/WORK-9.state.json
+q|deny|echo '{}' > .agents/specs/active/WORK-9.state.json
+l|deny|echo '{}' > .agents/specs/active/WORK-9.state.json
+m|deny|echo x >> .agents/specs/active/WORK-9.state.json
+m|deny|echo x >| .agents/specs/active/WORK-9.state.json
+m|deny|echo x &> .agents/specs/active/WORK-9.state.json
+m|deny|echo x 1> .agents/specs/active/WORK-9.state.json
+m|deny|echo x 2> .agents/specs/active/WORK-9.state.json
+m|deny|echo x >& .agents/specs/active/WORK-9.state.json
+m|deny|> .agents/specs/active/WORK-9.state.json
+m|deny|cat > .agents/specs/active/WORK-9.state.json <<'EOF'\n{}\nEOF
+m|deny|echo x | tee .agents/specs/active/WORK-9.state.json
+m|deny|tee -a .agents/specs/active/WORK-9.state.json < x.json
+m|deny|cp x .agents/specs/active/WORK-9.state.json
+m|deny|cp -t .agents/specs/active x.json .agents/specs/active/WORK-9.state.json
+m|deny|mv x.json .agents/specs/active/WORK-9.state.json
+m|deny|mv .agents/specs/active/WORK-9.state.json /tmp/gone
+m|deny|ln -s x .agents/specs/active/WORK-9.state.json
+m|deny|install x .agents/specs/active/WORK-9.state.json
+m|deny|rsync x .agents/specs/active/WORK-9.state.json
+m|deny|sed -i s/a/b/ .agents/specs/active/WORK-9.state.json
+m|deny|sed -i.bak s/a/b/ .agents/specs/active/WORK-9.state.json
+m|deny|perl -pi -e s/a/b/ .agents/specs/active/WORK-9.state.json
+m|deny|truncate -s 0 .agents/specs/active/WORK-9.state.json
+m|deny|rm .agents/specs/active/WORK-9.state.json
+m|deny|rm -f .agents/specs/active/*.state.json
+m|deny|dd if=x of=.agents/specs/active/WORK-9.state.json
+m|deny|python3 -c "open('.agents/specs/active/WORK-9.state.json','w').write('{}')"
+m|deny|python3 tool.py .agents/specs/active/WORK-9.state.json
+m|deny|node -e "require('fs').writeFileSync('.agents/specs/active/WORK-9.state.json','{}')"
+m|deny|python3 - <<'EOF'\nopen('.agents/specs/active/WORK-9.state.json','w').write('{}')\nEOF
+m|deny|bash -c "echo x > .agents/specs/active/WORK-9.state.json"
+m|deny|cd .agents/specs/active && echo x > WORK-9.state.json
+m|deny|echo x > ./.agents/specs/../specs/active/WORK-9.state.json
+m|deny|echo x > .agents/specs/active//WORK-9.state.json
+m|deny|echo x > "$PWD/.agents/specs/active/WORK-9.state.json"
+m|deny|echo x > .agents/specs/active/nested/dir/WORK-9.state.json
+m|deny|cp x .git/ai-engineering/tokens/t
+m|deny|echo x > .git/ai-engineering/tokens/t
+m|deny|echo x > ../.git/ai-engineering/tokens/t
+m|deny|echo x > /somewhere/store.git/ai-engineering/tokens/t
+m|deny|cd .git && echo x > ai-engineering/tokens/t
+m|deny|rm -rf .git/ai-engineering/tokens
+m|deny|rm -rf .git/ai-engineering
+m|deny|rm .git/ai-engineering/tokens/*
+m|deny|mv .git/ai-engineering/tokens /tmp/tokens
+m|deny|ln -s .git/ai-engineering/tokens elsewhere
+m|deny|python3 -c "open('.git/ai-engineering/tokens/t','w').write('x')"
+b|deny|cp x .git/ai-engineering/tokens/t
+m|none|cat .agents/specs/active/WORK-9.state.json
+m|none|jq . .agents/specs/active/WORK-9.state.json
+m|none|jq .status .agents/specs/active/WORK-9.state.json > /tmp/status.json
+m|none|grep status .agents/specs/active/WORK-9.state.json
+m|none|less .agents/specs/active/WORK-9.state.json
+m|none|cat .git/ai-engineering/tokens/t
+m|none|ls .git/ai-engineering/tokens
+m|none|cp .git/ai-engineering/tokens/t /tmp/copy
+m|none|cp .agents/specs/active/WORK-9.state.json /tmp/copy
+m|none|cat .agents/specs/active/WORK-9.state.json 2>/dev/null
+m|none|cat .agents/specs/active/WORK-9.state.json 2>&1
+m|none|echo x > .agents/specs/active/WORK-9.md
+m|none|echo x > notes/state.json
+m|none|rm .agents/specs/active/WORK-9.md
+CASES
+reason="$(agent_input "echo '{}' > .agents/specs/active/WORK-9.state.json" "$agent_repository" m | "$scripts/guard-bash.sh" | jq -r '.hookSpecificOutput.permissionDecisionReason')"
+expect_contains "authority store: reason names the transition script" "plugin's transition script" "$reason"
+# A deny from the authority store beats a hint, and an unparsable command that names it asks (fallback).
+expect_equal "authority store: unbalanced quote naming the store asks" ask "$(decision_of "$(agent_output "echo 'x > .agents/specs/active/WORK-9.state.json" "$agent_repository" m)")"
+
+# Worktree and separate Git directory: the token store is under the Git common directory.
+store_main="$(new_repository store-main feature)"
+git -C "$store_main" worktree add -q "$work_directory/store-wt" -b store-wt >/dev/null 2>&1
+physical_main="$(cd "$store_main" && pwd -P)"
+mkdir -p "$store_main/.git/ai-engineering/tokens"
+while IFS='|' read -r expected command_text; do
+  [ -n "$expected" ] || continue
+  expect_equal "authority store from a worktree: $command_text" "$expected" "$(decision_of "$(agent_output "$command_text" "$work_directory/store-wt" m)")"
+done <<CASES
+deny|echo x > $physical_main/.git/ai-engineering/tokens/t
+deny|echo x > .git/ai-engineering/tokens/t
+deny|echo x > ../store-main/.git/ai-engineering/tokens/t
+none|cat $physical_main/.git/ai-engineering/tokens/t
+CASES
+while IFS='|' read -r expected target; do
+  [ -n "$expected" ] || continue
+  expect_equal "guard-writes from a worktree: $target" "$expected" "$(decision_of "$(write_input b "$target" "$work_directory/store-wt" | "$scripts/guard-writes.sh")")"
+done <<CASES
+deny|$physical_main/.git/ai-engineering/tokens/t
+deny|$work_directory/store-wt/.git/ai-engineering/tokens/t
+deny|../store-main/.git/ai-engineering/tokens/t
+none|$work_directory/store-wt/src/app.ts
+CASES
+separate_repository="$work_directory/separate-repo"
+mkdir -p "$separate_repository"
+git -C "$separate_repository" init -q -b main --separate-git-dir "$work_directory/elsewhere-store" >/dev/null 2>&1
+mkdir -p "$work_directory/elsewhere-store/ai-engineering/tokens"
+physical_store="$(cd "$work_directory/elsewhere-store" && pwd -P)"
+expect_equal "guard-writes: token store in a git dir not named .git" deny "$(decision_of "$(write_input m "$physical_store/ai-engineering/tokens/t" "$separate_repository" | "$scripts/guard-writes.sh")")"
+expect_equal "guard-bash: token store in a git dir not named .git" deny "$(decision_of "$(agent_output "echo x > $physical_store/ai-engineering/tokens/t" "$separate_repository" m)")"
+expect_equal "guard-writes: an unrelated tokens directory is not the store" none "$(decision_of "$(write_input m "$separate_repository/ai-engineering/tokens/t" "$separate_repository" | "$scripts/guard-writes.sh")")"
+
+# Write/Edit/NotebookEdit: the authority store is denied for every caller.
+state_repository="$agent_repository"
+physical_state_repository="$(cd "$state_repository" && pwd -P)"
+mkdir -p "$state_repository/.agents/learnings"
+printf '{}\n' >"$state_repository/.agents/specs/active/WORK-9.state.json"
+ln -sfn "$physical_state_repository/.agents/specs/active" "$state_repository/linked-specs"
+ln -sfn "$physical_state_repository/.agents/specs/active/WORK-9.state.json" "$state_repository/linked-state.json"
+while IFS='|' read -r expected agent target; do
+  [ -n "$expected" ] || continue
+  expect_equal "guard-writes authority: $agent -> $target" "$expected" "$(decision_of "$(write_input "$agent" "$target" "$state_repository" | "$scripts/guard-writes.sh")")"
+done <<CASES
+deny||$state_repository/.agents/specs/active/WORK-9.state.json
+deny||.agents/specs/active/WORK-9.state.json
+deny||./.agents/specs/active/WORK-9.state.json
+deny||src/../.agents/specs/active/WORK-9.state.json
+deny||$state_repository/src/../.agents/specs/active/WORK-9.state.json
+deny||$state_repository/.agents/specs/active/not-yet/WORK-10.state.json
+deny||$state_repository/linked-specs/WORK-9.state.json
+deny||$state_repository/linked-state.json
+deny||$state_repository/nonexistent/../.agents/specs/active/WORK-9.state.json
+deny|ai-engineering:backend|$state_repository/.agents/specs/active/WORK-9.state.json
+deny|ai-engineering:qa|$state_repository/.agents/specs/active/WORK-9.state.json
+deny|ai-engineering:learning|$state_repository/.agents/specs/active/WORK-9.state.json
+deny|ai-engineering:learning|.agents/specs/WORK-9.state.json
+deny||$state_repository/.git/ai-engineering/tokens/t
+deny|ai-engineering:backend|.git/ai-engineering/tokens/t
+deny||.git/ai-engineering/tokens
+none||$state_repository/.agents/specs/active/WORK-9.md
+none|ai-engineering:backend|$state_repository/src/app.ts
+none|ai-engineering:learning|$state_repository/.agents/learnings/entry.md
+deny|ai-engineering:learning|$state_repository/src/app.ts
+CASES
+notebook_output="$(jq -n --arg path "$state_repository/.agents/specs/active/WORK-9.state.json" --arg cwd "$state_repository" '{agent_type: "ai-engineering:backend", tool_input: {notebook_path: $path}, cwd: $cwd}' | "$scripts/guard-writes.sh")"
+expect_equal "guard-writes authority: NotebookEdit path" deny "$(decision_of "$notebook_output")"
+expect_contains "guard-writes authority: reason names the transition script" "plugin's transition script" "$(jq -r '.hookSpecificOutput.permissionDecisionReason' <<<"$notebook_output")"
+
+# Guard log: the new denies are logged with their class; the hint is not a decision and is not logged.
+agent_log_repository="$(new_repository agent-log-repo feature)"
+agent_log_file="$agent_log_repository/.git/ai-engineering/guard-log.jsonl"
+agent_output 'git commit -m x' "$agent_log_repository" b >/dev/null
+expect_equal "guard log: git write by a subagent is logged with its class" git-write-by-subagent "$(tail -n 1 "$agent_log_file" | jq -r '.classes | join(",")')"
+expect_equal "guard log: git write by a subagent is logged as a deny" deny "$(tail -n 1 "$agent_log_file" | jq -r .decision)"
+agent_output "echo x > .agents/specs/active/WORK-9.state.json" "$agent_log_repository" m >/dev/null
+expect_equal "guard log: authority store write is logged with its class" authority-store-write "$(tail -n 1 "$agent_log_file" | jq -r '.classes | join(",")')"
+log_lines_before="$(wc -l <"$agent_log_file" | tr -d ' ')"
+agent_output "sed -i s/a/b/ f.ts" "$agent_log_repository" b >/dev/null
+expect_equal "guard log: the shell-edit hint is not logged" "$log_lines_before" "$(wc -l <"$agent_log_file" | tr -d ' ')"
+
+# Shell-edit hint: "Use Edit/Write for file changes." as context for implementation agents,
+# never a decision. Table cases are "agent|hint or none|command".
+while IFS='|' read -r agent expected command_text; do
+  [ -n "$expected" ] || continue
+  output="$(agent_output "$command_text" "$agent_repository" "$agent")"
+  expect_equal "shell-edit hint ($agent): $command_text" "$expected" "$(hint_of "$output")"
+  case "$expected" in
+    none) ;;
+    *) expect_equal "shell-edit hint is not a decision ($agent): $command_text" none "$(decision_of "$output")" ;;
+  esac
+done <<'CASES'
+b|Use Edit/Write for file changes.|sed -i s/a/b/ src/app.ts
+b|Use Edit/Write for file changes.|sed -i.bak s/a/b/ src/app.ts
+b|Use Edit/Write for file changes.|perl -pi -e s/a/b/ src/app.ts
+b|Use Edit/Write for file changes.|sed -i 's/a/in-memory limit is per-instance on serverless platforms; remove the entry/' f.ts
+b|Use Edit/Write for file changes.|python3 -c "open('f.ts','w').write('in-memory limit is per-instance on serverless platforms; remove the entry')"
+b|Use Edit/Write for file changes.|python3 - <<'EOF'\nfrom pathlib import Path\nPath('a.ts').write_text('x')\nEOF
+b|Use Edit/Write for file changes.|node -e "require('fs').writeFileSync('a.ts', 'x')"
+b|Use Edit/Write for file changes.|echo x > src/app.ts
+b|Use Edit/Write for file changes.|cat >> src/app.ts <<'EOF'\nmore\nEOF
+b|Use Edit/Write for file changes.|cd src && sed -i s/a/b/ app.ts
+f|Use Edit/Write for file changes.|sed -i s/a/b/ src/app.ts
+p|Use Edit/Write for file changes.|sed -i s/a/b/ src/app.ts
+m|none|sed -i s/a/b/ src/app.ts
+m|none|python3 -c "open('f.ts','w').write('x')"
+q|none|sed -i s/a/b/ src/app.ts
+l|none|sed -i s/a/b/ src/app.ts
+o|none|sed -i s/a/b/ src/app.ts
+b|none|echo x > brand-new-file.txt
+b|none|echo x > /tmp/out.txt
+b|none|echo x > /dev/null
+b|none|echo x >> build.log
+b|none|ls src
+b|none|cat src/app.ts
+b|none|sed s/a/b/ src/app.ts
+b|none|sed -n 1,5p src/app.ts
+b|none|python3 -c "print('hello')"
+b|none|python3 -c "import sys; sys.stdout.write('x')"
+b|none|python3 -c "print(open('src/app.ts').read())"
+b|none|git status
+b|none|pnpm test
+b|none|sed -i s/a/b/ src/app.ts; terraform apply
+b|none|echo x > .agents/specs/active/WORK-9.state.json
+CASES
+# A real decision wins over the hint.
+expect_equal "shell-edit hint: an ask wins over the hint" ask "$(decision_of "$(agent_output 'terraform apply' "$agent_repository" b)")"
+expect_equal "shell-edit hint: a deny wins over the hint" deny "$(decision_of "$(agent_output 'sed -i s/a/b/ src/app.ts && git add .' "$agent_repository" b)")"
+expect_equal "shell-edit hint: a git write deny leaves no hint" none "$(hint_of "$(agent_output 'sed -i s/a/b/ src/app.ts && git add .' "$agent_repository" b)")"
+expect_equal "shell-edit hint: the Landra case by the main session is no decision" none "$(decision_of "$(agent_output "python3 -c \"open('f.ts','w').write('in-memory limit is per-instance on serverless platforms; remove the entry')\"" "$agent_repository" m)")"
+expect_equal "shell-edit hint: the Landra case by the main session has no hint" none "$(hint_of "$(agent_output "sed -i 's/a/per-instance on serverless platforms; remove the entry/' f.ts" "$agent_repository" m)")"
+
 # ---------------------------------------------------------------- run-gate
 commit_all() { git -C "$1" add -A && git -C "$1" -c user.name=test -c user.email=test@example.com commit -q -m "$2"; }
 gate_repository="$(new_repository gate-repo main)"

@@ -54,13 +54,21 @@ command_sha256() {
   fi
 }
 
-write_guard_log() {
-  local decision="$1" classes="$2" parse_mode="$3"
-  local directory common_directory log_directory log_file size digest
+# Prints the absolute Git common directory of the working directory (nothing when unknown).
+resolve_common_directory() {
+  local directory common_directory
   directory="$(directory_for_git)"
   common_directory="$(git -C "$directory" rev-parse --git-common-dir 2>/dev/null)" || return 0
   [ -n "$common_directory" ] || return 0
   case "$common_directory" in /*) ;; *) common_directory="$directory/$common_directory" ;; esac
+  printf '%s' "$common_directory"
+}
+
+write_guard_log() {
+  local decision="$1" classes="$2" parse_mode="$3"
+  local common_directory log_directory log_file size digest
+  common_directory="$(resolve_common_directory)"
+  [ -n "$common_directory" ] || return 0
   log_directory="$common_directory/ai-engineering"
   log_file="$log_directory/guard-log.jsonl"
   (umask 077 && mkdir -p "$log_directory") 2>/dev/null || return 0
@@ -151,7 +159,28 @@ keyword_fallback() {
   fallback_matches "${word_start}(npm|pnpm|yarn|bun)${gap}${risky_task}" && fallback_flag unclassified-deploy
   fallback_matches "${word_start}(make|just|task|mage)${gap}${risky_task}" && fallback_flag unclassified-deploy
   fallback_matches "${argument_start}[^[:space:]]*/[^[:space:]/]*(deploy|release|publish|destroy|teardown)[^[:space:]/]*" && fallback_flag unclassified-deploy
+
+  # The authority store cannot be proven untouched when the parse is not confident, so a
+  # command that names it asks (the parsed path denies writes outright).
+  fallback_matches "(\.state\.json|ai-engineering/tokens)" && fallback_flag authority-store-write
   return 0
+}
+
+# ---------------------------------------------------------------- shell-edit hint
+# For implementation agents that edit a file through the shell, PreToolUse context with NO
+# permission decision (never asked, denied or logged). The classifier says "hint" outright, or
+# "check" with redirection targets; a redirection counts only when it overwrites a tracked file.
+emit_shell_edit_hint() {
+  local target tracked=""
+  if [ "$hint_state" = "check" ]; then
+    while IFS= read -r target; do
+      [ -n "$target" ] || continue
+      if [ -n "$(git --literal-pathspecs -C "$(directory_for_git)" ls-files -- "$target" 2>/dev/null)" ]; then tracked=1; break; fi
+    done < <(jq -r '.[]' <<<"$hint_targets" 2>/dev/null)
+    [ -n "$tracked" ] && hint_state="hint"
+  fi
+  [ "$hint_state" = "hint" ] || return 0
+  printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"Use Edit/Write for file changes."}}'
 }
 
 # ---------------------------------------------------------------- decision
@@ -160,13 +189,20 @@ case "$hook_input" in
   *push*) current_branch="$(git -C "$(directory_for_git)" rev-parse --abbrev-ref HEAD 2>/dev/null || true)" ;;
 esac
 
+# The token store lives under the Git common directory, which jq cannot resolve. Look it up
+# only when the command mentions the store, so ordinary commands pay for no extra git call.
+common_directory=""
+case "$hook_input" in
+  *tokens*) common_directory="$(resolve_common_directory)" ;;
+esac
+
 classifier_output_file="$(mktemp "${TMPDIR:-/tmp}/ai-engineering-guard.XXXXXX" 2>/dev/null)" || classifier_output_file=""
 cleanup() { [ -z "$classifier_output_file" ] || rm -f "$classifier_output_file"; }
 trap cleanup EXIT
 
-decision="fallback" parse_mode="fallback" classes="" hook_output=""
+decision="fallback" parse_mode="fallback" classes="" hook_output="" hint_state="none" hint_targets="[]"
 if [ -n "$classifier_output_file" ]; then
-  jq -r -L "$guard_directory" --arg branch "$current_branch" -f "$guard_directory/main.jq" \
+  jq -r -L "$guard_directory" --arg branch "$current_branch" --arg commonDir "$common_directory" -f "$guard_directory/main.jq" \
     >"$classifier_output_file" 2>/dev/null <<<"$hook_input" &
   classifier_pid=$!
   # Watchdog: past the time budget the classifier is stopped and the fallback rules apply.
@@ -178,6 +214,8 @@ if [ -n "$classifier_output_file" ]; then
       read -r parse_mode
       read -r classes
       read -r hook_output
+      read -r hint_state
+      read -r hint_targets
     } <"$classifier_output_file"
   fi
   kill "$watchdog_pid" 2>/dev/null
@@ -186,7 +224,8 @@ fi
 
 case "$decision" in
   none)
-    [ -z "$classify_only" ] || printf 'none\n\n'
+    if [ -n "$classify_only" ]; then printf 'none\n\n'; exit 0; fi
+    emit_shell_edit_hint
     exit 0
     ;;
   ask | deny)

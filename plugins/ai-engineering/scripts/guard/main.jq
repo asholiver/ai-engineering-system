@@ -1,8 +1,10 @@
-# Entry point for guard-bash.sh. Reads the PreToolUse hook JSON and emits four lines:
+# Entry point for guard-bash.sh. Reads the PreToolUse hook JSON and emits six lines:
 #   decision (none | ask | deny | fallback), parse mode, classes (comma separated),
-#   and the hook output JSON ("" when there is no decision).
+#   the hook output JSON ("" when there is no decision), the shell-edit hint state
+#   (none | hint | check) and a JSON array of redirection targets for "check".
 # "fallback" asks the wrapper to apply the v0.2 keyword rules (parse not confident).
-# Named arguments: --arg branch (current Git branch, "" when unknown).
+# Named arguments: --arg branch (current Git branch, "" when unknown) and --arg commonDir
+# (resolved Git common directory, "" when not looked up).
 include "classify";
 include "policy";
 
@@ -18,11 +20,12 @@ def parse_budget_characters: 262144;
    elif ($text | length) > parse_budget_characters then {decision: "fallback", parseMode: "fallback", classes: [], output: ""}
    else
      (try parse_script($text; 0; $branch) catch {uncertain: true, units: []}) as $parsed
-     | if $parsed.uncertain then {decision: "fallback", parseMode: "fallback", classes: [], output: ""}
+     | if $parsed.uncertain then {decision: "fallback", parseMode: "fallback", classes: [], output: "", hint: "none", targets: []}
        else
-         decide($parsed; {agentType: ($input.agent_type // null)}) as $verdict
+         decide($parsed; {agentType: ($input.agent_type // null), cwd: ($input.cwd // ""), commonDir: $commonDir}) as $verdict
          | {decision: $verdict.decision, parseMode: "parsed", classes: $verdict.classes,
-            output: (if $verdict.decision == "none" then "" else hook_output($verdict.decision; $verdict.reason) end)}
+            output: (if $verdict.decision == "none" then "" else hook_output($verdict.decision; $verdict.reason) end),
+            hint: $verdict.hint, targets: $verdict.hintTargets}
        end
    end)
-| .decision, .parseMode, (.classes | join(",")), .output
+| .decision, .parseMode, (.classes | join(",")), .output, (.hint // "none"), ((.targets // []) | tojson)

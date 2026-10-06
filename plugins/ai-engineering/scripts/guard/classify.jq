@@ -6,7 +6,8 @@
 #          runs (bash -c, eval, ssh) appended after it
 #   kind   "eff" (does something), "ctx" (only sets up the environment) or "none"
 #   ops    [{l: operation text, c: [classes]}], at most one per command
-#   cmds   [{prog, sub}] for every command, so later policy can reason about programs
+#   cmds   [{prog, sub, args, redirs, stdin}] for every command (see command_facts), so policy
+#          can reason about programs, arguments and redirections
 include "lexer";
 include "tables";
 
@@ -365,6 +366,20 @@ def echoed_texts($before):
     | if .w[0].l == "printf" and ($words | length) > 0 and ($words[0] | contains("%")) then ($words[1:] | join("\n"))
       else ($words | join(" ")) end ];
 
+# Facts about one command for policy.jq: program (lower case), Git subcommand, the arguments
+# after the program (after the Git subcommand for Git), redirections (heredoc bodies left out)
+# and the text fed to it on standard input (heredoc bodies and here-strings).
+def redirect_facts($command): [ $command.r[] | {op: .op, t: .t, d: (.d // false)} ];
+
+def command_facts($command; $program; $args; $git):
+  [{prog: ($program | ascii_downcase), sub: (if ($program | ascii_downcase) == "git" then $git.sub else null end),
+    args: (if ($program | ascii_downcase) == "git" then $git.rest else $args end),
+    redirs: redirect_facts($command), stdin: own_stdin($command)}];
+
+# A command with no program of its own (only redirections, or only a lookup) still carries its redirections.
+def redirect_only_facts($command):
+  if ($command.r | length) > 0 then [{prog: null, sub: null, args: [], redirs: redirect_facts($command), stdin: []}] else [] end;
+
 # Analyses one parsed command. Substitution commands it contains are analysed too and
 # their operations belong to it. Shell text it runs is parsed into extra units.
 def parse_script($text; $depth; $branch):
@@ -377,10 +392,10 @@ def parse_script($text; $depth; $branch):
                   elif ($command.a | length) > 0 and ($command.r | length) == 0 then "ctx"
                   elif ($command.r | length) > 0 then "eff"
                   else "none" end),
-           ops: [], extra: [], cmds: [], unc: false}
+           ops: [], extra: [], cmds: redirect_only_facts($command), unc: false}
         else
           unwrap($command.w) as $unwrapped
-          | if $unwrapped.lookup or ($unwrapped.ws | length) == 0 then {kind: "none", ops: [], extra: [], cmds: [], unc: false}
+          | if $unwrapped.lookup or ($unwrapped.ws | length) == 0 then {kind: "none", ops: [], extra: [], cmds: redirect_only_facts($command), unc: false}
             else
               ($unwrapped.ws[0] | program_of) as $program
               | if $program.dynamic then {kind: "eff", ops: [], extra: [], cmds: [], unc: true}
@@ -399,7 +414,7 @@ def parse_script($text; $depth; $branch):
                             elif is_context($program.name; $args) and $op == null then "ctx" else "eff" end),
                      ops: (if $op == null then [] else [$op] end),
                      extra: (if $inner != null then $inner.units else [] end),
-                     cmds: [{prog: $program.name, sub: (if $program.name == "git" then git_parts($args).sub else null end)}],
+                     cmds: command_facts($command; $program.name; $args; (if ($program.name | ascii_downcase) == "git" then git_parts($args) else null end)),
                      unc: ($inner != null and $inner.uncertain)}
                 end
             end
@@ -418,7 +433,7 @@ def parse_script($text; $depth; $branch):
         | ((if has_word($unit_result.kinds; "absorb") then "none"
              elif has_word($unit_result.kinds; "eff") then "eff" elif has_word($unit_result.kinds; "ctx") then "ctx" else "none" end)) as $kind
         | .uncertain = (.uncertain or $unit_result.unc)
-        | .units += (if $kind == "none" and ($unit_result.ops | length) == 0 then []
+        | .units += (if $kind == "none" and ($unit_result.ops | length) == 0 and ($unit_result.cmds | length) == 0 then []
                      else [{kind: $kind, ops: $unit_result.ops, cmds: $unit_result.cmds}] end)
         | .units += $unit_result.extra)
   end;
