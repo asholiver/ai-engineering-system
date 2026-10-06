@@ -248,7 +248,11 @@ Performance: a test asserts the time budget on a 256 KB heredoc, within a tolera
 - None. D1–D6 are resolved (see `WORK-001-planning.md`).
 ## Implementation state
 <!-- v0.2 deliver records task status and verdict lines here. Keep entries to one line each; put detailed evidence in WORK-001.log.md so this spec stays small. -->
--
+- Delivery authorised by the owner 2026-10-06 (governed by installed v0.2.0). Branch `feature/work-001-guard-v2` from `main` 1faa02e. Sequential tasks (no `worktree.baseRef: "head"`).
+- T1 (backend), pending: parser, classifier tables, compound/context policy, fail-safe fallback, deploy classes, HTTP semantics, guard log, performance. Files: `scripts/guard-bash.sh` plus new sourced helpers, `tests/run.sh`. AC 1–5, 8, 10.
+- T2 (backend), pending, after T1: `agent_type` Git-write policy, authority-store denial (Bash and Write/Edit/NotebookEdit), shell-edit hint, implementation-agent instructions. Files: guard scripts, `guard-writes.sh`, `agents/{frontend,backend,platform}.md`, `tests/run.sh`. AC 6, 7.
+- T3 (backend), pending, after T1: `lib.sh` classification interface; `run-gate.sh` and `external-review.sh` refuse `ask` and `deny`. Files: `lib.sh`, `run-gate.sh`, `external-review.sh`, `tests/run.sh`. AC 9.
+- T4 (coordinator), pending, after T1–T3: `docs/architecture.md`, `versions/CHANGELOG.md` 0.3.0 entry. AC 11 via the full gate.
 ## Review state
 <!-- v0.2 review records its status block here. -->
 -
