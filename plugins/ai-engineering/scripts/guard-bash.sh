@@ -1,90 +1,209 @@
 #!/bin/bash
-# PreToolUse hook for Bash. Requires explicit human approval ("ask") for high-impact
-# operations, classified by intent rather than by exact command strings.
+# PreToolUse hook for Bash. Classifies parsed actions (not command text) and requires
+# explicit human approval ("ask") for reserved operations, or denies a reserved operation
+# bundled with other commands so each approval covers exactly one operation.
+#
+# Structure: this script is the hook wrapper. guard/lexer.jq parses, guard/classify.jq and
+# guard/tables.jq classify, guard/policy.jq decides, all in one jq run (guard/main.jq).
+# When the parse is not confident (unbalanced quotes, a dynamic program name, an error, a
+# timeout or an oversized command) it falls back to v0.2-style keyword rules, which only
+# ever ask. The guard never returns "allow".
 #
 # This is a guardrail, not a security sandbox: it only sees the command text Claude
 # submits. Indirection (scripts, aliases, variables, encoded strings) can evade it.
-# It errs towards asking: a false positive costs one confirmation.
 set -u
 
+parse_time_budget_seconds=3
+log_max_bytes=1048576
+guardrail_note="Hooks are guardrails, not a sandbox."
+
+# Prints an ask decision without needing jq (reasons here contain no quotes or backslashes).
 ask() {
-  local reason="$1"
-  if command -v jq >/dev/null 2>&1; then
-    jq -n --arg reason "$reason" '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "ask", permissionDecisionReason: $reason}}'
-  else
-    printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"%s"}}\n' "$reason"
-  fi
+  printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"%s"}}\n' "$1"
   exit 0
 }
 
 if ! command -v jq >/dev/null 2>&1; then
-  ask "ai-engineering guard: jq is missing, so this command cannot be inspected. Approve only if it is not a high-impact operation."
+  ask "ai-engineering guard: jq is missing, so this command cannot be inspected. Approve only if it is not a high-impact operation. $guardrail_note"
 fi
+
+script_directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+guard_directory="$script_directory/guard"
 
 hook_input="$(cat)"
-command_text="$(jq -r '.tool_input.command // empty' <<<"$hook_input" | tr '\n\t' '  ')"
-working_directory="$(jq -r '.cwd // empty' <<<"$hook_input")"
-[ -n "$command_text" ] || exit 0
+working_directory=""
+working_directory_loaded=""
+directory_for_git() {
+  if [ -z "$working_directory_loaded" ]; then
+    working_directory="$(jq -r '.cwd // empty' <<<"$hook_input" 2>/dev/null)"
+    working_directory_loaded=1
+  fi
+  printf '%s' "${working_directory:-$PWD}"
+}
 
-# Token boundaries. A word starts after start-of-text or a non-word character and ends
-# before a non-word character or end-of-text. "Argument" boundaries require whitespace,
-# so flags such as "-destroy" or "--delete" are not mistaken for subcommands.
-word_start='(^|[^[:alnum:]_-])'
-word_end='([^[:alnum:]_-]|$)'
-argument_start='(^|[[:space:]])'
-# A tool name followed, possibly after other arguments, by the given argument.
-then_argument='[[:space:]]+(.*[[:space:]]+)?'
+# ---------------------------------------------------------------- guard log
+# One JSON line per ask or deny in <git-common-dir>/ai-engineering/guard-log.jsonl:
+# time, session id, agent type, decision, classes, parse mode and the SHA-256 of the command.
+# Never the command text. Rotated at 1 MiB (one previous file kept). A failure here never
+# changes the decision.
+command_sha256() {
+  if command -v shasum >/dev/null 2>&1; then
+    jq -j '.tool_input.command // ""' <<<"$hook_input" 2>/dev/null | shasum -a 256 | cut -d' ' -f1
+  elif command -v sha256sum >/dev/null 2>&1; then
+    jq -j '.tool_input.command // ""' <<<"$hook_input" 2>/dev/null | sha256sum | cut -d' ' -f1
+  fi
+}
 
-matched_intents=()
-matches() { grep -Eiq -- "$1" <<<"$command_text"; }
-flag() { matched_intents+=("$1"); }
+write_guard_log() {
+  local decision="$1" classes="$2" parse_mode="$3"
+  local directory common_directory log_directory log_file size digest
+  directory="$(directory_for_git)"
+  common_directory="$(git -C "$directory" rev-parse --git-common-dir 2>/dev/null)" || return 0
+  [ -n "$common_directory" ] || return 0
+  case "$common_directory" in /*) ;; *) common_directory="$directory/$common_directory" ;; esac
+  log_directory="$common_directory/ai-engineering"
+  log_file="$log_directory/guard-log.jsonl"
+  (umask 077 && mkdir -p "$log_directory") 2>/dev/null || return 0
+  if [ -f "$log_file" ]; then
+    size="$(wc -c <"$log_file" 2>/dev/null | tr -d ' ')"
+    if [ "${size:-0}" -gt "$log_max_bytes" ]; then mv -f "$log_file" "$log_file.1" 2>/dev/null; fi
+  fi
+  digest="$(command_sha256)"
+  jq -c --arg time "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg decision "$decision" --arg classes "$classes" \
+    --arg mode "$parse_mode" --arg digest "$digest" \
+    '{time: $time, sessionId: (.session_id // null), agentType: (.agent_type // null), decision: $decision,
+      classes: ($classes | split(",") | map(select(length > 0))), parseMode: $mode, commandSha256: $digest}' \
+    <<<"$hook_input" >>"$log_file" 2>/dev/null
+}
 
-# Provision, change or destroy infrastructure.
-matches "${word_start}(terraform|tofu|terragrunt)${then_argument}(apply|destroy)${word_end}" && flag "infrastructure apply/destroy"
-matches "${word_start}pulumi${then_argument}(up|destroy)${word_end}" && flag "infrastructure apply/destroy (pulumi)"
-matches "${word_start}(cdk|cdktf|aws-cdk)${then_argument}(deploy|destroy)${word_end}" && flag "infrastructure deploy/destroy (cdk)"
-matches "${word_start}(serverless|sls|sam)${then_argument}(deploy|remove|delete)${word_end}" && flag "serverless deploy/remove"
+# Classify-only mode (explicit --classify-only argument, used by lib.sh): prints the
+# decision and the comma-separated classes on two lines instead of hook output, and never
+# writes a guard-log entry, so a classification query cannot be mistaken for a tool call.
+# Deliberately an argument, not an environment variable: the hook is invoked with no
+# arguments, and the environment (settings env blocks, exports) must not change its output.
+classify_only=""
+[ "${1:-}" = "--classify-only" ] && classify_only=1
+log_decision() {
+  [ -z "$classify_only" ] || return 0
+  write_guard_log "$@" >/dev/null 2>&1 || true
+}
 
-# Delete workloads or cloud resources.
-matches "${word_start}(kubectl|oc)${then_argument}(delete|drain)${word_end}" && flag "kubernetes delete/drain"
-matches "${word_start}helm${then_argument}(uninstall|delete)${word_end}" && flag "helm uninstall"
-matches "${word_start}(aws|gcloud|az|gsutil)${then_argument}(rm|rb|[[:alnum:]-]*(delete|terminate|destroy|purge|remove|deregister)[[:alnum:]-]*)${word_end}" && flag "destructive cloud operation"
-matches "${word_start}aws${then_argument}sync${word_end}.*--delete" && flag "destructive cloud sync (--delete)"
+# ---------------------------------------------------------------- keyword fallback
+# v0.2-style keyword rules, used only when the parse is not confident. They only ever ask.
+# Word boundaries: a keyword starts after start-of-text or a non-word character and ends
+# before a non-word character or end-of-text. Arguments may follow the tool name after any
+# separator, so `$(echo terraform) apply` and `which kubectl` in backquotes are caught.
+fallback_intents=()
+fallback_command_text=""
+fallback_flag() {
+  local intent
+  for intent in ${fallback_intents[@]+"${fallback_intents[@]}"}; do [ "$intent" = "$1" ] && return 0; done
+  fallback_intents+=("$1")
+}
+fallback_matches() { grep -Eiq -- "$1" <<<"$fallback_command_text"; }
 
-# Destroy data.
-matches "${word_start}drop[[:space:]]+(table|database|schema|view|index|user|role|function|procedure)${word_end}" && flag "SQL DROP"
-matches "${word_start}truncate${word_end}" && flag "SQL TRUNCATE / truncate"
+keyword_fallback() {
+  local branch="$1"
+  local word_start='(^|[^[:alnum:]_-])' word_end='([^[:alnum:]_-]|$)'
+  local argument_start='(^|[[:space:]])'
+  local gap='([^[:alnum:]_-].*)?[^[:alnum:]_-]'
+  local risky_task='[^[:space:]]*(deploy|release|publish|destroy|teardown)[^[:space:]]*'
+  fallback_command_text="$(jq -r '.tool_input.command // empty' <<<"$hook_input" 2>/dev/null | tr '\n\t' '  ')"
+  [ -n "$fallback_command_text" ] || return 0
 
-# Rewrite or delete shared history, or push directly to protected branches.
-if matches "${word_start}git${then_argument}push${word_end}"; then
-  matches "${argument_start}(--force|--force-with-lease(=[^[:space:]]*)?|--mirror|--delete|-[[:alpha:]]*[fd][[:alpha:]]*)${word_end}" && flag "git force push / remote delete"
-  matches "${argument_start}(\+|:)[^[:space:]]+" && flag "git force push / remote delete (refspec)"
-  matches "${argument_start}([^[:space:]]*:)?(refs/heads/)?(main|master)${word_end}" && flag "push to main/master"
-  matches "${argument_start}(--tags|[^[:space:]]*refs/tags/[^[:space:]]*)${word_end}" && flag "tag push (release trigger)"
-  current_branch="$(git -C "${working_directory:-$PWD}" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
-  case "$current_branch" in
-    main | master) flag "push while on $current_branch" ;;
-  esac
+  fallback_matches "${word_start}(terraform|tofu|terragrunt)${gap}(apply|destroy)${word_end}" && fallback_flag infrastructure-apply
+  fallback_matches "${word_start}pulumi${gap}(up|destroy)${word_end}" && fallback_flag infrastructure-apply
+  fallback_matches "${word_start}(cdk|cdktf|aws-cdk)${gap}(deploy|destroy)${word_end}" && fallback_flag infrastructure-apply
+  fallback_matches "${word_start}(serverless|sls|sam)${gap}(deploy|remove|delete)${word_end}" && fallback_flag infrastructure-apply
+
+  fallback_matches "${word_start}(kubectl|oc)${gap}(delete|drain)${word_end}" && fallback_flag kubernetes-delete
+  fallback_matches "${word_start}helm${gap}(uninstall|delete)${word_end}" && fallback_flag kubernetes-delete
+  fallback_matches "${word_start}(aws|gcloud|az|gsutil)${gap}(rm|rb|[[:alnum:]-]*(delete|terminate|destroy|purge|remove|deregister)[[:alnum:]-]*)${word_end}" && fallback_flag cloud-destructive
+  fallback_matches "${word_start}aws${gap}sync${word_end}.*--delete" && fallback_flag cloud-destructive
+
+  fallback_matches "${word_start}drop[[:space:]]+(table|database|schema|view|index|user|role|function|procedure)${word_end}" && fallback_flag destructive-sql
+  fallback_matches "${word_start}truncate${word_end}" && fallback_flag destructive-sql
+
+  if fallback_matches "${word_start}git${gap}push${word_end}"; then
+    fallback_matches "${argument_start}(--force|--force-with-lease(=[^[:space:]]*)?|--mirror|--delete|-[[:alpha:]]*[fd][[:alpha:]]*)${word_end}" && fallback_flag git-force-push
+    fallback_matches "${argument_start}(\+|:)[^[:space:]]+" && fallback_flag git-force-push
+    fallback_matches "${argument_start}([^[:space:]]*:)?(refs/heads/)?(main|master)${word_end}" && fallback_flag git-main-push
+    fallback_matches "${argument_start}(--tags|[^[:space:]]*refs/tags/[^[:space:]]*)${word_end}" && fallback_flag git-tag-push
+    case "$branch" in main | master) fallback_flag git-main-push ;; esac
+  fi
+
+  fallback_matches "${word_start}gh${gap}pr[[:space:]]+merge${word_end}" && fallback_flag pr-merge
+  fallback_matches "${word_start}glab${gap}mr[[:space:]]+merge${word_end}" && fallback_flag pr-merge
+  fallback_matches "${word_start}gh${gap}api${word_end}.*pulls/[0-9]+/merge" && fallback_flag pr-merge
+  fallback_matches "${word_start}(gh|glab)${gap}release[[:space:]]+(create|delete|edit)${word_end}" && fallback_flag release-create
+  fallback_matches "${word_start}(npm|pnpm|yarn|bun)${gap}publish${word_end}" && fallback_flag package-publish
+  fallback_matches "${word_start}(cargo|poetry|flit|hatch)${gap}publish${word_end}" && fallback_flag package-publish
+  fallback_matches "${word_start}twine${gap}upload${word_end}" && fallback_flag package-publish
+  fallback_matches "${word_start}(gem|nuget)${gap}push${word_end}" && fallback_flag package-publish
+  fallback_matches "${word_start}(docker|podman)${gap}push${word_end}" && fallback_flag image-publish
+
+  fallback_matches "${word_start}(neon|neonctl)${gap}(branches?|projects?|databases?|roles?)${gap}(delete|rm)${word_end}" && fallback_flag platform-destructive
+  fallback_matches "${word_start}(vercel|vc)${gap}(remove|rm)${word_end}" && fallback_flag platform-destructive
+  fallback_matches "${word_start}(vercel|vc)${gap}(promote|rollback)${word_end}" && fallback_flag production-deploy
+  fallback_matches "${word_start}(vercel|vc)${gap}--prod(uction)?${word_end}" && fallback_flag production-deploy
+  fallback_matches "${word_start}(vercel|vc|netlify|ntl)${gap}deploy${word_end}" && fallback_flag unclassified-deploy
+
+  fallback_matches "${word_start}(npm|pnpm|yarn|bun)${gap}${risky_task}" && fallback_flag unclassified-deploy
+  fallback_matches "${word_start}(make|just|task|mage)${gap}${risky_task}" && fallback_flag unclassified-deploy
+  fallback_matches "${argument_start}[^[:space:]]*/[^[:space:]/]*(deploy|release|publish|destroy|teardown)[^[:space:]/]*" && fallback_flag unclassified-deploy
+  return 0
+}
+
+# ---------------------------------------------------------------- decision
+current_branch=""
+case "$hook_input" in
+  *push*) current_branch="$(git -C "$(directory_for_git)" rev-parse --abbrev-ref HEAD 2>/dev/null || true)" ;;
+esac
+
+classifier_output_file="$(mktemp "${TMPDIR:-/tmp}/ai-engineering-guard.XXXXXX" 2>/dev/null)" || classifier_output_file=""
+cleanup() { [ -z "$classifier_output_file" ] || rm -f "$classifier_output_file"; }
+trap cleanup EXIT
+
+decision="fallback" parse_mode="fallback" classes="" hook_output=""
+if [ -n "$classifier_output_file" ]; then
+  jq -r -L "$guard_directory" --arg branch "$current_branch" -f "$guard_directory/main.jq" \
+    >"$classifier_output_file" 2>/dev/null <<<"$hook_input" &
+  classifier_pid=$!
+  # Watchdog: past the time budget the classifier is stopped and the fallback rules apply.
+  ( sleep "$parse_time_budget_seconds"; kill "$classifier_pid" 2>/dev/null ) >/dev/null 2>&1 &
+  watchdog_pid=$!
+  if wait "$classifier_pid" 2>/dev/null; then
+    {
+      read -r decision
+      read -r parse_mode
+      read -r classes
+      read -r hook_output
+    } <"$classifier_output_file"
+  fi
+  kill "$watchdog_pid" 2>/dev/null
+  wait "$watchdog_pid" 2>/dev/null
 fi
 
-# Merge pull requests, create releases, publish packages or images.
-matches "${word_start}gh${then_argument}pr[[:space:]]+merge${word_end}" && flag "PR merge"
-matches "${word_start}glab${then_argument}mr[[:space:]]+merge${word_end}" && flag "MR merge"
-matches "${word_start}gh${then_argument}api${word_end}.*pulls/[0-9]+/merge" && flag "PR merge (API)"
-matches "${word_start}(gh|glab)${then_argument}release[[:space:]]+create${word_end}" && flag "release creation"
-matches "${word_start}(npm|pnpm|yarn|bun)${then_argument}publish${word_end}" && flag "package publish"
-matches "${word_start}(cargo|poetry|flit|hatch)${then_argument}publish${word_end}" && flag "package publish"
-matches "${word_start}twine${then_argument}upload${word_end}" && flag "package publish"
-matches "${word_start}(gem|nuget)${then_argument}push${word_end}" && flag "package publish"
-matches "${word_start}(docker|podman)${then_argument}push${word_end}" && flag "image publish"
+case "$decision" in
+  none)
+    [ -z "$classify_only" ] || printf 'none\n\n'
+    exit 0
+    ;;
+  ask | deny)
+    if [ -n "$classify_only" ]; then printf '%s\n%s\n' "$decision" "$classes"; exit 0; fi
+    printf '%s\n' "$hook_output"
+    log_decision "$decision" "$classes" "$parse_mode"
+    exit 0
+    ;;
+esac
 
-# Deployment or release intent hidden behind task runners and scripts.
-risky_task='[^[:space:]]*(deploy|release|publish|destroy|teardown)[^[:space:]]*'
-matches "${word_start}(npm|pnpm|yarn|bun)${then_argument}${risky_task}" && flag "deploy/release task"
-matches "${word_start}(make|just|task|mage)${then_argument}${risky_task}" && flag "deploy/release task"
-matches "${argument_start}[^[:space:]]*/[^[:space:]/]*(deploy|release|publish|destroy|teardown)[^[:space:]/]*" && flag "deploy/release script"
-
-[ "${#matched_intents[@]}" -gt 0 ] || exit 0
-
-intent_list="$(printf '%s, ' "${matched_intents[@]}")"
-ask "ai-engineering guard: high-impact operation needs explicit human approval (${intent_list%, }). Hooks are guardrails, not a sandbox."
+# Fallback: the parse was not confident (or the classifier failed).
+keyword_fallback "$current_branch"
+if [ "${#fallback_intents[@]}" -eq 0 ]; then
+  [ -z "$classify_only" ] || printf 'none\n\n'
+  exit 0
+fi
+classes="$(IFS=,; printf '%s' "${fallback_intents[*]}")"
+if [ -n "$classify_only" ]; then printf 'ask\n%s\n' "$classes"; exit 0; fi
+log_decision ask "$classes" fallback
+ask "ai-engineering guard: this command could not be fully analysed, so keyword rules were applied. It needs explicit human approval (class: ${classes//,/, }). $guardrail_note"

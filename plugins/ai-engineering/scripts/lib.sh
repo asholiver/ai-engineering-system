@@ -52,13 +52,30 @@ read_gate_command() {
 # through the Bash tool are checked only as the outer script call. Either way they run
 # with the user's privileges and credentials and are not an isolation boundary, so they
 # must never perform operations that would otherwise need human approval.
-is_high_impact_command() {
-  local command_text="$1" directory="$2" script_directory decision
+#
+# classify_command_impact <command> [directory] is the single classification interface.
+# It sets impact_decision (none | ask | deny | unknown) and impact_classes (comma separated,
+# empty when none) and succeeds when the command is high-impact. Both ask and deny are
+# high-impact (deny means a reserved operation bundled with other commands). An unusable
+# guard answer fails closed as "unknown", which is also high-impact. It runs the guard in
+# classify-only mode, which never writes guard-log entries. Call it directly, not inside
+# $(...), or the two variables are lost.
+classify_command_impact() {
+  local command_text="$1" directory="${2:-$PWD}" script_directory answer
   script_directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  decision="$(jq -n --arg command "$command_text" --arg cwd "$directory" '{tool_input: {command: $command}, cwd: $cwd}' |
-    "$script_directory/guard-bash.sh" | jq -r '.hookSpecificOutput.permissionDecision // empty' 2>/dev/null)"
-  [ "$decision" = "ask" ]
+  impact_decision="unknown" impact_classes=""
+  answer="$(jq -n --arg command "$command_text" --arg cwd "$directory" '{tool_input: {command: $command}, cwd: $cwd}' |
+    "$script_directory/guard-bash.sh" --classify-only 2>/dev/null)"
+  case "$(printf '%s\n' "$answer" | sed -n 1p)" in
+    none) impact_decision="none" ;;
+    ask) impact_decision="ask" ;;
+    deny) impact_decision="deny" ;;
+  esac
+  [ "$impact_decision" = "none" ] || impact_classes="$(printf '%s\n' "$answer" | sed -n 2p)"
+  [ "$impact_decision" != "none" ]
 }
+
+is_high_impact_command() { classify_command_impact "$@"; }
 
 require_jq() {
   if ! command -v jq >/dev/null 2>&1; then

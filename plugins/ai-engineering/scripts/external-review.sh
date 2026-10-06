@@ -32,8 +32,8 @@ fi
 if [ "$head_review_command" != "$review_command" ]; then
   echo "NOTE: this change modifies externalReview; the command from base ref $base_ref was used."
 fi
-if is_high_impact_command "$review_command" "$repository_directory"; then
-  echo "EXTERNAL REVIEW: ERROR (refused: the configured command contains a high-impact operation)"
+if classify_command_impact "$review_command" "$repository_directory"; then
+  echo "EXTERNAL REVIEW: ERROR (refused: the configured command contains a high-impact operation; classified $impact_decision: ${impact_classes:-unclassified})"
   exit 2
 fi
 output_file="$(mktemp "${TMPDIR:-/tmp}/ai-engineering-review.XXXXXX")"
