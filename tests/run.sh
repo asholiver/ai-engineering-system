@@ -365,6 +365,7 @@ if [ "$heredoc_ms" -lt 2500 ]; then pass; else fail "performance: ${heredoc_byte
 { i=0; while [ "$i" -lt 60 ]; do printf 'grep -rn "foo\\|bar" --include=*.ts src/app%s | head -5 && ' "$i"; i=$((i + 1)); done; printf 'echo done'; } >"$work_directory/command-8k.txt"
 jq -n --rawfile command "$work_directory/command-8k.txt" --arg cwd "$feature_repository" '{tool_input: {command: $command}, cwd: $cwd}' >"$work_directory/command-8k.json"
 medium_ms="$(elapsed_milliseconds "$work_directory/command-8k.json")"
+echo "info: guard timing, single run: ${heredoc_bytes}-byte heredoc ${heredoc_ms} ms, 8 KB command ${medium_ms} ms"
 if [ "$medium_ms" -lt 500 ]; then pass; else fail "performance: 8 KB command took ${medium_ms} ms (budget 150 ms, tolerance 500 ms)"; fi
 # A pathological command is cut off by the time budget or the fallback and still decides safely.
 pathological_file="$work_directory/pathological.txt"
@@ -446,7 +447,7 @@ b|none|git stash show
 b|none|git tag
 b|none|git tag -l
 b|none|git worktree list
-b|none|git checkout
+b|deny|git checkout
 b|deny|git add .
 b|deny|git merge other
 b|deny|git rebase main
@@ -705,6 +706,358 @@ expect_equal "shell-edit hint: a deny wins over the hint" deny "$(decision_of "$
 expect_equal "shell-edit hint: a git write deny leaves no hint" none "$(hint_of "$(agent_output 'sed -i s/a/b/ src/app.ts && git add .' "$agent_repository" b)")"
 expect_equal "shell-edit hint: the Landra case by the main session is no decision" none "$(decision_of "$(agent_output "python3 -c \"open('f.ts','w').write('in-memory limit is per-instance on serverless platforms; remove the entry')\"" "$agent_repository" m)")"
 expect_equal "shell-edit hint: the Landra case by the main session has no hint" none "$(hint_of "$(agent_output "sed -i 's/a/per-instance on serverless platforms; remove the entry/' f.ts" "$agent_repository" m)")"
+
+# ---------------------------------------------------------------- WORK-001 fix round 1 (security review)
+# Table cases are "agent|expected|command" (see the agent letters above); "\n" is a newline.
+while IFS='|' read -r agent expected command_text; do
+  [ -n "$expected" ] || continue
+  expect_equal "fix round ($agent): $command_text" "$expected" "$(decision_of "$(agent_output "$command_text" "$agent_repository" "$agent")")"
+done <<'CASES'
+m|ask|function f { terraform apply; }
+m|ask|function f() { terraform apply; }
+m|ask|coproc terraform apply
+m|ask|coproc NAME { terraform apply; }
+m|ask|watch terraform apply
+m|ask|watch -n 5 'terraform apply'
+m|ask|script -c 'terraform apply' /dev/null
+m|ask|script -q /dev/null terraform apply
+m|ask|bash -o pipefail -c 'terraform apply'
+m|ask|bash -O extglob -c 'terraform apply'
+m|ask|echo 'terraform apply' | bash -
+m|ask|echo 'terraform apply' | bash -s
+m|ask|cat <<'X' | bash\nterraform apply\nX
+m|ask|alias x='terraform apply'; x
+m|ask|source /dev/stdin <<< 'terraform apply'
+m|ask|. /dev/stdin <<< 'terraform apply'
+m|ask|source <(echo 'terraform apply')
+m|ask|. <(echo 'terraform apply')
+m|ask|bash <(echo 'terraform apply')
+m|ask|bash <<< 'terraform apply'
+m|ask|caffeinate -i terraform apply
+m|ask|chronic terraform apply
+m|ask|flock /tmp/l terraform apply
+m|ask|flock -n /tmp/l -c 'terraform apply'
+m|ask|unbuffer terraform apply
+m|ask|chrt -f 1 terraform apply
+m|ask|taskset 0x1 terraform apply
+m|ask|ionice -c 3 terraform apply
+m|ask|env -S 'terraform apply'
+m|ask|env --split-string='terraform apply'
+m|ask|env --split-string 'terraform apply'
+m|ask|su -c 'terraform apply' root
+m|ask|nix-shell --run 'terraform apply'
+m|ask|parallel terraform apply ::: a b
+m|ask|parallel {} ::: 'terraform apply'
+m|ask|find . -exec terraform apply \;
+m|ask|find . -execdir sh -c 'terraform apply' +
+m|ask|docker exec db psql -c 'DROP TABLE x'
+m|ask|docker exec -it -u root db psql -c 'DROP TABLE x'
+m|ask|docker compose exec db psql -c 'DROP TABLE x'
+m|ask|docker-compose exec -T db psql -c 'DROP TABLE x'
+m|ask|podman exec db psql -c 'DROP TABLE x'
+m|ask|kubectl exec pod -- psql -c 'DROP TABLE x'
+m|ask|kubectl exec -n ns pod psql -c 'DROP TABLE x'
+m|ask|npx prisma db execute --stdin <<< 'DROP TABLE x'
+m|ask|deno eval 'sql`DROP TABLE x`'
+m|ask|bun -e 'sql`DROP TABLE x`'
+m|ask|bun eval 'sql`DROP TABLE x`'
+m|ask|pnpm vercel --prod
+m|ask|yarn vercel --prod
+m|ask|sudo -iu root terraform apply
+m|ask|sudo -u root -E terraform apply
+m|ask|foo-runner terraform apply
+m|ask|./run terraform apply
+m|ask|my-tool kubectl delete pod x
+m|none|echo terraform apply
+m|none|printf 'git push --force' > notes.txt
+m|none|cat notes.md | grep 'npm publish'
+m|none|git commit -m 'release the deploy and publish notes'
+m|none|python3 -c "print('terraform apply')"
+m|none|jq . package.json
+m|none|ls scripts
+m|ask|TERRAFORM apply
+m|ask|Terraform apply
+m|ask|GIT push --force origin feature
+m|ask|CURL -X POST https://api.github.com/repos/o/r/releases
+m|ask|GH pr merge 1
+m|ask|PSQL -c 'DROP TABLE x'
+m|ask|VERCEL --prod
+m|ask|NETLIFY deploy --prod
+m|ask|KUBECTL delete pod x
+m|ask|git $(echo push) --force origin feature
+m|ask|git push $(echo --force) origin feature
+m|ask|git push ${FLAG:---force} origin feature
+m|ask|curl -X $(echo POST) https://api.github.com/repos/o/r/releases
+m|ask|curl -X POST https://api.github.com/repos/o/r/$(echo releases)
+m|ask|curl -X ${METHOD} https://api.github.com/repos/o/r/releases
+m|ask|terraform $(echo apply)
+m|none|git -C "$DIR" status
+m|none|git commit -m "$(date)"
+m|none|curl -s "https://api.github.com/repos/$OWNER/r/releases/latest"
+m|ask|git -c alias.p='push --force' p origin feature
+m|ask|git -c alias.p='!git push --force' p
+m|none|git --config-env=alias.p=VAR p origin feature
+b|deny|git -c alias.c=commit c -m x
+m|ask|npx netlify-cli deploy --prod
+m|ask|npx vercel@latest --prod
+m|ask|npx neonctl@latest branches delete br-1
+m|ask|pnpm dlx vercel@33 deploy --prod
+m|ask|curl -X PATCH https://api.github.com/repos/o/r/git/refs/heads/main -d '{"force":true}'
+m|ask|curl -X PATCH https://api.github.com/repos/o/r/git/refs/heads/x -d '{"force":true}'
+m|ask|curl -X POST https://api.github.com/repos/o/r/git/refs -d x
+m|ask|gh api -X PATCH repos/o/r/git/refs/heads/x -f sha=y
+m|none|curl https://api.github.com/repos/o/r/git/refs/heads/x
+m|deny|export X=$(rm -rf y); terraform apply
+m|deny|rm -rf y | terraform apply
+m|deny|rm -rf $(terraform apply)
+m|deny|terraform apply | tee out.log
+m|ask|terraform apply 2>&1 | tail -5
+m|ask|echo 'TRUNCATE t' | psql
+m|ask|cd x && terraform apply
+m|ask|terraform apply -var x=$(date)
+m|ask|export V=$(git describe) && terraform apply
+m|ask|X=$(terraform apply)
+m|ask|echo $(terraform apply)
+m|deny|echo start\nterraform apply\necho done
+m|ask|git push --follow-tags origin feature
+m|ask|gh pr -R o/r merge 1
+m|ask|gh release --repo x create v1
+m|ask|neonctl branches --project-id p delete br-1
+m|ask|vercel redeploy dpl_1
+m|ask|vercel alias set x.vercel.app example.com
+m|none|vercel alias ls
+m|ask|dropdb mydb
+m|ask|mysqladmin drop mydb
+m|ask|npx prisma migrate reset --force
+m|ask|neonctl branches reset br-1 --parent
+m|ask|neonctl branches restore br-1 ^self@2026-10-01
+m|ask|gh repo delete o/r --yes
+m|ask|netlify env:unset X
+m|ask|vercel env add X production
+m|ask|vercel env rm X production
+m|none|vercel env ls
+m|ask|gh release upload v1 f
+m|ask|gh workflow run deploy.yml
+m|ask|gh workflow run release.yml --ref main
+m|none|gh workflow run ci.yml
+m|ask|gh api graphql -f query='mutation { mergePullRequest(input: {pullRequestId: "x"}) { clientMutationId } }'
+m|ask|psql -c 'DROP/**/TABLE x'
+m|ask|psql -c 'drop /* c */ table x'
+m|deny|cat > f.sql <<'EOF'\nDROP TABLE x;\nEOF\npsql -f f.sql
+m|deny|cat > f.sh <<'EOF'\nterraform apply\nEOF\nbash f.sh
+m|none|psql -c 'select 1'
+m|none|psql -c 'select 1 -- DROP is not run'
+b|deny|git config core.hooksPath x
+b|deny|git branch -v nb
+b|deny|git branch --sort=x nb
+b|deny|git branch --abbrev nb
+b|deny|git branch --column nb
+b|deny|git branch --format=x nb
+b|deny|git tag --sort=x nb
+b|deny|git update-index --assume-unchanged f
+b|deny|git notes add -m x
+b|deny|git commit-tree HEAD^{tree} -m x
+b|deny|git symbolic-ref HEAD refs/heads/x
+b|deny|git filter-branch -f
+b|deny|git replace a b
+b|deny|git submodule update --init
+b|deny|git init
+b|deny|git lfs push origin x
+b|deny|git subtree push --prefix=x origin y
+b|deny|git remote add o u
+b|deny|git remote set-url origin u
+b|deny|git config user.name x
+b|deny|git config --global user.name x
+b|deny|git config --get user.name --add
+b|deny|git -c core.pager='sh -c x' log
+b|deny|git -c core.sshCommand=x fetch
+b|ask|git "$SUB" -m x
+b|deny|git clone x
+b|deny|git reflog expire --all
+b|none|git fetch origin
+b|none|git remote
+b|none|git remote -v
+b|none|git remote show origin
+b|none|git remote get-url origin
+b|none|git config --get user.name
+b|none|git config --get-regexp 'alias.*'
+b|none|git config --list
+b|none|git config -l
+b|none|git branch --list 'f*'
+b|none|git branch -l
+b|none|git branch --contains HEAD
+b|none|git branch --merged main
+b|none|git branch -a
+b|none|git branch -vv
+b|none|git branch --sort=-committerdate
+b|none|git branch --sort -committerdate
+b|none|git tag -n
+b|none|git tag --contains HEAD
+b|none|git tag -l 'v*'
+b|none|git tag --list --sort=-v:refname
+b|none|git rev-list --count HEAD
+b|none|git describe --tags
+b|none|git ls-tree HEAD
+b|none|git cat-file -p HEAD
+b|none|git shortlog -sn
+b|none|git stash show
+b|none|git --version
+b|none|git help log
+b|deny|echo x > .git/hooks/pre-commit
+b|deny|cp x .git/hooks/post-commit
+b|deny|echo x >> .git/config
+b|deny|tee .git/info/exclude < x
+b|deny|git diff --output=.git/hooks/pre-commit
+q|deny|echo x > .git/info/exclude
+l|deny|echo x > .git/hooks/pre-push
+m|none|echo x > .git/info/exclude
+m|none|git diff --output=out.patch
+b|none|echo x > build/hooks/pre-commit
+b|ask|$(echo git) commit -m x
+b|ask|echo "unbalanced; git commit -m x
+b|none|echo "unbalanced; git status
+m|ask|echo 'unbalanced; terraform apply
+m|ask|echo 'unbalanced; curl -X POST https://api.github.com/repos/o/r/releases
+m|deny|echo x > .agents/specs/active/WORK-9.STATE.JSON
+m|deny|echo x > .Agents/Specs/Active/WORK-9.State.Json
+m|deny|echo x > .git/AI-Engineering/Tokens/t
+m|deny|cp x .GIT/ai-engineering/TOKENS/t
+m|deny|echo x > .agents/specs/active/WORK-9.state.js?n
+m|deny|echo x > .agents/specs/active/WORK-9.state.[j]son
+m|deny|echo x > .agents/specs/active/WORK-9.state.{json,x}
+m|deny|echo x > .agents/specs/*/WORK-9.state.json
+m|deny|rm -f .agents/specs/active/WORK-*
+m|deny|rm .git/ai-engineering/tokens/t*
+m|deny|cd .git/ai-engineering/tokens && echo x > t
+m|deny|cd .git && echo x > ai-engineering/tokens/t
+m|deny|pushd .git/ai-engineering; echo x > tokens/t
+m|deny|cd .agents/specs/active; touch notes.state.json
+m|deny|cd .git/ai-engineering/tokens; rm t
+m|deny|tar -xf a.tar -C .git/ai-engineering/tokens
+m|deny|tar xf a.tar -C .git
+m|deny|tar --extract --directory=.git/ai-engineering -f a.tar
+m|deny|unzip a.zip -d .git/ai-engineering
+m|deny|patch .agents/specs/active/WORK-9.state.json < p.diff
+m|deny|patch -d .git/ai-engineering/tokens < p.diff
+m|deny|git apply <<'EOF'\n--- a/.agents/specs/active/WORK-9.state.json\n+++ b/.agents/specs/active/WORK-9.state.json\nEOF
+m|deny|git checkout HEAD -- .agents/specs/active/WORK-9.state.json
+m|deny|git restore --source=HEAD~1 .agents/specs/active/WORK-9.state.json
+m|deny|git restore -s HEAD~1 .agents/specs/active/WORK-9.state.json
+m|deny|curl -o .agents/specs/active/WORK-9.state.json https://x.example/y
+m|deny|curl --output .agents/specs/active/WORK-9.state.json https://x.example/y
+m|deny|curl -O --output-dir .git/ai-engineering/tokens https://x.example/t
+m|deny|curl -O https://x.example/WORK-9.state.json
+m|deny|wget -O .git/ai-engineering/tokens/t https://x.example/y
+m|deny|wget -P .git/ai-engineering/tokens https://x.example/t
+m|deny|echo x | sponge .agents/specs/active/WORK-9.state.json
+m|deny|cp -r x .git/
+m|deny|cp -r x .git
+m|deny|rsync -a x/ .git/ai-engineering/
+m|deny|mkdir -p .git/ai-engineering/tokens
+m|deny|mkdir .git/ai-engineering
+m|deny|ln -s /tmp/x .git/ai-engineering
+m|deny|ln -s /tmp/x .git/ai-engineering/tokens
+m|deny|rm -rf .agents
+m|deny|rm -rf .agents/specs
+m|deny|rm -rf .agents/specs/active
+m|deny|rm -rf .git
+m|deny|mv .git /tmp/gone
+m|none|mkdir -p .agents/specs/active
+m|none|mkdir -p .agents/learnings
+m|none|rm .agents/specs/active/WORK-9.md
+m|none|rm -rf dist/*
+m|none|rm -rf .github/workflows/*.tmp
+m|none|curl -o out.json https://x.example/y
+m|none|curl -O https://x.example/file.tgz
+m|none|wget -O - https://x.example/y
+m|none|tar -xf a.tar -C build
+m|none|unzip a.zip -d build
+m|none|cp x build/out
+m|none|git checkout HEAD -- src/app.ts
+m|none|git restore src/app.ts
+m|none|git apply <<'EOF'\n--- a/src/app.ts\n+++ b/src/app.ts\nEOF
+CASES
+
+# M4: the current branch is looked up whenever the parser finds a push, however it is spelled.
+expect_equal "push on main spelled with quotes asks" ask "$(guard_decision "git p''ush" "$main_repository")"
+expect_equal "plain push on main asks" ask "$(guard_decision "git push" "$main_repository")"
+expect_equal "quoted push on a feature branch gives no decision" none "$(guard_decision "git p''ush origin feature" "$feature_repository")"
+expect_equal "push through an alias on main asks" ask "$(guard_decision "git -c alias.p=push p origin" "$main_repository")"
+expect_equal "split word and a non-push command on main give no decision" none "$(guard_decision "git st''atus" "$main_repository")"
+
+# Case-insensitive store paths through Write/Edit/NotebookEdit; Git's own files for subagents.
+while IFS='|' read -r expected agent target; do
+  [ -n "$expected" ] || continue
+  expect_equal "guard-writes fix round: $agent -> $target" "$expected" "$(decision_of "$(write_input "$agent" "$target" "$state_repository" | "$scripts/guard-writes.sh")")"
+done <<CASES
+deny||$state_repository/.agents/specs/active/WORK-9.STATE.JSON
+deny||$state_repository/.AGENTS/SPECS/active/WORK-9.state.json
+deny||.Agents/Specs/Active/WORK-9.State.Json
+deny||$state_repository/.git/AI-Engineering/Tokens/t
+deny|ai-engineering:backend|$state_repository/.git/AI-ENGINEERING/TOKENS/t
+deny|ai-engineering:backend|$state_repository/.git/hooks/pre-commit
+deny|ai-engineering:frontend|$state_repository/.git/config
+deny|ai-engineering:platform|.git/info/exclude
+deny|ai-engineering:qa|$state_repository/.git/hooks
+deny|ai-engineering:learning|$state_repository/.git/hooks/pre-push
+none||$state_repository/.git/hooks/pre-commit
+none||$state_repository/.git/info/exclude
+none|ai-engineering:backend|$state_repository/.gitignore
+none|ai-engineering:backend|$state_repository/src/hooks/pre-commit.ts
+CASES
+notebook_output="$(jq -n --arg path "$state_repository/.AGENTS/specs/active/WORK-9.STATE.json" --arg cwd "$state_repository" '{agent_type: "ai-engineering:backend", tool_input: {notebook_path: $path}, cwd: $cwd}' | "$scripts/guard-writes.sh")"
+expect_equal "guard-writes fix round: NotebookEdit on an upper-case store path" deny "$(decision_of "$notebook_output")"
+
+# L2: the parser budget is counted in bytes. This command is under 262144 characters but over
+# 262144 bytes, so it takes the keyword fallback (ask) instead of being parsed (which would deny).
+{ printf 'terraform apply && npm publish # '; yes 'ééééééééééééééééééééééééééééééé' | head -n 4500 | tr -d '\n'; } >"$work_directory/multibyte.txt"
+jq -n --rawfile command "$work_directory/multibyte.txt" --arg cwd "$feature_repository" '{tool_input: {command: $command}, cwd: $cwd}' >"$work_directory/multibyte.json"
+multibyte_characters="$(jq -r '.tool_input.command | length' "$work_directory/multibyte.json")"
+multibyte_bytes="$(jq -r '.tool_input.command | utf8bytelength' "$work_directory/multibyte.json")"
+if [ "$multibyte_characters" -lt 262144 ] && [ "$multibyte_bytes" -gt 262144 ]; then pass; else fail "L2 fixture: $multibyte_characters characters, $multibyte_bytes bytes"; fi
+expect_equal "guard-bash: over the byte budget (under the character budget) takes the fallback and asks" ask "$(decision_of "$("$scripts/guard-bash.sh" <"$work_directory/multibyte.json")")"
+
+# L1: the guard log is never written through a symbolic link, and rotation takes a lock.
+link_repository="$(new_repository link-log-repo feature)"
+mkdir -p "$work_directory/link-target"
+ln -s "$work_directory/link-target" "$link_repository/.git/ai-engineering"
+output="$(agent_output 'cd infra && terraform apply' "$link_repository" b)"
+expect_equal "guard log: a symlinked log directory still asks" ask "$(decision_of "$output")"
+if [ -e "$work_directory/link-target/guard-log.jsonl" ]; then fail "guard log: wrote through a symlinked directory"; else pass; fi
+file_link_repository="$(new_repository link-file-repo feature)"
+mkdir -p "$file_link_repository/.git/ai-engineering"
+: >"$work_directory/link-file-target"
+ln -s "$work_directory/link-file-target" "$file_link_repository/.git/ai-engineering/guard-log.jsonl"
+output="$(agent_output 'cd infra && terraform apply' "$file_link_repository" b)"
+expect_equal "guard log: a symlinked log file still asks" ask "$(decision_of "$output")"
+if [ -s "$work_directory/link-file-target" ]; then fail "guard log: wrote through a symlinked file"; else pass; fi
+rotate_repository="$(new_repository rotate-repo feature)"
+rotate_directory="$rotate_repository/.git/ai-engineering"
+mkdir -p "$rotate_directory"
+head -c 1100000 /dev/zero | tr '\0' 'x' >"$rotate_directory/guard-log.jsonl"
+mkdir "$rotate_directory/.rotate.lock"
+agent_output 'cd infra && terraform apply' "$rotate_repository" b >/dev/null
+if [ ! -e "$rotate_directory/guard-log.jsonl.1" ]; then pass; else fail "guard log: rotated while another hook held the lock"; fi
+expect_equal "guard log: the decision is still logged while the lock is held" 1 "$(grep -c '"decision"' "$rotate_directory/guard-log.jsonl")"
+touch -t 202001010000 "$rotate_directory/.rotate.lock"
+agent_output 'cd infra && terraform apply' "$rotate_repository" b >/dev/null
+if [ -e "$rotate_directory/guard-log.jsonl.1" ] && [ ! -d "$rotate_directory/.rotate.lock" ]; then pass; else fail "guard log: a stale lock was not cleared and released"; fi
+
+# lib.sh sees the same classification (a representative subset of the fix round).
+# (risky_repository is created again, as a fresh repository, in the run-gate section below.)
+risky_repository="$feature_repository"
+(
+  source "$scripts/lib.sh"
+  classify_command_impact "watch terraform apply" "$risky_repository"; [ "$impact_decision" = "ask" ] && [ "$impact_classes" = "infrastructure-apply" ] || exit 1
+  classify_command_impact "TERRAFORM apply" "$risky_repository"; [ "$impact_decision" = "ask" ] || exit 2
+  classify_command_impact "export X=\$(rm -rf y); terraform apply" "$risky_repository"; [ "$impact_decision" = "deny" ] || exit 3
+  classify_command_impact "git \$(echo push) --force origin feature" "$risky_repository"; [ "$impact_decision" = "ask" ] || exit 4
+  classify_command_impact "echo 'terraform apply' | bash -" "$risky_repository"; [ "$impact_decision" = "ask" ] || exit 5
+  classify_command_impact "echo x > .agents/specs/active/WORK-9.STATE.JSON" "$risky_repository"; [ "$impact_decision" = "deny" ] && [ "$impact_classes" = "authority-store-write" ] || exit 6
+  classify_command_impact "git status" "$risky_repository"; [ "$impact_decision" = "none" ] || exit 7
+  classify_command_impact "docker exec db psql -c 'DROP TABLE x'" "$risky_repository"; [ "$impact_decision" = "ask" ] || exit 8
+)
+expect_equal "lib: classify_command_impact sees the fix-round classifications (exit code identifies the failed check)" 0 "$?"
 
 # ---------------------------------------------------------------- run-gate
 commit_all() { git -C "$1" add -A && git -C "$1" -c user.name=test -c user.email=test@example.com commit -q -m "$2"; }

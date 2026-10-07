@@ -224,7 +224,7 @@ def parse_raw($text; $depth):
   lex($text) as $lexed
   | reduce $lexed.toks[] as $token (
       {units: [[]], cur: empty_command, pending: null, hd_index: 0, parens: 0,
-       in_case_pattern: false, in_bracket: false, bad: $lexed.bad};
+       in_case_pattern: false, in_bracket: false, fn_name: false, bad: $lexed.bad};
       # Nested command text goes through the same parser; its commands join the current one.
       def add_word($word):
         reduce $word.s[] as $text (.;
@@ -257,7 +257,10 @@ def parse_raw($text; $depth):
           elif .in_bracket then
             .cur.w += [$word] | add_word($word) | if $raw == "]]" then .in_bracket = false else . end
           elif (.cur.w | length) == 0 and (.cur.skip | not) then
-            if ($raw | IN(reserved_heads[])) then .
+            # `function NAME { ...; }`: the word after `function` is the name, not a command.
+            if .fn_name then .fn_name = false
+            elif $raw == "function" then .fn_name = true
+            elif ($raw | IN(reserved_heads[])) then .
             elif $raw == "for" or $raw == "select" then .cur.skip = true | .cur.hdr = "loop"
             elif $raw == "case" then .cur.skip = true | .in_case_pattern = true
             elif ($raw | test("^[A-Za-z_][A-Za-z0-9_]*\\+?=")) then .cur.a += [$word] | add_word($word)

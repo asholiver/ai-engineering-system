@@ -8,7 +8,14 @@
 #   package-publish  image-publish  platform-destructive  destructive-task
 #   production-deploy  ephemeral-deploy  unclassified-deploy
 
+# Flags that take a separate value, per CLI, so a value is not mistaken for a verb
+# (`gh pr -R o/r merge`).
+def gh_value_flags: ["-R", "--repo", "--hostname", "-H", "--header", "-B", "--base"];
+def neon_value_flags: ["--project-id", "--org-id", "--context-file", "--api-key", "--output", "-o", "--branch", "--name", "--parent"];
+
 # Rules matched against a program name and its non-flag arguments.
+#   always matches whatever the arguments are (the program itself is the operation)
+#   vf  flags whose next word is a value and is skipped when matching seq
 #   p    programs this rule applies to
 #   any  matches when any non-flag argument equals one of these verbs
 #   seq  matches when non-flag arguments contain these words consecutively
@@ -28,9 +35,17 @@ def rules: [
   {p: ["aws", "gcloud", "az", "gsutil"],
    re: "^(rm|rb|[a-z0-9-]*(delete|terminate|destroy|purge|remove|deregister)[a-z0-9-]*)$", c: ["cloud-destructive"]},
   {p: ["aws"], any: ["sync"], with: ["--delete"], c: ["cloud-destructive"]},
-  {p: ["gh"], seq: [["pr"], ["merge"]], c: ["pr-merge"]},
-  {p: ["glab"], seq: [["mr"], ["merge"]], c: ["pr-merge"]},
-  {p: ["gh", "glab"], seq: [["release"], ["create", "delete", "edit"]], c: ["release-create"]},
+  {p: ["gh"], seq: [["pr"], ["merge"]], vf: gh_value_flags, c: ["pr-merge"]},
+  {p: ["glab"], seq: [["mr"], ["merge"]], vf: gh_value_flags, c: ["pr-merge"]},
+  {p: ["gh", "glab"], seq: [["release"], ["create", "delete", "edit", "upload"]], vf: gh_value_flags, c: ["release-create"]},
+  {p: ["gh"], seq: [["repo"], ["delete"]], vf: gh_value_flags, c: ["platform-destructive"]},
+  {p: ["dropdb"], always: true, c: ["destructive-sql"]},
+  {p: ["mysqladmin"], any: ["drop"], c: ["destructive-sql"]},
+  {p: ["prisma"], seq: [["migrate"], ["reset"]], c: ["destructive-sql"]},
+  {p: ["prisma"], seq: [["db"], ["push"]], with: ["--force-reset"], c: ["destructive-sql"]},
+  {p: ["neon", "neonctl"], seq: [["branches", "branch"], ["reset", "restore"]], vf: neon_value_flags, c: ["platform-destructive"]},
+  {p: ["netlify", "ntl"], any: ["env:unset"], c: ["platform-destructive"]},
+  {p: ["vercel", "vc"], seq: [["env"], ["add", "rm", "remove"]], vf: ["--token", "-t", "--scope", "-S", "--cwd", "-A"], c: ["platform-destructive"]},
   {p: ["npm", "pnpm", "yarn", "bun"], any: ["publish"], c: ["package-publish"]},
   {p: ["cargo", "poetry", "flit", "hatch"], any: ["publish"], c: ["package-publish"]},
   {p: ["twine"], any: ["upload"], c: ["package-publish"]},
@@ -38,7 +53,7 @@ def rules: [
   {p: ["docker", "podman"], any: ["push"], c: ["image-publish"]},
   {p: ["neon", "neonctl"],
    seq: [["branches", "branch", "projects", "project", "databases", "database", "roles", "role"], ["delete", "rm"]],
-   c: ["platform-destructive"]},
+   vf: neon_value_flags, c: ["platform-destructive"]},
   {p: ["vercel", "vc"], any: ["remove", "rm"], c: ["platform-destructive"]},
   {p: ["netlify", "ntl"], any: ["sites:delete"], c: ["platform-destructive"]}
 ];
@@ -66,7 +81,7 @@ def mongo_destructive_regex: "\\b(dropDatabase\\s*\\(|\\.drop\\s*\\()";
 def wrappers: {
   "sudo": {vf: ["-u", "-g", "-h", "-p", "-C", "-D", "-R", "-T", "-U", "-r", "-t", "--user", "--group", "--host", "--prompt", "--chdir"], assign: true},
   "doas": {vf: ["-u", "-C"]},
-  "env": {vf: ["-u", "-S", "-C", "--unset", "--chdir", "--split-string"], assign: true},
+  "env": {vf: ["-u", "-S", "-C", "--unset", "--chdir", "--split-string"], assign: true, tf: ["-S", "--split-string"]},
   "time": {vf: ["-f", "-o", "--format", "--output"]},
   "nice": {vf: ["-n", "--adjustment"]},
   "ionice": {vf: ["-c", "-n", "-p", "-P", "-u"]},
@@ -89,8 +104,45 @@ def wrappers: {
   "poetry": {sub: ["run"]},
   "doppler": {sub: ["run"], dashdash: true},
   "aws-vault": {sub: ["exec"], dashdash: true},
-  "op": {sub: ["run"], dashdash: true}
+  "op": {sub: ["run"], dashdash: true},
+  "caffeinate": {vf: ["-t", "-w"]},
+  "chronic": {},
+  "unbuffer": {},
+  "chrt": {skip: 1},
+  "taskset": {vf: ["-c", "--cpu-list"], skip: 1},
+  "flock": {vf: ["-w", "--timeout", "-E", "--conflict-exit-code"], skip: 1, tf: ["-c", "--command"]},
+  "script": {vf: ["-t", "-F", "-T", "-c", "--command"], skip: 1, tf: ["-c", "--command"]},
+  "su": {vf: ["-s", "-g", "-G", "-c", "--shell", "--group", "--command"], tf: ["-c", "--command"], noexec: true},
+  "nix-shell": {vf: ["-p", "--packages", "-I", "--run", "--command"], tf: ["--run", "--command"], noexec: true},
+  "watch": {vf: ["-n", "--interval"], joined: true},
+  "parallel": {vf: ["-j", "-n", "-N", "-a", "-S", "--jobs", "--max-args", "--arg-file", "--sshlogin", "-L"], parallel: true},
+  "coproc": {coproc: true},
+  "docker": {sub: ["exec", "run"], vf: ["-H", "--host", "--context", "-c", "-l", "--log-level", "-e", "--env", "-u", "--user", "-w", "--workdir", "--env-file", "--detach-keys", "--name", "--network", "--entrypoint", "-v", "--volume", "-p", "--publish", "--platform"], subskip: 1},
+  "podman": {sub: ["exec", "run"], vf: ["-e", "--env", "-u", "--user", "-w", "--workdir", "--env-file", "--detach-keys", "--name", "--network", "--entrypoint", "-v", "--volume", "-p", "--publish"], subskip: 1},
+  "docker-compose": {sub: ["exec", "run"], vf: ["-e", "--env", "-u", "--user", "-w", "--workdir", "-f", "--file", "-p", "--project-name", "--index", "--profile", "-v", "--volume", "--name", "--entrypoint"], subskip: 1},
+  "kubectl": {sub: ["exec"], vf: ["-n", "--namespace", "-c", "--container", "--context", "--kubeconfig", "-f", "--filename", "-s", "--server", "--cluster", "--user", "--as", "--request-timeout", "-l", "--selector"], dashdash_optional: true, subskip: 1},
+  "oc": {sub: ["exec"], vf: ["-n", "--namespace", "-c", "--container", "--context", "--kubeconfig", "-f", "--filename", "-s", "--server"], dashdash_optional: true, subskip: 1}
 };
+
+# Programs that run a binary from the package's own bin when the word is not a built-in
+# command (pnpm and yarn): `pnpm vercel --prod` runs vercel.
+def binary_runners: ["pnpm", "yarn"];
+def runner_builtins: ["add", "install", "i", "remove", "rm", "uninstall", "update", "up", "upgrade", "run", "test", "t", "start", "stop", "restart", "exec", "dlx", "create", "init", "pack", "link", "unlink", "list", "ls", "outdated", "audit", "why", "store", "config", "root", "bin", "prune", "rebuild", "patch", "fetch", "import", "env", "setup", "licenses", "doctor", "cache", "help", "version", "info", "workspace", "workspaces", "global", "set", "node", "dedupe", "login", "logout", "whoami", "publish", "deploy", "release", "tag", "npm", "constraints", "plugin", "up-to-date", "self-update", "approve-builds", "catalog"];
+
+# Package names that run a binary with a different name.
+def program_aliases: {"netlify-cli": "netlify", "vercel-cli": "vercel", "neon-cli": "neonctl"};
+
+# Commands whose arguments are data or searches, never reserved operations of their own; the
+# residual keyword net does not read their words. Programs with classification of their own
+# (the tables above), interpreters (inline code is checked for SQL only) and shells (their
+# text is parsed) are skipped by the net as well.
+def inert_programs: ["echo", "printf", "cat", "grep", "egrep", "fgrep", "rg", "ag", "ack", "sed", "awk", "gawk", "mawk", "jq", "yq",
+                     "test", "[", "[[", "head", "tail", "wc", "sort", "uniq", "cut", "tr", "diff", "cmp", "ls", "tree", "stat", "file",
+                     "du", "df", "basename", "dirname", "realpath", "readlink", "pwd", "date", "which", "type", "whoami", "id", "uname",
+                     "hostname", "touch", "mkdir", "rmdir", "cp", "mv", "rm", "ln", "chmod", "chown", "tee", "less", "more", "man",
+                     "open", "pbcopy", "pbpaste", "git", "cd", "pushd", "popd", "export", "set", "unset", "declare", "typeset",
+                     "readonly", "local", "true", "false", ":", "read", "shift", "return", "exit", "wait", "sleep", "xxd", "base64",
+                     "shasum", "sha256sum", "md5", "md5sum", "find", "tar", "zip", "unzip", "gzip", "gunzip", "mktemp", "env", "printenv"];
 
 # Commands that only set up the environment. A reserved operation preceded only by these
 # still asks instead of denying.
@@ -129,10 +181,66 @@ def endpoint_classes($method; $path):
     | [ (if ($clean | test("(^|/)releases(/|$)")) then "release-create" else empty end),
         (if ($clean | test("(^|/)(pulls|merge_requests)/[0-9]+/merge$|(^|/)merges$")) then "pr-merge" else empty end),
         (if $method == "DELETE" and ($clean | test("(^|/)git/refs(/|$)")) then "git-force-push" else empty end),
+        # Moving or creating a ref through the API is a push: main and master are the protected ones.
+        (if ($method | IN("PATCH", "POST")) and ($clean | test("(^|/)git/refs(/|$)"))
+         then (if ($clean | test("(^|/)git/refs/(heads/)?(main|master)$")) then "git-main-push" else "git-force-push" end) else empty end),
         (if $method == "POST" and ($clean | test("(^|/)(deployments|deploys)(/|$)")) then "unclassified-deploy" else empty end) ]
   end;
 
 # ssh options that take a value (the first other word is the host).
 def ssh_value_flags: ["-p", "-i", "-o", "-l", "-F", "-J", "-L", "-R", "-D", "-b", "-c", "-e", "-E", "-I", "-m", "-O", "-Q", "-S", "-w", "-W", "-B"];
 # git options placed before the subcommand that take a separate value.
-def git_value_flags: ["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env"];
+def git_value_flags: ["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env", "--exec-path", "--list-cmds"];
+# Git commands (built in, plumbing and common extensions). A word that is none of these is an
+# alias or an external command, which the parser cannot see through.
+def git_commands: ["add", "am", "annotate", "apply", "archive", "bisect", "blame", "branch", "bundle", "cat-file", "check-attr", "check-ignore", "check-ref-format", "checkout", "cherry", "cherry-pick", "citool", "clean", "clone", "column", "commit", "commit-graph", "commit-tree", "config", "count-objects", "credential", "daemon", "describe", "diff", "diff-files", "diff-index", "diff-tree", "difftool", "fast-export", "fast-import", "fetch", "filter-branch", "flow", "fmt-merge-msg", "for-each-ref", "format-patch", "fsck", "gc", "get-tar-commit-id", "grep", "gui", "hash-object", "help", "init", "instaweb", "interpret-trailers", "lfs", "log", "ls-files", "ls-remote", "ls-tree", "mailinfo", "mailsplit", "maintenance", "merge", "merge-base", "mergetool", "mktag", "mktree", "mv", "name-rev", "notes", "pack-objects", "pack-refs", "patch-id", "prune", "pull", "push", "range-diff", "read-tree", "rebase", "reflog", "remote", "repack", "replace", "request-pull", "rerere", "reset", "restore", "rev-list", "rev-parse", "revert", "rm", "send-email", "shortlog", "show", "show-branch", "show-ref", "sparse-checkout", "stage", "stash", "status", "stripspace", "submodule", "subtree", "switch", "symbolic-ref", "tag", "update-index", "update-ref", "var", "verify-commit", "verify-pack", "verify-tag", "version", "whatchanged", "worktree"];
+
+# ---------------------------------------------------------------- residual keyword net
+# The v0.2 keyword rules, ported to jq. They run over the words of a command whose program has
+# no classification of its own and is not known to be inert (an unknown runner such as
+# `foo terraform apply`). Ask-only: a hit asks, never denies. [regular expression, class].
+def kw_ws: "(^|[^A-Za-z0-9_-])";
+def kw_we: "([^A-Za-z0-9_-]|$)";
+def kw_gap: "([^A-Za-z0-9_-].*)?[^A-Za-z0-9_-]";
+def kw_risky: "[^\\s]*(deploy|release|publish|destroy|teardown)[^\\s]*";
+def keyword_net_rules: [
+  [kw_ws + "(terraform|tofu|terragrunt)" + kw_gap + "(apply|destroy)" + kw_we, "infrastructure-apply"],
+  [kw_ws + "pulumi" + kw_gap + "(up|destroy)" + kw_we, "infrastructure-apply"],
+  [kw_ws + "(cdk|cdktf|aws-cdk)" + kw_gap + "(deploy|destroy)" + kw_we, "infrastructure-apply"],
+  [kw_ws + "(serverless|sls|sam)" + kw_gap + "(deploy|remove|delete)" + kw_we, "infrastructure-apply"],
+  [kw_ws + "(kubectl|oc)" + kw_gap + "(delete|drain)" + kw_we, "kubernetes-delete"],
+  [kw_ws + "helm" + kw_gap + "(uninstall|delete)" + kw_we, "kubernetes-delete"],
+  [kw_ws + "(aws|gcloud|az|gsutil)" + kw_gap + "(rm|rb|[a-z0-9-]*(delete|terminate|destroy|purge|remove|deregister)[a-z0-9-]*)" + kw_we, "cloud-destructive"],
+  [kw_ws + "aws" + kw_gap + "sync" + kw_we + ".*--delete", "cloud-destructive"],
+  [kw_ws + "drop\\s+(table|database|schema|view|index|user|role|function|procedure)" + kw_we, "destructive-sql"],
+  [kw_ws + "truncate" + kw_we, "destructive-sql"],
+  [kw_ws + "gh" + kw_gap + "pr\\s+merge" + kw_we, "pr-merge"],
+  [kw_ws + "glab" + kw_gap + "mr\\s+merge" + kw_we, "pr-merge"],
+  [kw_ws + "gh" + kw_gap + "api" + kw_we + ".*pulls/[0-9]+/merge", "pr-merge"],
+  [kw_ws + "(gh|glab)" + kw_gap + "release\\s+(create|delete|edit|upload)" + kw_we, "release-create"],
+  [kw_ws + "(npm|pnpm|yarn|bun)" + kw_gap + "publish" + kw_we, "package-publish"],
+  [kw_ws + "(cargo|poetry|flit|hatch)" + kw_gap + "publish" + kw_we, "package-publish"],
+  [kw_ws + "twine" + kw_gap + "upload" + kw_we, "package-publish"],
+  [kw_ws + "(gem|nuget)" + kw_gap + "push" + kw_we, "package-publish"],
+  [kw_ws + "(docker|podman)" + kw_gap + "push" + kw_we, "image-publish"],
+  [kw_ws + "(neon|neonctl)" + kw_gap + "(branches?|projects?|databases?|roles?)" + kw_gap + "(delete|rm)" + kw_we, "platform-destructive"],
+  [kw_ws + "(vercel|vc)" + kw_gap + "(remove|rm)" + kw_we, "platform-destructive"],
+  [kw_ws + "(vercel|vc)" + kw_gap + "(promote|rollback)" + kw_we, "production-deploy"],
+  [kw_ws + "(vercel|vc)" + kw_gap + "--prod(uction)?" + kw_we, "production-deploy"],
+  [kw_ws + "(vercel|vc|netlify|ntl)" + kw_gap + "deploy" + kw_we, "unclassified-deploy"],
+  [kw_ws + "(npm|pnpm|yarn|bun)" + kw_gap + kw_risky, "unclassified-deploy"],
+  [kw_ws + "(make|just|task|mage)" + kw_gap + kw_risky, "unclassified-deploy"],
+  ["(^|\\s)[^\\s]*/[^\\s/]*(deploy|release|publish|destroy|teardown)[^\\s/]*", "unclassified-deploy"]
+];
+# git push in the net: force, main/master and tag pushes, and any push while on main or master.
+def keyword_net_push($text; $branch):
+  if ($text | test(kw_ws + "git" + kw_gap + "push" + kw_we; "i")) | not then []
+  else
+    [ (if ($text | test("(^|\\s)(--force|--force-with-lease(=[^\\s]*)?|--mirror|--delete|-[A-Za-z]*[fd][A-Za-z]*)" + kw_we; "i")
+           or ($text | test("(^|\\s)(\\+|:)[^\\s]+"))) then "git-force-push" else empty end),
+      (if ($text | test("(^|\\s)([^\\s]*:)?(refs/heads/)?(main|master)" + kw_we; "i") or ($branch | IN("main", "master"))) then "git-main-push" else empty end),
+      (if ($text | test("(^|\\s)(--tags|--follow-tags|[^\\s]*refs/tags/[^\\s]*)" + kw_we; "i")) then "git-tag-push" else empty end) ]
+  end;
+def keyword_net($text; $branch):
+  ($text | gsub("[\\n\\t]"; " ")) as $flat
+  | ([ keyword_net_rules[] | . as $rule | select($flat | test($rule[0]; "i")) | $rule[1] ] + keyword_net_push($flat; $branch)) | unique;

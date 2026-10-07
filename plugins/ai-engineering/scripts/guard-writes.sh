@@ -77,7 +77,9 @@ resolved_path="$(resolve_path "$target_path")"
 
 # ---------------------------------------------------------------- authority store
 authority_store_reason="ai-engineering guard: writes to the authority store (.agents/specs/**/*.state.json and the token store under the Git common directory) are not allowed from any caller; it is written only by the plugin's transition script (attempted: $target_path)."
-case "$resolved_path" in
+# Compared in lower case: a case-insensitive file system resolves .STATE.JSON and .Agents/Specs.
+lowered_path="$(printf '%s' "$resolved_path" | tr '[:upper:]' '[:lower:]')"
+case "$lowered_path" in
   */.agents/specs/*.state.json) deny "$authority_store_reason" ;;
   */.git/ai-engineering/tokens | */.git/ai-engineering/tokens/*) deny "$authority_store_reason" ;;
   */ai-engineering/tokens | */ai-engineering/tokens/*)
@@ -85,11 +87,24 @@ case "$resolved_path" in
     common_directory="$(git -C "$working_directory" rev-parse --git-common-dir 2>/dev/null)"
     if [ -n "$common_directory" ]; then
       case "$common_directory" in /*) ;; *) common_directory="$working_directory/$common_directory" ;; esac
-      common_directory="$(cd -P "$common_directory" 2>/dev/null && pwd -P)"
-      case "$resolved_path" in
+      common_directory="$(cd -P "$common_directory" 2>/dev/null && pwd -P | tr '[:upper:]' '[:lower:]')"
+      case "$lowered_path" in
         "$common_directory/ai-engineering/tokens" | "$common_directory/ai-engineering/tokens/"*) deny "$authority_store_reason" ;;
       esac
     fi
+    ;;
+esac
+
+# ---------------------------------------------------------------- Git's own files
+# Subagents may not write Git hooks, configuration or info files (they run code or change how
+# the coordinator's Git behaves). The coordinator and other callers are not affected.
+case "$agent_type" in
+  ai-engineering:frontend | ai-engineering:backend | ai-engineering:platform | ai-engineering:qa | ai-engineering:security-reviewer | ai-engineering:learning)
+    case "$lowered_path" in
+      */.git/hooks | */.git/hooks/* | */.git/info | */.git/info/* | */.git/config)
+        deny "ai-engineering guard: subagents may not write Git hooks, configuration or info files; the coordinator owns Git (attempted: $target_path)."
+        ;;
+    esac
     ;;
 esac
 
