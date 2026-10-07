@@ -100,6 +100,38 @@ Detailed evidence for WORK-001 delivery. The spec's "Implementation state" keeps
 - Process note: no guard prompt was denied. The reviewer kept reserved vocabulary out of its output after a safety-classifier interruption.
 - Fix round 2 (Opus backend, per the deliver skill's retry-with-Opus step, because round 1 introduced new holes) changes the root cause. The v0.2 keyword floor (ask-only) now applies to the whole command text minus a narrow, tested list of proven data spans, instead of only to "unclassified" commands. Classification and policy may raise a decision but never lower it below the floor. Brief: `scratchpad/guard-probes/FIX-BRIEF-2.md`.
 
+## Focused security re-review 2 (Opus, da81e8b..38bfb88)
+- Verdict: **not ready to merge.**
+  - Resolved: N1 (listed shapes), N4, M1, N6 log rotation. F-T1-1 and F-T3-1 are still closed. The guard never allows. The deferred floor matches the jq rules. 552 existing probes give 0 mismatches, and no check was weakened.
+  - Partially resolved: N2 (Git environment variables for restricted agents), N3, N5, N6 Unicode, N6 owner ruling.
+  - Not resolved: the H1 and M3 remainders.
+- New findings, confirmed by the coordinator (`rereview2-probes.jsonl`: 21 mismatches, 9 of them safety-floor regressions):
+  - **NR-1 (high).** The lexer splits words on `\s` (CR, VT, FF, NBSP), but Bash does not, so `a<CR>#` hides the rest of the line as a comment.
+  - **NR-2 (medium-high).** Look-alike program names (Kelvin sign, long s) resolve on APFS and are not classified.
+  - **NR-3 (high).** Proven data reaches execution through process-substitution shells, `sort --compress-program`, and write-then-run within one submission.
+  - **NR-4 (high, AC 7).** `git rm`/`mv` of the store, magic pathspecs, `--pathspec-from-file`, `checkout-index` and index plumbing are not write targets.
+  - **NR-5 (low).** Case-sensitive `push` guess (performance only).
+  - **H5 remainder.** Git environment variables (`GIT_EXTERNAL_DIFF`, `GIT_CONFIG_*`, `GIT_PAGER`) for restricted agents.
+- N6 boundary analysis (owner-requested; owner decision pending):
+  - (a) Branch switch, merge, pull, stash, rebase and no-ref whole-tree restores can replace committed or uncommitted state files. Coordinator only, several times per work item. Reviewer recommends asking only when the target ref's state files differ from HEAD (a `git diff --quiet` check at hook time) or the ref is unresolved.
+  - (b) `patch`/`git apply`/`git am` from unknown files allow arbitrary tracked-file writes. Low frequency. Reviewer recommends ask, or deny when the store is named.
+  - (c) The unresolved-destination ask is the safe rule; narrowing to arbitrary variables is unsafe (`dist/$X` with `X=../..`). Only glob-only components under a literal non-protected subdirectory can safely be exempted.
+- Fix round 3 (Opus backend) covers NR-1 to NR-5 and the H5 remainder, and leaves seams for the N6 boundary pending the owner. Brief: `scratchpad/guard-probes/FIX-BRIEF-3.md`.
+
+## Owner rulings (2026-10-07): N6 boundary and performance
+- **N6(a): ask if state differs.** Branch switches (`checkout <branch>`, `switch`), merge, pull, rebase, cherry-pick, stash and no-ref whole-tree restores (`checkout -- .`, `restore .`, `reset --hard`).
+  - For a literal ref, the guard checks at hook time whether the ref's `.agents/specs` state files differ from HEAD, and whether there are uncommitted state changes the operation would discard.
+  - It asks only if they differ, the ref is unresolved, or the command is a pull. Otherwise there is no decision.
+  - This applies to every caller. Specialists are already denied Git writes.
+- **N6(b): ask if unknown.** `patch`, `git apply` and `git am` ask when the patch input is not text written in the same submission. When the input is known: deny if it touches a store path, otherwise no decision. `--include`, `--exclude` and `--directory` go through the pathspec rule.
+- **N6(c): narrow for globs only.** Any variable or substitution destination for a recursive or extract writer still asks. There is no decision only when every unresolved component is a glob under a literal subdirectory that is not the root, `.agents` or `.git`, and there is no `..`.
+- **Performance: specification correction by the cost driver (command count), approved by the owner.** Three independent properties, each with a test that validates its own fixture preconditions (size and/or command count):
+  1. typical commands, p95 < 150 ms;
+  2. linear per-command scaling with an explicit upper bound, set conservatively from measurement with headroom (not chosen just to make the current result pass), with the fixture's command count asserted;
+  3. large inert heredoc or data input bounded independently of command count (< 1 s up to 256 KB), with the fixture's byte size asserted.
+  
+  Reason: the byte-size proxy was invalid. Runtime is driven mainly by command count, and the original "8 KB" fixture was only about 3.5 KB. This is not acceptance of a regression and not a security trade. No size-triggered fallback, and no restructuring of security-sensitive classification for the old criterion unless profiling later finds a simple, maintainable optimisation. The chosen per-command bound and its measurement basis are recorded here once fix round 3 measures them.
+
 ## Finding status (verified facts only)
 | Finding | Status |
 | :- | :- |
@@ -107,6 +139,9 @@ Detailed evidence for WORK-001 delivery. The spec's "Implementation state" keeps
 | F-T3-1 | Resolved: env switch removed, regression tests, confirmed by the security review |
 | F-SEC-0, F-SEC-0b, H1–H6, M1–M4, L1–L3 | Open: fix round 1 implemented. Verified by the coordinator:<br>- fast gate `GATE fast: PASSED (exit 0) command: tests/run.sh` (912 passed);<br>- `compare.sh` with 0 mismatches and 0 v0.2-ask→none regressions on all three probe sets (101 Git, 221 HTTP/SQL/platform, 184 fix probes);<br>- `tests/run.sh` against `main` has 0 removed lines; one T2 expectation was made stricter (specialist bare `git checkout`: none→deny).<br>Focused re-review done: H2, H3, H4, M2, M4, L1, L2, L3 are **resolved**, and H6 is resolved for ASCII (Unicode folding continues under N6). H1, H5, M1, M3, F-SEC-0 and F-SEC-0b are **open** (partially resolved; fix round 2). |
 | N1–N6 (including the owner's N6 ruling), H1/H5/M1/M3 remainders | Open: fix round 2 implemented. Coordinator verification (independent of the agent's report; it was produced while the auto-mode safety classifier was unavailable):<br>- diff limited to the guard scripts, `tests/run.sh`, docs, changelog and log; no protected or system file changed;<br>- the only removed test lines are the 8 KB fixture generator and info line, replaced by a genuine 8159-byte fixture with a size assertion;<br>- the installed v0.2 cache is identical to tag `v0.2.0`, the install record is `b875f32`, and there is no `--plugin-dir`;<br>- `GATE fast: PASSED (exit 0) command: tests/run.sh` (1240 passed);<br>- `compare.sh` gives 0 mismatches and 0 v0.2-ask→none regressions on all four probe sets (552 probes); the probe-file edit changed only the two N6 lines (`any`→`ask`).<br>Focused re-review pending; not resolved until it confirms. |
+| Re-review 2 verdicts at 38bfb88 | **Resolved:** N1 (listed shapes), N4, M1, N6 log rotation. **Open:** N2 (restricted-agent Git environment), N3, N5, N6 Unicode, N6 owner ruling (partial), H1, H5, M3 remainders. |
+| NR-1 to NR-5, H5 environment, N6(a)(b)(c) rulings | Open: fix round 3 implemented. Coordinator verification:<br>- diff limited to the guard scripts and `tests/run.sh` (plus coordinator docs, spec and log); no protected or system file changed, and `guard-writes.sh` is unchanged;<br>- the only removed test lines are an outdated comment about the old 8 KB target;<br>- the v0.2 cache is identical to `v0.2.0`, the install record is `b875f32`, and there is no `--plugin-dir`;<br>- `GATE fast: PASSED (exit 0) command: tests/run.sh` (1409 passed);<br>- `compare.sh` gives 0 mismatches and 0 v0.2-ask→none regressions on all five probe sets (674 probes);<br>- my 27 original re-review-2 expectations are kept or strengthened (three NR-3c write-then-run cases ask→deny; boundary lines set to the owner's rulings).<br>Focused re-review pending. |
+| N6 boundary (a), (b), (c) | Owner ruled 2026-10-07; implemented in fix round 3; verification as above; re-review pending |
 | Performance (spec: p95 < 150 ms up to 8 KB) | **Not met**; see "Performance analysis". Not accepted; an owner recommendation is pending. |
 
 ## Owner ruling N6 (2026-10-07): ask, narrowly
@@ -127,6 +162,7 @@ Detailed evidence for WORK-001 delivery. The spec's "Implementation state" keeps
 - Not accepted as residual risk. It is implemented in WORK-001 and included in fix round 2 verification and the next focused re-review. No expansion into WORK-002 and no standards PR in this run.
 - **Dogfood lesson (preserve):** authority-store protection must consider the *write effect* of an operation, including writes through ancestor directories, not only literal protected path strings.
 - Process note: fix round 2's first run was cut short by a usage limit (HTTP 429) and was resumed from its transcript. Partial work was kept, not discarded.
+- Process note (2026-10-07): fix round 3 was also cut short by a usage limit, while it was adding the bounded hook-time Git checks for N6(a). Its partial edits are uncommitted and unverified. Resumption was held while Bash calls returned no pre-execution decision (the tool reported "auto mode classifier gave no verdict"), so that the agent would not run unreviewed again; the round-2 handback had to be audited for that reason. The root cause was not verified. On the owner's instruction, one harmless read-only probe (`pwd`) then received its decision and executed. Round 3 was resumed from the working tree. The partial state at resumption, unverified: `tests/run.sh` gave 1344 passed and 4 failed. The four were the agent's own pre-ruling N6 "seam unchanged" cases, now superseded by the owner's N6(a)/(b) rulings.
 
 ## Performance analysis (coordinator, 2026-10-07; genuine 8159-byte fixture of 140 pipelines, 280 commands)
 - End to end, 30 runs: committed `da81e8b` p50 167 / p95 182 ms; fix round 2 p50 201 / p95 215 ms. Typical command: p95 54 → 79 ms (within budget). The old "8 KB" fixture was 3.5 KB, which hid that `da81e8b` was already over.
@@ -135,12 +171,26 @@ Detailed evidence for WORK-001 delivery. The spec's "Implementation state" keeps
 - jq regex calls cost ≈ 2.5–4 µs each and `IN()` ≈ 2 µs. The per-command cost is spread across many checks, so there is no single hot regex.
 - Conclusion: no simple, maintainable optimisation was found. Meeting 150 ms for about 280 dense commands would need restructuring of the security-sensitive per-command analysis. The budget is met up to about 90–100 dense commands (about 5 KB) and for large heredocs.
 
+## Performance after fix round 3 (coordinator, independent measurement)
+- The three tests in `tests/run.sh`, each validating its own preconditions:
+  - (1) typical command: the fixture is asserted to be 4 commands; p95 of 20 runs, CI tolerance 500 ms against a 150 ms target;
+  - (2) scaling: fixtures are asserted to be exactly 141, 281 and 561 commands. The marginal cost per command from 70 to 280 pipelines must be **≤ 1500 µs**. Linearity: the 140→280 marginal must be ≤ 2 × the 70→140 marginal + 200 µs;
+  - (3) large inert input: a heredoc fixture asserted at 200 KB–256 KB, 1 s target, 2500 ms CI tolerance.
+- Chosen per-command bound: 1500 µs. Measured marginal ≈ 445–480 µs per command, linear (per-pipeline marginal 0.86/0.87/0.91 ms for 35–70/70–140/140–280 pipelines). The bound is about three times the measured value, the same headroom ratio as the existing CI tolerances (500 ms against a 150 ms target). Superlinear growth is caught separately by the linearity assertion.
+- Coordinator measurement, 30 runs each:
+  - typical command p95: 67 ms at `38bfb88`, 90 ms in round 3 (target < 150 ms);
+  - genuine 8159-byte command p95: 215 ms at `38bfb88`, 233 ms in round 3.
+
+  The agent reported 211 ms and 82 ms on its own runs; the discrepancy is recorded. The increase is fixed jq compile time from the added rules (≈ +15–17 ms; an empty command goes from about 50 to 67 ms), not per-command cost. One safe optimisation was taken: `classify_invocation` is skipped for programs no table can match, a set derived from the same tables.
+- Under the approved correction the 8 KB byte figure is no longer a criterion; the three properties above are. All three pass.
+
 ## Gate runs
 | Task | Gate | Verdict line |
 | :- | :- | :- |
 | T1 | fast | `GATE fast: FAILED (exit 1) command: tests/run.sh` (350 passed, 4 failed; the 4 are T3-dependent gate cases, see F-T1-1) |
 | T1+T3 | fast | `GATE fast: PASSED (exit 0) command: tests/run.sh` (386 passed, 0 failed) |
 | T2 | fast | `GATE fast: PASSED (exit 0) command: tests/run.sh` (619 passed, 0 failed) |
+| Fix round 3 (working tree before commit) | fast | `GATE fast: PASSED (exit 0) command: tests/run.sh` (1409 passed, 0 failed) |
 | Fix round 2 (working tree before commit) | fast | `GATE fast: PASSED (exit 0) command: tests/run.sh` (1240 passed, 0 failed) |
 | Fix round 1 | fast | `GATE fast: PASSED (exit 0) command: tests/run.sh` (912 passed, 0 failed) |
 | T4 (HEAD 89d1dcd) | full | `GATE full: PASSED (exit 0) command: scripts/check.sh` (shellcheck not installed; skipped, so AC 11 is not yet met) |

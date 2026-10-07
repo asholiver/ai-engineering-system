@@ -88,6 +88,8 @@ def option_texts($args; $flags):
 # ("$PLUGIN/scripts/run.sh") is a script call, not a dynamic program name.
 # The name is lower case (a case-insensitive file system runs `GIT` and `Terraform`), loses a
 # package version (`vercel@latest`) and maps package names to binaries (`netlify-cli`).
+# NR-2: a name with any non-ASCII character is dynamic (APFS folds look-alikes such as the Kelvin
+# sign into ASCII letters), so the parse is not confident and the fallback reads the folded text.
 def program_of:
   . as $word
   | ($word.l | contains("/")) as $has_path
@@ -97,7 +99,7 @@ def program_of:
   | {name: $base, path: $has_path,
      dynamic: ((if ($word.l | IN("[", "[[")) then false
                 elif $has_path then ($base | test("[$`*?\\[]"))
-                else $word.d end) or $base == "")};
+                else $word.d end) or $base == "" or ($base | test("[^\\x01-\\x7f]")))};
 
 # ---------------------------------------------------------------- wrappers
 def drop_assignments:
@@ -141,10 +143,11 @@ def xargs_replace($flags):
       else empty end
     | select(length > 0) ] | first // null;
 
-# Also returns dirs (working directories set by env -C / sudo -D, in order) and xargs
-# ({replace}: the wrapped command reads its arguments from standard input).
+# Also returns dirs (working directories set by env -C / sudo -D, in order), xargs
+# ({replace}: the wrapped command reads its arguments from standard input) and assigns (the
+# NAME=value words env and sudo set for the wrapped command, H5).
 def unwrap($words):
-  {ws: $words, lookup: false, n: 0, stop: false, texts: [], names: [], unc: false, dirs: [], xargs: null}
+  {ws: $words, lookup: false, n: 0, stop: false, texts: [], names: [], unc: false, dirs: [], xargs: null, assigns: []}
   | until(.stop or .n >= 8 or (.ws | length) == 0;
       .n += 1
       # `docker compose exec` is the docker-compose program.
@@ -191,6 +194,7 @@ def unwrap($words):
                 elif $spec.noexec then .ws = []
                 else
                   (if $spec.assign then ($after | drop_assignments) else $after end) as $stripped
+                  | .assigns += [ $after[0:(($after | length) - ($stripped | length))][].l ]
                   | .ws = (if $spec.skip != null then $stripped[$spec.skip:] else $stripped end)
                 end
             end
@@ -258,11 +262,12 @@ def git_resolved($args):
       | git_parts(.args) as $git
       | ([ git_inline_aliases(.args)[] | select(.name == (($git.sub // "") | ascii_downcase)) ] | first) as $hit
       | if $hit == null then .done = true
-        elif $hit.unknown then .unc = true | .done = true
+        # NR-1: Git splits an alias on ASCII whitespace only; other spaces leave the split unknown.
+        elif $hit.unknown or ($hit.value | test(odd_space_regex)) then .unc = true | .done = true
         elif ($hit.value | startswith("!")) then
           .text = ($hit.value[1:] + (if ($git.rest | length) > 0 then " " + ($git.rest | map(shell_quote) | join(" ")) else "" end))
           | .done = true
-        else .args = ([ $hit.value | scan("[^\\s]+") ] + $git.rest) end)
+        else .args = ([ $hit.value | scan("[^ \\t\\n]+") ] + $git.rest) end)
   | .unc = (.unc or (.done | not))
   | git_parts(.args) as $final
   | .unc = (.unc or (.text == null and $final.sub != null and ($final.sub | IN(git_commands[]) | not)))
@@ -480,7 +485,9 @@ def script_ops($program; $path; $args):
 
 # ---------------------------------------------------------------- data scanning
 # SQL block comments (and `-- ` line comments) are removed before scanning, so DROP/**/TABLE is seen.
-def strip_sql_comments: gsub("/\\*[\\s\\S]*?\\*/"; " ") | gsub("(^|\\s)--\\s[^\\n]*"; " ");
+# A line comment needs ASCII space or tab around `--` (NR-1): a Unicode space after `--` is not a
+# comment for MySQL, so removing the rest of the line could hide a statement.
+def strip_sql_comments: gsub("/\\*[\\s\\S]*?\\*/"; " ") | gsub("(^|[ \\t\\n])--[ \\t][^\\n]*"; " ");
 
 # Programs whose arguments and standard input are SQL: the clients, `turso ... shell`, and
 # `prisma db execute`.
@@ -571,6 +578,13 @@ def gh_workflow_ops($program; $args):
       then [{l: ("gh workflow run " + $words[2]), c: ["unclassified-deploy"]}] else [] end
   else [] end;
 
+# Every program classify_invocation can classify (besides interpreters, matched by regex, and
+# programs run by path). Derived from the same tables, computed once per submission (parse_script):
+# for any other program each part of classify_invocation returns nothing, so it is skipped.
+def classified_programs:
+  [ rules[].p[] ] + ["git", "gh", "glab", "curl", "wget", "http", "https", "xh", "xhs", "vercel", "vc", "netlify", "ntl", "turso", "prisma"]
+  + task_runners_packages + task_runners_other + script_runners + sql_clients | unique;
+
 def classify_invocation($program; $path; $args; $stdin; $branch):
   ( rule_ops($program; $args)
     + (if $program == "git" then git_ops($args; $branch) else [] end)
@@ -617,39 +631,163 @@ def command_facts($command; $program; $args; $git; $chdir):
 def redirect_only_facts($command; $chdir):
   if ($command.r | length) > 0 then [{prog: null, sub: null, args: [], globals: [], redirs: redirect_facts($command), stdin: [], chdir: $chdir}] else [] end;
 
-# What the whole submission sets up, for commands that depend on it: the text written to files
-# by heredocs, here-strings, echo and printf (`cat > f <<EOF ... EOF`, then `psql -f f`).
-# Aliases are tracked in order instead (see parse_script_in): only one defined earlier counts.
-def file_key: sub("^\\./"; "");
-
-def all_raw_commands($raw): [ $raw.units[][] | recurse(.n[]?) ];
-
-def collect_context($raw; $outer):
-  reduce all_raw_commands($raw)[] as $command ($outer;
-    ([ $command.w[].l ]) as $words
-    | ($words[0] // "") as $head
-    | ([ $command.r[] | select(.op | IN(">", ">>")) | .t ]
-       + (if $head == "tee" then [ $words[1:][] | select(startswith("-") | not) ] else [] end)) as $targets
-    | (own_stdin($command) + (if $head | IN("echo", "printf") then echoed_texts([$command]) else [] end)) as $content
-    | reduce $targets[] as $target (.;
-        .files[($target | file_key)] = ((.files[($target | file_key)] // "") + ($content | join("\n")) + "\n")));
-
-# Text the earlier commands of a pipeline feed to a shell: echo and printf output, and a bare
-# `cat` with a heredoc or here-string. Anything else is unknown input.
-def producer_input($before):
-  reduce $before[] as $producer ({texts: [], unknown: false};
-    ([ $producer.w[].l ]) as $words
-    | if ($words | length) == 0 then .
-      elif ($words[0] | IN("echo", "printf")) then .texts += echoed_texts([$producer])
-      elif $words[0] == "cat" and ([ $words[1:][] | select(startswith("-") | not) ] | length) == 0 then .texts += own_stdin($producer)
-      else .unknown = true end);
-
 # Programs that cannot write or run anything: a substitution made of these is not another
 # effectful command (`export V=$(git describe)`).
 def readonly_programs: ["echo", "printf", "cat", "grep", "egrep", "fgrep", "rg", "ag", "ack", "jq", "yq", "head", "tail", "wc", "sort",
                         "uniq", "cut", "tr", "diff", "cmp", "ls", "tree", "stat", "file", "du", "df", "basename", "dirname", "realpath",
                         "readlink", "pwd", "date", "which", "type", "whoami", "id", "uname", "hostname", "test", "[", "[[", "shasum",
                         "sha256sum", "md5", "md5sum", "base64", "xxd", "printenv"];
+
+# Text the earlier commands of a pipeline feed to a shell: echo and printf output, and a bare
+# `cat` with a heredoc or here-string. Anything else is unknown input, and so is a pipeline head
+# inside a process substitution (ph) that reads its standard input: that is the outer stream.
+def producer_input($before):
+  reduce $before[] as $producer ({texts: [], unknown: false};
+    ([ $producer.w[].l ]) as $words
+    | if ($words | length) == 0 then .
+      elif ($words[0] | IN("echo", "printf")) then .texts += echoed_texts([$producer])
+      elif $words[0] == "cat" and ([ $words[1:][] | select(startswith("-") | not) ] | length) == 0
+           and (($producer.ph // false) | not) then .texts += own_stdin($producer)
+      else .unknown = true end);
+
+# ---------------------------------------------------------------- what the submission sets up
+# For commands that depend on earlier ones: the files this submission writes with known text
+# (`cat > f <<EOF ... EOF`, then `psql -f f` or `sh f`), the Git environment it exports (H5) and
+# its working directory. Aliases are tracked in order instead (see parse_script_in).
+#
+# NR-3c paths are keyed lexically and relative to the submission's starting directory, as moved
+# by cd and pushd: "" is that directory, null an unknown one (cd to a variable, cd -, popd).
+def lexical_path:
+  startswith("/") as $absolute
+  | (split("/") | reduce .[] as $segment ([];
+       if $segment == "" or $segment == "." then .
+       elif $segment == ".." then (if length > 0 and .[-1] != ".." then .[0:-1] elif $absolute then . else . + [".."] end)
+       else . + [$segment] end) | join("/"))
+  | if $absolute then "/" + . else . end;
+
+# The key of $path used in directory $dir, or null when it cannot be known.
+def path_key($dir; $path):
+  if $dir == null or $path == null or $path == "" or ($path | test("[$`*?\\[{]|^~")) then null
+  elif ($path | startswith("/")) or $dir == "" then $path | lexical_path
+  else ($dir + "/" + $path) | lexical_path end;
+
+# Each top-level command gets dir: the directory it runs in. A cd inside a subshell is treated as
+# lasting; when that guesses wrong, the exposure rule in collect_context keeps the written text
+# in the keyword floor.
+def annotate_directories($start):
+  .units |= (reduce .[] as $unit ({dir: $start, out: []};
+    (reduce $unit[] as $command ({dir: .dir, cmds: []};
+       .cmds += [$command + {dir: .dir}]
+       | ($command.w[0].l // "") as $head
+       | if $head == "cd" or $head == "pushd" then
+           ([ $command.w[1:][] | select(.l | startswith("-") | not) ] | first) as $target
+           | .dir = (if $target == null or $target.d then null else path_key(.dir; $target.l) end)
+         elif $head == "popd" then .dir = null
+         else . end)) as $result
+    | .dir = $result.dir | .out += [$result.cmds]) | .out);
+
+def leading_count($words; $regex):
+  ([ range(0; $words | length) as $i | select($words[$i] | test($regex) | not) | $i ] | first) // ($words | length);
+
+# The text an echo or printf writes is known exactly: no expansion, no escape, no option after
+# the text, and a printf format that is plain text, %s\n, or %s with one argument.
+def echo_exact($command):
+  ([ $command.w[].l ]) as $words
+  | ($words[1 + leading_count($words[1:]; "^-[neE]+$"):]) as $operands
+  | (any($command.w[1:][]; .d) | not)
+    and (any($operands[]; startswith("-")) | not)
+    and (if $words[0] == "printf" then
+           (($operands[0] // "") as $format
+            | (any($operands[1:][]; contains("\\")) | not)
+              and (($format | IN("%s\\n", "%s\n")) or ($format == "%s" and ($operands | length) == 2)
+                   or (($format | test("[%\\\\]")) | not)))
+         else (any($operands[]; contains("\\")) | not) end);
+
+# Heredoc bodies and here-strings are known exactly (quoted delimiter, or no expansion or escape).
+def stdin_exact($command):
+  all($command.r[]; if .op == "<<" then ((.q // false) or ((.body | test("[$`\\\\]")) | not))
+                    elif .op == "<<<" then ((.d // false) | not) else true end);
+
+# What a command reads on standard input, when that is known: its heredoc or here-string, else
+# the output of the earlier commands of its pipeline (echo, printf, cat of a heredoc). {texts, known}.
+def stdin_content($command; $before):
+  own_stdin($command) as $own
+  | if ($own | length) > 0 then {texts: $own, known: stdin_exact($command)}
+    else
+      producer_input($before) as $fed
+      | {texts: $fed.texts,
+         known: (($before | length) > 0 and ($fed.unknown | not)
+                 and all($before[]; if (.w[0].l | IN("echo", "printf")) then echo_exact(.)
+                                    else ((own_stdin(.) | length) > 0 and stdin_exact(.)) end))}
+    end;
+
+# What a command writes to its redirections and tee targets: {texts, known}. Only echo, printf,
+# a bare cat and tee have known text; cat and tee pass on their heredoc or their pipeline input.
+def written_content($command; $before):
+  ([ $command.w[].l ]) as $words
+  | ($words[0] // "") as $head
+  | if ($head | IN("echo", "printf")) then {texts: echoed_texts([$command]), known: echo_exact($command)}
+    elif ($head == "cat" and ($words | length) == 1) or $head == "tee" then stdin_content($command; $before)
+    else {texts: [], known: false} end;
+
+# Programs (first word) that can write a file with text from this submission in ways not recorded
+# above: copy, fetch, extract and patch tools, in-place editors, interpreters and shells (their
+# code is parsed or proven data, not followed into files), and the generic wrappers.
+def file_writer_programs:
+  ["cp", "mv", "install", "ln", "curl", "wget", "tar", "gtar", "bsdtar", "unzip", "dd", "rsync", "ditto", "patch", "cpio", "pax",
+   "7z", "7za", "7zz", "sponge", "split", "csplit", "openssl", "gzip", "gunzip", "bzip2", "bunzip2", "xz", "unxz", "zstd",
+   "uudecode", "sed", "perl", "awk", "gawk", "mawk", "nawk", "eval", "find", "make", "gmake",
+   "sudo", "doas", "env", "time", "nice", "ionice", "nohup", "setsid", "exec", "builtin", "command", "stdbuf", "timeout", "xargs",
+   "caffeinate", "chronic", "unbuffer", "chrt", "taskset", "flock", "script", "su", "nix-shell", "watch", "parallel", "coproc"]
+  + shells;
+def raw_head($command): (($command.w[0].l // "") | split("/") | last // "") | ascii_downcase;
+def is_file_writer($command):
+  raw_head($command) as $head
+  | has_word(file_writer_programs; $head) or ($head | test(interpreters_regex))
+    or ($head == "git" and any($command.w[]; .l | IN("apply", "am")));
+def task_runner_programs: task_runners_packages + task_runners_other;
+
+# Context fields: files {key: {t: text, k: known}}, opaque (a write whose target is unknown),
+# writers (commands that can write files some other way), files_exposed (written text is not
+# proven data: a written file's name is used again by a command that can run it, or a task
+# runner runs), exports (Git-relevant NAME=value words set for the rest of the submission), dir.
+def all_raw_commands_of($raw): [ $raw.units[][] | recurse(.n[]?) ];
+
+def collect_context($raw; $outer):
+  reduce ($raw.units[] | . as $unit | range(0; length) as $i
+          | ({c: $unit[$i], b: $unit[0:$i]}, ($unit[$i].dir as $dir | $unit[$i].n[]? | recurse(.n[]?) | {c: (. + {dir: $dir}), b: []}))) as $item ($outer;
+    $item.c as $command
+    | $command.dir as $dir
+    | ([ $command.w[].l ]) as $words
+    | raw_head($command) as $head
+    | ([ $command.r[] | select(.op | IN(">", ">>", ">|", "&>", "&>>")) | {l: .t, d: (.d // false)} ]
+       + (if $words[0] == "tee" then [ $command.w[1:][] | select(.l | startswith("-") | not) ] else [] end)) as $targets
+    | (if ($targets | length) > 0 then written_content($command; $item.b) else null end) as $content
+    | reduce $targets[] as $target (.;
+        (if $target.d then null else path_key($dir; $target.l) end) as $key
+        | if $key == null then .opaque = true
+          else .files[$key] = {t: ((.files[$key].t // "") + ($content.texts | join("\n")) + "\n"),
+                               k: ((.files[$key].k // true) and $content.known)} end)
+    # runs: the submission may run a script (sh f, source f, . f, ./f, /abs/f, also through a
+    # wrapper), so the writers below are counted.
+    | (if ($head | IN("source", ".")) or has_word(shells; $head) or (($words[0] // "") | contains("/")) or wrappers[$head] != null
+       then .runs = true else . end)
+    # H5: exported (or plainly assigned, which updates an exported name) Git-relevant variables.
+    | .exports += [ (if ($words | length) == 0 then $command.a[].l
+                     elif $head | IN("export", "declare", "typeset", "readonly", "local") then ($words[1:][] | select(startswith("-") | not))
+                     else empty end)
+                    | select(sub("=.*$"; "") | test(git_env_tracked_regex)) ])
+  # Counted only when a script may run: the count matters only for a script's unknown text.
+  | (if .runs then .writers += ([ all_raw_commands_of($raw)[] | select(is_file_writer(.)) ] | length) else . end)
+  | if (.files | length) == 0 then .
+    else
+      ([ .files | keys[] | split("/") | last ]) as $names
+      | .files_exposed = (.files_exposed or any(all_raw_commands_of($raw)[];
+          raw_head(.) as $head
+          | has_word(task_runner_programs; $head)
+            or (($head != "tee") and (has_word(readonly_programs; $head) | not)
+                and any(.w[]; (.l | split("/") | last) as $base | has_word($names; $base)))))
+    end;
 
 # A redirection that writes a file (not /dev/null, a terminal or a file descriptor duplicate).
 def writes_files($command):
@@ -877,12 +1015,24 @@ def proven_data($program; $args; $git; $exposed):
     elif $program == "sed" then {args: sed_script_indexes($args), stdin: false}
     else {args: ((http_url_indexes($program; $args) + package_operand_indexes($program; $args) + gh_release_read_indexes($program; $args)) | unique), stdin: false} end;
 
+# A process substitution among the command's words or redirection targets (NR-3a): what the
+# command reads or writes may go to a program, so neither its own text nor its input is data.
+def has_procsub($command): any($command.w[]; .ps != null) or any($command.r[]; .p // false);
+
+# A data sink given an option that runs a program (sort --compress-program, NR-3b).
+def sink_runs_program($head; $command):
+  (data_sink_exec_regex[$head] // null) as $regex
+  | $regex != null and any($command.w[1:][]; .l | test($regex));
+
 # Every later command of the pipeline is a data sink, or a reader whose input is parsed or scanned.
 def downstream_ok($after):
-  all($after[]; ((.w | length) == 0)
-      or ((.w[0].l | split("/") | last | ascii_downcase) as $head
-          | has_word(data_sinks; $head) or has_word(shells; $head) or has_word(sql_clients; $head) or $head == "xargs"
-            or ($head | test(interpreters_regex))));
+  all($after[]; . as $command
+      | (has_procsub($command) | not)
+        and (((.w | length) == 0)
+             or ((.w[0].l | split("/") | last | ascii_downcase) as $head
+                 | (has_word(data_sinks; $head) and (sink_runs_program($head; $command) | not))
+                   or has_word(shells; $head) or has_word(sql_clients; $head) or $head == "xargs"
+                   or ($head | test(interpreters_regex)))));
 
 # The floor text of one command: assignments, the words that are not proven data, loop and case
 # header words, redirection targets, the standard input unless it is proven data, and $fed (text
@@ -897,26 +1047,37 @@ def command_floor($command; $words; $data; $stdin_data; $fed):
     $fed[] ]
   | map(select(length > 0));
 
+# A file this submission wrote: {t: text, k: known exactly}, or null.
+def file_entry($ctx; $dir; $path):
+  path_key($dir; $path) as $key | if $key == null then null else ($ctx.files[$key] // null) end;
+
 # Analyses one parsed command. Substitution commands it contains are analysed too and
 # their operations belong to it. Shell text it runs is parsed into extra units.
 # $outer carries what the enclosing submission wrote to files and which aliases it defined.
+#
+# Two kinds of uncertainty: unc (the parse itself is not confident: the fallback replaces it) and
+# soft (the parse is sound but something it runs is unknown: a script this submission may have
+# written, a shell reading a process substitution's stream). With soft and no decision, main.jq
+# applies the fallback; a decision the parse reached (ask or deny) stands.
 def parse_script_in($text; $depth; $branch; $outer):
   def parse_texts($texts; $ctx):
-    reduce $texts[] as $inner_text ({units: [], uncertain: false};
+    reduce $texts[] as $inner_text ({units: [], uncertain: false, soft: false};
       parse_script_in($inner_text; $depth + 1; $branch; $ctx) as $result
-      | .units += $result.units | .uncertain = (.uncertain or $result.uncertain));
+      | .units += $result.units | .uncertain = (.uncertain or $result.uncertain) | .soft = (.soft or $result.soft));
 
   # $before / $after: the other commands of the same pipeline. $ctx: files (written by this
   # submission), aliases (defined earlier: name -> {value, dynamic}), captured (the output is
-  # used as words, so echo and friends are not data) and chdir (directories set by wrappers).
-  def analyse($command; $before; $after; $ctx):
-    ($ctx.captured or (downstream_ok($after) | not)) as $exposed
+  # used as words, so echo and friends are not data), chdir (directories set by wrappers) and dir
+  # (the directory a top-level command runs in, see annotate_directories).
+  def analyse($command; $before; $after; $ctx_in):
+    (if ($command | has("dir")) then $ctx_in + {dir: $command.dir} else $ctx_in end) as $ctx
+    | ($ctx.captured or (downstream_ok($after) | not) or has_procsub($command) or ($ctx.files_exposed // false)) as $exposed
     | ( if ($command.w | length) == 0 then
           {kind: (if $command.hdr == "loop" then "eff"
                   elif ($command.a | length) > 0 and ($command.r | length) == 0 then "ctx"
                   elif ($command.r | length) > 0 then "eff"
                   else "none" end),
-           ops: [], extra: [], cmds: redirect_only_facts($command; $ctx.chdir), unc: false, own_op: false, consumer: false, readonly: false,
+           ops: [], extra: [], cmds: redirect_only_facts($command; $ctx.chdir), unc: false, soft: false, own_op: false, consumer: false, readonly: false,
            data_words: [], defines: {}, floor: command_floor($command; []; []; false; [])}
         else
           unwrap($command.w) as $unwrapped
@@ -924,19 +1085,23 @@ def parse_script_in($text; $depth; $branch; $outer):
           | parse_texts([ $unwrapped.texts[] | select(length > 0) ]; $wrapped_ctx) as $wrapped
           | if $unwrapped.lookup or ($unwrapped.ws | length) == 0 then
               {kind: "none", ops: [], extra: $wrapped.units, cmds: redirect_only_facts($command; $ctx.chdir), unc: ($unwrapped.unc or $wrapped.uncertain),
-               own_op: false, consumer: false, readonly: false, data_words: [], defines: {}, floor: command_floor($command; $command.w; []; false; [])}
+               soft: $wrapped.soft, own_op: false, consumer: false, readonly: false, data_words: [], defines: {}, floor: command_floor($command; $command.w; []; false; [])}
             elif ($unwrapped.ws[0] | program_of).dynamic then
-              {kind: "eff", ops: [], extra: $wrapped.units, cmds: [], unc: true, own_op: false, consumer: false, readonly: false,
+              {kind: "eff", ops: [], extra: $wrapped.units, cmds: [], unc: true, soft: false, own_op: false, consumer: false, readonly: false,
                data_words: [], defines: {}, floor: command_floor($command; $command.w; []; false; [])}
             else
                   # xargs: the producer's text becomes arguments (appended, or in place of the -I string).
+                  # xargs splits on ASCII blanks and newlines only (NR-1); other spaces leave the arguments unknown.
                   (if $unwrapped.xargs != null then producer_input($before) else {texts: [], unknown: true} end) as $xargs_input
                   | ($xargs_input.texts | join("\n")) as $fed_text
-                  | (if $unwrapped.xargs == null or $xargs_input.unknown or $fed_text == "" then $unwrapped.ws
+                  | ($unwrapped.xargs != null and ($fed_text | test(odd_space_regex))) as $xargs_odd
+                  | (if $unwrapped.xargs == null or $xargs_input.unknown or $fed_text == "" or $xargs_odd then $unwrapped.ws
                      elif $unwrapped.xargs.replace != null then [ $unwrapped.ws[] | .l |= (split($unwrapped.xargs.replace) | join($fed_text)) ]
                      elif has_word(shells; ($unwrapped.ws[0] | program_of).name) and shell_without_script($unwrapped.ws[1:] | map(.l)) then
                        $unwrapped.ws + [{l: $fed_text, d: false, s: []}]
-                     else $unwrapped.ws + [ $fed_text | [scan("[^\\s]+")][] | {l: ., d: false, s: []} ] end) as $ws
+                     else $unwrapped.ws + [ $fed_text | [scan("[^ \\t\\n]+")][] | {l: ., d: false, s: []} ] end) as $ws
+                  # The directory the program runs in (cd tracking plus env -C / sudo -D), for files it reads.
+                  | (reduce $unwrapped.dirs[] as $directory ($ctx.dir; path_key(.; $directory))) as $run_dir
                   | ($command.w[0:(($command.w | length) - ($unwrapped.ws | length))] + $ws) as $all_words
                   | (($all_words | length) - ($ws | length) + 1) as $first_argument
                   | ($ws[0] | program_of) as $program
@@ -954,11 +1119,13 @@ def parse_script_in($text; $depth; $branch; $outer):
                   | (if $is_sql then
                        ([ sql_file_arguments($args)[], ([ $command.r[] | select(.op == "<") | .t ][]),
                           ([ $before[] | select(.w[0].l == "cat") | .w[1:][].l | select(startswith("-") | not) ][]) ]) as $refs
-                       | {texts: [ $refs[] | $ctx.files[file_key] | select(. != null) ],
-                          unknown: (([ $refs[] | select($ctx.files[file_key] == null) ] | length) > 0)}
+                       | [ $refs[] | file_entry($ctx; $run_dir; .) ] as $entries
+                       | {texts: [ $entries[] | select(. != null) | .t ],
+                          unknown: (([ $entries[] | select(. == null) ] | length) > 0)}
                      else {texts: [], unknown: false} end) as $sql_files
                   | ($own_input + producer_texts($before) + $sql_files.texts) as $stdin
-                  | classify_invocation($program.name; $program.path; $args; $stdin; $branch) as $direct_op
+                  | (if $program.path or has_word($ctx.classified // classified_programs; $program.name) or ($program.name | test(interpreters_regex))
+                     then classify_invocation($program.name; $program.path; $args; $stdin; $branch) else null end) as $direct_op
                   # pnpm and yarn run a binary when the word is not one of their own commands.
                   | (if has_word(binary_runners; $program.name) then
                        skip_flags_s($args; ["-C", "--dir", "--filter", "-F", "--cwd"]) as $at
@@ -972,9 +1139,18 @@ def parse_script_in($text; $depth; $branch; $outer):
                   | (shell_run($program.name; $args) // {}) as $run
                   | (if $run.stdin == true then producer_input($before) else {texts: [], unknown: false} end) as $fed
                   | (if $run.stdin == true then
-                       [ $command.r[] | select(.op == "<") | .t ] as $redirected
-                       | {texts: [ $redirected[] | $ctx.files[file_key] | select(. != null) ], unknown: (([ $redirected[] | select($ctx.files[file_key] == null) ] | length) > 0)}
+                       [ $command.r[] | select(.op == "<") | file_entry($ctx; $run_dir; .t) ] as $entries
+                       | {texts: [ $entries[] | select(. != null) | .t ], unknown: (([ $entries[] | select(. == null) ] | length) > 0)}
                      else {texts: [], unknown: false} end) as $redirected_input
+                  # NR-3c: a script run by a shell, source or `.`, or a program run by its path. The text
+                  # this submission wrote to it is parsed; when the submission writes files and the
+                  # script's text is not known exactly, the parse is soft-uncertain.
+                  | (if $run.file != null then $run.file elif $program.path then $ws[0].l else null end) as $script_path
+                  | (if $script_path == null then null else file_entry($ctx; $run_dir; $script_path) end) as $script_entry
+                  | ($script_path != null
+                     and ($script_entry == null or ($script_entry.k | not) or ($ctx.opaque // false))
+                     and ((($ctx.files // {}) | length) > 0 or ($ctx.opaque // false)
+                          or (($ctx.writers // 0) - (if is_file_writer($command) then 1 else 0 end)) > 0)) as $script_unknown
                   | (if $run.procsub != null then
                        parse_raw($run.procsub; $depth + 1) as $inner_raw
                        | producer_input([ $inner_raw.units[][] ]) + {unknown_parse: $inner_raw.uncertain}
@@ -982,16 +1158,17 @@ def parse_script_in($text; $depth; $branch; $outer):
                   | ([ ($run.texts // [])[],
                        (if $run.stdin == true then (($own_input + $fed.texts + $redirected_input.texts) | join("\n")) else empty end),
                        (if $run.procsub != null then ($procsub.texts | join("\n")) else empty end),
-                       (if $run.file != null then ($ctx.files[($run.file | file_key)] // empty) else empty end),
+                       (if $script_entry != null then $script_entry.t else empty end),
                        (if $git.text != null then $git.text else empty end) ]
                      | map(select(. != ""))) as $shell_texts
                   | ($ctx.chdir + $unwrapped.dirs) as $chdir
-                  | ($ctx + {chdir: ($chdir + (if $git_parts != null then git_directory_options($git_parts.globals) else [] end)), captured: $exposed}) as $run_ctx
+                  | ($ctx + {chdir: ($chdir + (if $git_parts != null then git_directory_options($git_parts.globals) else [] end)), captured: $exposed, dir: $run_dir}) as $run_ctx
                   | parse_texts($shell_texts; $run_ctx) as $shell_run
                   # Bash does not expand an alias again inside its own expansion.
                   | parse_texts($alias_texts; $run_ctx | .aliases |= del(.[$program.name])) as $expansion
                   | ($shell_texts + $alias_texts) as $inner_texts
-                  | {units: ($shell_run.units + $expansion.units), uncertain: ($shell_run.uncertain or $expansion.uncertain)} as $inner
+                  | {units: ($shell_run.units + $expansion.units), uncertain: ($shell_run.uncertain or $expansion.uncertain),
+                     soft: ($shell_run.soft or $expansion.soft)} as $inner
                   # Executing constructs of other programs (git -x, awk system(), tar --to-command, ...).
                   | carrier_texts($program.name; $args; $git_parts) as $carrier
                   | parse_texts([ $carrier.texts[] | select(length > 0) ]; $run_ctx) as $carried
@@ -1012,14 +1189,34 @@ def parse_script_in($text; $depth; $branch; $outer):
                                       (if $git_parts != null and $git.args == $raw_args then $git_parts + {offset: (skip_flags_s($args; git_value_flags) + 1)} else null end);
                                       $exposed) end) as $proven
                   | ([ $proven.args[] | . + $first_argument ]) as $data_words
+                  # N6(b): the patch a patch, git apply or git am reads: files this submission wrote with
+                  # known text, its heredoc, or its pipeline input; anything else is unknown.
+                  | (if $program.name == "patch" or ($git_parts != null and (($git_parts.sub // "") | IN("apply", "am"))) then
+                       (if $program.name == "patch" then option_texts($args; ["-i", "--input"]) + (($args | positionals_skipping(patch_value_flags))[1:2])
+                        else ($git_parts.rest | positionals_skipping(git_patch_value_flags)) end) as $patch_files
+                       | ($patch_files + [ $command.r[] | select(.op == "<") | .t ]) as $sources
+                       | if ($sources | length) > 0 then
+                           [ $sources[] | file_entry($ctx; $run_dir; .) ] as $entries
+                           | {texts: [ $entries[] | select(. != null) | .t ],
+                              known: (all($entries[]; . != null and .k) and (($ctx.opaque // false) | not))}
+                         else stdin_content($command; $before) end
+                     else null end) as $patch
                   | {kind: (if ($inner_texts | length) > 0 then "none"
                             elif is_context($program.name; $args) and $op == null then "ctx" else "eff" end),
                      ops: (if $op == null then [] else [$op] end),
                      extra: ($wrapped.units + $inner.units + $carried.units),
-                     cmds: command_facts($command; $program.name; $args; $git_parts; $chdir),
+                     # H5: the environment a Git command runs with (prefix assignments, env/sudo
+                     # assignments and Git-relevant exports earlier in the submission).
+                     cmds: (command_facts($command; $program.name; $args; $git_parts; $chdir)
+                            | if $program.name == "git" then map(.env = ([ $command.a[].l ] + $unwrapped.assigns + ($ctx.exports // []))) else . end
+                            | if $patch != null then map(.patch = $patch) else . end),
                      unc: ($unwrapped.unc or $wrapped.uncertain or $inner.uncertain or $carried.uncertain or $carrier.unc or $dynamic_decides or $git.unc
                            or ($alias != null and $alias.dynamic)
                            or ($sql_files.unknown and $op == null) or $fed.unknown or $procsub.unknown or ($procsub.unknown_parse // false)),
+                     # NR-3a: a shell, SQL client or xargs heading a process substitution reads the
+                     # outer command's stream, which no producer here accounts for.
+                     soft: ($wrapped.soft or $inner.soft or $carried.soft or $script_unknown or $xargs_odd
+                            or (($command.ph // false) and (($run.stdin == true) or $is_sql or (($unwrapped.names | index("xargs")) != null)))),
                      # A program that runs the operation through an executing construct carries it (`git rebase -x 'op'`).
                      own_op: ($op != null or any($carried.units[]; (.ops | length) > 0)),
                      consumer: ((($unwrapped.names | index("xargs")) != null) or $is_sql or ($run.stdin == true)),
@@ -1038,12 +1235,12 @@ def parse_script_in($text; $depth; $branch; $outer):
             end
         end ) as $own
     # Commands in substitutions. One in a proven-data word feeds that data; any other is captured.
-    | (reduce range(0; $command.n | length) as $i ({ops: [], extra: [], cmds: [], unc: false, floor: [], nested_others: 0, effectful_inner: false};
+    | (reduce range(0; $command.n | length) as $i ({ops: [], extra: [], cmds: [], unc: false, soft: false, floor: [], nested_others: 0, effectful_inner: false};
          $command.n[$i] as $nested_command
          | (if has_word($own.data_words; ($nested_command.o // -1)) then $ctx else $ctx + {captured: true} end) as $nested_ctx
          | analyse($nested_command; $command.n[0:$i]; $command.n[$i + 1:]; $nested_ctx) as $inner
          | .ops += $inner.ops | .extra += $inner.extra | .cmds += $inner.cmds | .floor += $inner.floor
-         | .unc = (.unc or $inner.unc)
+         | .unc = (.unc or $inner.unc) | .soft = (.soft or $inner.soft)
          # N4: a substitution that runs something other than a read-only command is another effectful command,
          # except the SQL statement a destructive-SQL operation was classified from (node -e "sql`DROP ...`").
          | (any($own.ops[]; has_word(.c; "destructive-sql"))
@@ -1053,24 +1250,25 @@ def parse_script_in($text; $depth; $branch; $outer):
          | .effectful_inner = (.effectful_inner or $effectful))) as $nested
     | {kind: (if $own.kind == "ctx" and $nested.effectful_inner then "eff" else $own.kind end),
        ops: ($own.ops + $nested.ops), extra: ($own.extra + $nested.extra),
-       cmds: ($own.cmds + $nested.cmds), unc: ($own.unc or $nested.unc),
+       cmds: ($own.cmds + $nested.cmds), unc: ($own.unc or $nested.unc), soft: ($own.soft or $nested.soft),
        # A read-only command that only hosts a substitution holding the operation (`echo $(op)`) is not another command.
        own_op: ($own.own_op or ($own.readonly and ($nested.ops | length) > 0)), consumer: $own.consumer,
        readonly: $own.readonly, floor: ($own.floor + $nested.floor), nested_others: $nested.nested_others, defines: $own.defines};
 
-  if $depth >= 6 then {units: [], uncertain: true}
+  if $depth >= 6 then {units: [], uncertain: true, soft: false}
   else
-    parse_raw($text; $depth) as $raw
+    (parse_raw($text; $depth) | annotate_directories($outer.dir)) as $raw
     | collect_context($raw; $outer) as $ctx
-    | reduce $raw.units[] as $unit ({units: [], uncertain: $raw.uncertain, aliases: $ctx.aliases};
-        (reduce range(0; $unit | length) as $i ({ops: [], extra: [], cmds: [], items: [], unc: false, floor: [], nested_others: 0, aliases: .aliases};
+    | reduce $raw.units[] as $unit ({units: [], uncertain: $raw.uncertain, soft: false, aliases: $ctx.aliases};
+        (reduce range(0; $unit | length) as $i ({ops: [], extra: [], cmds: [], items: [], unc: false, soft: false, floor: [], nested_others: 0, aliases: .aliases};
            analyse($unit[$i]; $unit[0:$i]; $unit[$i + 1:]; $ctx + {aliases: .aliases}) as $result
            | .ops += $result.ops | .extra += $result.extra | .cmds += $result.cmds | .floor += $result.floor
            | .nested_others += $result.nested_others
            | .aliases += $result.defines
            | .items += [{kind: $result.kind, own_op: $result.own_op, readonly: $result.readonly}]
-           | .unc = (.unc or $result.unc))) as $unit_result
+           | .unc = (.unc or $result.unc) | .soft = (.soft or $result.soft))) as $unit_result
         | .aliases = $unit_result.aliases
+        | .soft = (.soft or $unit_result.soft)
         | ([ $unit_result.items[] | .kind ]) as $kinds
         | (if has_word($kinds; "eff") then "eff" elif has_word($kinds; "ctx") then "ctx" else "none" end) as $kind
         # Effectful commands that carry no operation of their own, plus effectful substitutions (N4).
@@ -1083,10 +1281,11 @@ def parse_script_in($text; $depth; $branch; $outer):
         | .units += (if $kind == "none" and ($unit_result.ops | length) == 0 and ($unit_result.cmds | length) == 0 and ($unit_result.floor | length) == 0 then []
                      else [{kind: $kind, ops: $unit_result.ops, cmds: $unit_result.cmds, others: $others, floor: $unit_result.floor}] end)
         | .units += $unit_result.extra)
-    | {units: .units, uncertain: .uncertain}
+    | {units: .units, uncertain: .uncertain, soft: .soft}
   end;
 
-def parse_script($text; $depth; $branch): parse_script_in($text; $depth; $branch; {files: {}, aliases: {}, captured: false, chdir: []});
+def parse_script($text; $depth; $branch):
+  parse_script_in($text; $depth; $branch; {files: {}, aliases: {}, captured: false, chdir: [], dir: "", opaque: false, writers: 0, runs: false, files_exposed: false, exports: [], classified: classified_programs});
 
 # The keyword floor text of a parse: every unit's floor fragments, in order, on one line.
 def floor_text($parsed): [ $parsed.units[].floor[] ] | join(" ") | gsub("[\\n\\t]"; " ");

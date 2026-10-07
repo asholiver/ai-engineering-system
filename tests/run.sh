@@ -346,8 +346,10 @@ expect_equal "guard log: unwritable log directory still asks" ask "$(decision_of
 output="$(tool_input 'pnpm test && git push --force origin feature' "$blocked_repository" | "$scripts/guard-bash.sh")"
 expect_equal "guard log: unwritable log directory still denies" deny "$(decision_of "$output")"
 
-# Performance: generous bounds for CI machines (design target: p95 under 150 ms up to 8 KB,
-# under 1 s up to 256 KB).
+# Performance: generous bounds for CI machines. Design targets (spec, amended in WORK-001 fix
+# round 3): typical commands p95 under 150 ms; cost linear in the number of commands with an
+# explicit per-command bound; heredoc- or data-dominated input up to 256 KB under 1 s. Each test
+# checks its own fixture (byte size or exact command count) so it stays genuine.
 elapsed_milliseconds() {
   local seconds
   TIMEFORMAT=%3R
@@ -370,6 +372,38 @@ jq -n --rawfile command "$work_directory/command-8k.txt" --arg cwd "$feature_rep
 medium_ms="$(elapsed_milliseconds "$work_directory/command-8k.json")"
 echo "info: guard timing, single run: ${heredoc_bytes}-byte heredoc ${heredoc_ms} ms, ${command_8k_bytes}-byte command ${medium_ms} ms"
 if [ "$medium_ms" -lt 500 ]; then pass; else fail "performance: 8 KB command took ${medium_ms} ms (budget 150 ms, tolerance 500 ms)"; fi
+# 1. Typical commands: p95 of 20 runs under 150 ms (CI tolerance 500 ms, as above).
+printf 'nvm use && npm test && git status --short && grep -rn "x" src' >"$work_directory/command-typical.txt"
+jq -n --rawfile command "$work_directory/command-typical.txt" --arg cwd "$feature_repository" '{tool_input: {command: $command}, cwd: $cwd}' >"$work_directory/command-typical.json"
+expect_equal "performance: the typical fixture is four commands" 3 "$(grep -o '&&' "$work_directory/command-typical.txt" | wc -l | tr -d ' ')"
+typical_p95_ms="$(i=0; while [ "$i" -lt 20 ]; do elapsed_milliseconds "$work_directory/command-typical.json"; i=$((i + 1)); done | sort -n | sed -n 19p)"
+if [ "$typical_p95_ms" -lt 500 ]; then pass; else fail "performance: typical command p95 ${typical_p95_ms} ms (budget 150 ms, tolerance 500 ms)"; fi
+# 2. Per-command scaling: the marginal cost per command between 70 and 280 two-command pipelines
+# (which cancels the fixed jq compile and wrapper cost) is at most 1.5 ms. Measured on the
+# development machine: about 0.45 ms per command (0.86/0.87/0.91 ms per pipeline for 35-70,
+# 70-140 and 140-280 pipelines); 1.5 ms is about three times that, the same headroom as the other
+# CI tolerances. Growth must also stay linear: the 140-280 marginal at most twice the 70-140 one
+# (plus 0.2 ms for timer resolution), which a quadratic cost would exceed. Minimum of 3 runs each.
+scaling_fixture() {
+  { local i=0; while [ "$i" -lt "$1" ]; do printf 'grep -rn "foo\\|bar" --include=*.ts src/app%s | head -5 && ' "$i"; i=$((i + 1)); done; printf 'echo done'; } >"$work_directory/scale-$1.txt"
+  jq -n --rawfile command "$work_directory/scale-$1.txt" --arg cwd "$feature_repository" '{tool_input: {command: $command}, cwd: $cwd}' >"$work_directory/scale-$1.json"
+}
+scaling_commands() { echo $(( $(grep -o 'grep -rn' "$work_directory/scale-$1.txt" | wc -l) + $(grep -o '| head -5' "$work_directory/scale-$1.txt" | wc -l) + $(grep -o 'echo done' "$work_directory/scale-$1.txt" | wc -l) )); }
+scaling_ms() { local i=0; while [ "$i" -lt 3 ]; do elapsed_milliseconds "$work_directory/scale-$1.json"; i=$((i + 1)); done | sort -n | head -n 1; }
+for pipelines in 70 140 280; do
+  scaling_fixture "$pipelines"
+  expect_equal "performance: the $pipelines-pipeline fixture has exactly $((pipelines * 2 + 1)) commands" "$((pipelines * 2 + 1))" "$(scaling_commands "$pipelines")"
+done
+scale_70_ms="$(scaling_ms 70)" scale_140_ms="$(scaling_ms 140)" scale_280_ms="$(scaling_ms 280)"
+# Microseconds per command, integer arithmetic.
+marginal_us=$(( (scale_280_ms - scale_70_ms) * 1000 / (561 - 141) ))
+low_marginal_us=$(( (scale_140_ms - scale_70_ms) * 1000 / (281 - 141) ))
+high_marginal_us=$(( (scale_280_ms - scale_140_ms) * 1000 / (561 - 281) ))
+echo "info: guard scaling: 141/281/561 commands ${scale_70_ms}/${scale_140_ms}/${scale_280_ms} ms; marginal ${marginal_us} us per command (bound 1500 us)"
+if [ "$marginal_us" -le 1500 ]; then pass; else fail "performance: marginal cost ${marginal_us} us per command (bound 1500 us)"; fi
+if [ "$high_marginal_us" -le $((low_marginal_us * 2 + 200)) ]; then pass; else fail "performance: cost per command grows with size (${low_marginal_us} us, then ${high_marginal_us} us)"; fi
+# 3. Large inert input: the ~250 KB heredoc above (its byte size is asserted) stays under 1 s
+# (CI tolerance 2500 ms, above), whatever its line count.
 # A pathological command is cut off by the time budget or the fallback and still decides safely.
 pathological_file="$work_directory/pathological.txt"
 { i=0; while [ "$i" -lt 3000 ]; do printf '$(('; i=$((i + 1)); done; printf 'terraform apply'; } >"$pathological_file"
@@ -1424,6 +1458,271 @@ expect_equal "guard-writes: a Kelvin-sign look-alike token path is denied" deny 
 expect_equal "guard-writes: a long-s look-alike Git hooks directory is denied for subagents" deny "$(decision_of "$(write_input ai-engineering:backend "$state_repository/.git/hook$(printf '\xc5\xbf')/pre-commit" "$state_repository" | "$scripts/guard-writes.sh")")"
 expect_equal "guard-writes: a non-ASCII name outside the store is no decision" none "$(decision_of "$(write_input "" "$state_repository/src/caf$(printf '\xc3\xa9').ts" "$state_repository" | "$scripts/guard-writes.sh")")"
 expect_equal "guard-writes: a non-ASCII learning file inside .agents is allowed" none "$(decision_of "$(write_input ai-engineering:learning "$state_repository/.agents/learnings/caf$(printf '\xc3\xa9').md" "$state_repository" | "$scripts/guard-writes.sh")")"
+
+# ---------------------------------------------------------------- WORK-001 fix round 3 (re-review 2 NR-1 to NR-5, H5)
+# Table cases are "agent|expected|command" (agents as above); "\n" is a newline. Characters a
+# heredoc cannot hold are written as @NAME@ and expanded by expand_characters.
+carriage_return=$'\r' form_feed=$'\f' vertical_tab=$'\v'
+no_break_space="$(printf '\xc2\xa0')" em_space="$(printf '\xe2\x80\x83')" ideographic_space="$(printf '\xe3\x80\x80')"
+zero_width_space="$(printf '\xe2\x80\x8b')" kelvin_sign="$(printf '\xe2\x84\xaa')" st_ligature="$(printf '\xef\xac\x86')" e_acute="$(printf '\xc3\xa9')"
+expand_characters() {
+  local text="$1"
+  text="${text//@CR@/$carriage_return}"; text="${text//@FF@/$form_feed}"; text="${text//@VT@/$vertical_tab}"
+  text="${text//@NBSP@/$no_break_space}"; text="${text//@EMSP@/$em_space}"; text="${text//@IDSP@/$ideographic_space}"
+  text="${text//@ZWSP@/$zero_width_space}"; text="${text//@KELVIN@/$kelvin_sign}"; text="${text//@LONGS@/$long_s}"
+  text="${text//@ST@/$st_ligature}"; text="${text//@EACUTE@/$e_acute}"
+  printf '%s' "$text"
+}
+# Every probe of re-review 2 (rereview2-probes.jsonl) except the five N6 boundary cases (owner
+# decision pending), then the fix-round-3 variants. Write-then-run denies: the writer is another
+# command, as for the existing `cat > f.sh <<EOF ... EOF; bash f.sh` case (the brief allows ask or deny).
+while IFS='|' read -r agent expected command_text; do
+  [ -n "$expected" ] || continue
+  command_text="$(expand_characters "$command_text")"
+  expect_equal "fix round 3 ($agent): $command_text" "$expected" "$(decision_of "$(agent_output "$command_text" "$agent_repository" "$agent")")"
+done <<'CASES'
+m|ask|echo a@CR@#; terraform apply
+m|ask|echo a@NBSP@#; terraform apply
+m|ask|echo a@VT@#; terraform apply
+m|ask|@KELVIN@ubectl delete pod x
+m|ask|terraform apply -lock=fal@LONGS@e
+m|ask|ku@KELVIN@bectl delete pod x
+m|ask|echo 'terraform apply' | tee >(sh)
+m|ask|echo 'terraform apply' > >(sh)
+m|ask|printf 'terraform apply' | sort -S 1K --compress-program=sh
+m|deny|echo 'terraform apply' | tee r.sh; sh ./r.sh
+m|deny|echo 'terraform apply' > r && chmod +x r && ./r
+m|deny|echo 'terraform apply' | cat > r.sh; bash r.sh
+m|deny|git rm .agents/specs/active/WORK-9.state.json
+m|deny|git mv .agents/specs/active/WORK-9.state.json x.json
+m|ask|git checkout HEAD~1 -- ':/'
+m|ask|git checkout HEAD~1 -- ':(top)'
+m|ask|git restore --source=HEAD~1 --pathspec-from-file=list.txt
+m|ask|git checkout-index -f -a
+m|deny|git update-index --cacheinfo 100644,abc,.agents/specs/active/WORK-9.state.json
+b|deny|GIT_EXTERNAL_DIFF=x git diff
+b|deny|GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0=x git log
+b|deny|env GIT_PAGER=x git log
+m|ask|echo a@FF@#; terraform apply
+m|ask|echo a@EMSP@#; terraform apply
+m|ask|echo a@IDSP@#; terraform apply
+m|ask|echo a@ZWSP@#; terraform apply
+m|ask|terraform@NBSP@apply
+m|deny|echo a#b; terraform apply
+m|none|echo 'a@NBSP@b'
+m|none|git commit -m 'note@EMSP@x'
+m|ask|mysql -e "SELECT 1 --@NBSP@x; DROP TABLE t"
+m|ask|aw@LONGS@ s3 rm s3://b/k
+m|ask|git pu@LONGS@h --force origin x
+m|ask|docker pu@LONGS@h org/image:1
+m|ask|helm unin@ST@all api
+m|ask|cargo publi@LONGS@h
+m|none|caf@EACUTE@ x
+m|none|echo caf@EACUTE@
+m|ask|echo 'terraform apply' | tee >(bash)
+m|ask|printf 'DROP TABLE x' | tee >(psql)
+m|ask|echo 'terraform apply' | tee >(cat) out.txt
+m|deny|tee >(echo 'terraform apply' | sh) < notes.txt
+m|none|diff <(sort a) <(sort b)
+m|ask|echo 'terraform apply' | rg --pre=sh x
+m|ask|echo 'terraform apply' | less '+!sh'
+m|none|echo 'terraform apply' | sort
+m|deny|echo 'terraform apply' > r.sh; source r.sh
+m|deny|echo 'terraform apply' > r.sh; . ./r.sh
+m|deny|cd sub && echo 'terraform apply' > r.sh && cd .. && sh sub/r.sh
+m|ask|echo 'terraform apply' > notes.txt; ./build.sh
+m|ask|echo 'terraform apply' > "$F"; sh "$F"
+m|ask|bash -c "echo 'terraform apply' > r.sh"; sh r.sh
+m|ask|python3 -c "open('r.sh','w').write('terraform apply')"; sh r.sh
+m|none|echo hi > notes.txt; ./build.sh
+m|deny|git mv x.json .agents/specs/active/WORK-9.state.json
+m|deny|git rm --cached .agents/specs/active/WORK-9.state.json
+m|ask|git rm -r .
+m|ask|git rm ':(glob)**/*.json'
+m|none|git rm src/app.ts
+m|ask|git checkout HEAD~1 -- ':!src'
+m|deny|git checkout HEAD~1 -- ':(icase).AGENTS/specs/active/W.state.json'
+m|ask|git restore --source=HEAD~1 ':/'
+m|ask|git reset HEAD~1 -- ':/'
+m|ask|git checkout HEAD~1 --pathspec-from-file=list.txt
+m|ask|git clean -fdx
+m|ask|git clean -fX
+m|none|git clean -fd src
+m|none|git clean -n -dx
+m|deny|git update-index --cacheinfo 100644 abc .agents/specs/active/WORK-9.state.json
+m|ask|git update-index --index-info
+m|none|git update-index --add src/app.ts
+m|deny|git checkout-index -f .agents/specs/active/WORK-9.state.json
+m|none|git checkout-index --prefix=build/ -a
+m|ask|git read-tree HEAD~1
+m|deny|git read-tree --prefix=.agents/specs/ HEAD
+m|deny|git hash-object -w --path=.agents/specs/active/WORK-9.state.json x
+m|ask|git hash-object -w --stdin-paths
+b|deny|GIT_SSH_COMMAND='ssh -i k' git fetch
+b|deny|export GIT_PAGER=x; git log
+b|deny|declare -x GIT_CONFIG_GLOBAL=/tmp/c; git log
+b|deny|PAGER=less git log
+b|deny|GIT_TERMINAL_PROMPT=1 git fetch
+b|deny|sudo GIT_EDITOR=vim git status
+b|none|GIT_PAGER=cat LANG=C git log
+b|none|GIT_TERMINAL_PROMPT=0 GIT_OPTIONAL_LOCKS=0 LC_ALL=C git status
+b|none|export NODE_ENV=test; git status
+m|none|GIT_PAGER=x git log
+CASES
+
+# Soft uncertainty (a script whose text is unknown after a write) applies the fallback only when the
+# parse reached no decision: its denies stand, and a script with no write around it stays parsed.
+while IFS='|' read -r agent expected command_text; do
+  [ -n "$expected" ] || continue
+  expect_equal "fix round 3 soft uncertainty ($agent): $command_text" "$expected" "$(decision_of "$(agent_output "$command_text" "$agent_repository" "$agent")")"
+done <<'CASES'
+m|deny|echo x > .agents/specs/active/WORK-9.state.json; ./build.sh
+b|deny|echo x > out.txt; ./build.sh; git commit -m x
+m|none|nvm use && "$PLUGIN/scripts/run-gate.sh" fast && git status --short && grep -rn "DROP\|TRUNCATE" src
+m|none|./scripts/test.sh && sh ./scripts/lint.sh
+m|deny|cat > q.sql <<'EOF'\nDROP TABLE x;\nEOF\npsql -f q.sql
+m|none|git rm -n .agents/specs/active/WORK-9.state.json
+m|deny|git clean -fd .agents
+CASES
+
+# N6(a) owner ruling: branch switches, merge, pull, rebase, cherry-pick, stash and no-ref whole-tree
+# restores ask only when the .agents/specs state files can change. Fixture: main holds a state file;
+# branch "same" changes only src/a.txt (state identical), branch "differs" changes the state file.
+state_fixture="$(new_repository state-fixture-repo main)"
+mkdir -p "$state_fixture/.agents/specs/active" "$state_fixture/src"
+printf '{"status":"draft"}\n' >"$state_fixture/.agents/specs/active/WORK-1.state.json"
+printf 'a\n' >"$state_fixture/src/a.txt"
+commit_state_fixture() { git -C "$state_fixture" add -A && git -C "$state_fixture" -c user.name=test -c user.email=test@example.com commit -q -m "$1"; }
+commit_state_fixture "state"
+git -C "$state_fixture" branch same && git -C "$state_fixture" branch differs
+git -C "$state_fixture" checkout -q same && printf 'b\n' >"$state_fixture/src/a.txt" && commit_state_fixture "same state"
+git -C "$state_fixture" checkout -q differs && printf '{"status":"approved"}\n' >"$state_fixture/.agents/specs/active/WORK-1.state.json" && commit_state_fixture "state differs"
+git -C "$state_fixture" checkout -q main
+if [ -f "$state_fixture/.agents/specs/active/WORK-1.state.json" ] && [ "$(git -C "$state_fixture" rev-parse --abbrev-ref HEAD)" = main ] \
+  && ! git -C "$state_fixture" diff --quiet main differs -- .agents && git -C "$state_fixture" diff --quiet main same -- .agents; then pass
+else fail "fix round 3 N6(a): the state fixture repository is not as intended"; fi
+# Clean working tree: only a ref whose state differs (or cannot be resolved) asks.
+while IFS='|' read -r agent expected command_text; do
+  [ -n "$expected" ] || continue
+  expect_equal "fix round 3 N6(a) clean ($agent): $command_text" "$expected" "$(decision_of "$(agent_output "$command_text" "$state_fixture" "$agent")")"
+done <<'CASES'
+m|none|git switch same
+m|ask|git switch differs
+m|none|git checkout same
+m|ask|git checkout differs
+m|none|git checkout -b topic same
+m|ask|git switch -c topic differs
+m|none|git merge same
+m|ask|git merge differs
+m|none|git rebase same
+m|ask|git rebase differs
+m|none|git cherry-pick same
+m|ask|git cherry-pick differs
+m|ask|git switch missing-branch
+m|ask|git switch "$BRANCH"
+m|ask|git pull
+m|ask|git commit -m x && git switch same
+m|ask|git fetch && git merge same
+m|ask|git -C . switch same
+m|none|git stash
+m|ask|git stash pop
+m|none|git checkout -- .
+m|none|git restore .
+m|none|git reset --hard
+m|none|git checkout src/a.txt
+b|deny|git switch same
+CASES
+# Uncommitted state changes: operations that discard them ask; ordinary paths and switches do not.
+printf '{"status":"edited"}\n' >"$state_fixture/.agents/specs/active/WORK-1.state.json"
+while IFS='|' read -r agent expected command_text; do
+  [ -n "$expected" ] || continue
+  expect_equal "fix round 3 N6(a) uncommitted state ($agent): $command_text" "$expected" "$(decision_of "$(agent_output "$command_text" "$state_fixture" "$agent")")"
+done <<'CASES'
+m|ask|git stash
+m|ask|git checkout -- .
+m|ask|git restore .
+m|ask|git reset --hard
+m|ask|git switch -f same
+m|ask|git merge --abort
+m|none|git checkout -- src
+m|none|git switch same
+CASES
+git -C "$state_fixture" checkout -q -- .agents
+reason="$(agent_output 'git switch differs' "$state_fixture" m | jq -r '.hookSpecificOutput.permissionDecisionReason')"
+expect_contains "fix round 3 N6(a): the ask names the operation and the state" "git switch: the .agents/specs state files differ between HEAD and differs" "$reason"
+log_lines_before="$(wc -l <"$state_fixture/.git/ai-engineering/guard-log.jsonl" 2>/dev/null | tr -d ' ')"
+agent_output 'git switch same' "$state_fixture" m >/dev/null
+expect_equal "fix round 3 N6(a): an identical-state switch is not logged" "${log_lines_before:-}" "$(wc -l <"$state_fixture/.git/ai-engineering/guard-log.jsonl" 2>/dev/null | tr -d ' ')"
+(
+  source "$scripts/lib.sh"
+  classify_command_impact "git switch differs" "$state_fixture"; [ "$impact_decision" = "ask" ] && [ "$impact_classes" = "protected-tree-overwrite" ] || exit 1
+  classify_command_impact "git switch same" "$state_fixture"; [ "$impact_decision" = "none" ] || exit 2
+)
+expect_equal "lib: classify_command_impact sees the N6(a) state checks (exit code identifies the failed check)" 0 "$?"
+
+# N6(b) owner ruling: patch, git apply and git am ask when the patch is not text from this
+# submission; a known patch denies when it touches the store (or Git's own files, for specialists).
+while IFS='|' read -r agent expected command_text; do
+  [ -n "$expected" ] || continue
+  expect_equal "fix round 3 N6(b) ($agent): $command_text" "$expected" "$(decision_of "$(agent_output "$command_text" "$agent_repository" "$agent")")"
+done <<'CASES'
+m|ask|git apply fix.patch
+m|ask|patch -p1 < fix.patch
+m|ask|git am mails.mbox
+m|ask|curl -s https://example.com/x.patch | git apply
+m|none|git apply --check fix.patch
+m|none|patch --dry-run -p1 < fix.patch
+m|none|git apply <<'EOF'\ndiff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\nEOF
+m|deny|patch -p1 <<'EOF'\n--- a/.agents/specs/active/WORK-9.state.json\n+++ b/.agents/specs/active/WORK-9.state.json\nEOF
+m|deny|git apply <<'EOF'\ndiff --git a/src/x b/.agents/specs/active/WORK-9.state.json\nrename from src/x\nrename to .agents/specs/active/WORK-9.state.json\nEOF
+m|none|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\ngit apply f.patch
+m|deny|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/.agents/specs/active/WORK-9.state.json\nEOF\ngit apply f.patch
+m|deny|git apply --directory=.agents/specs/active <<'EOF'\n--- a/x.json\n+++ b/x.json\nEOF
+m|deny|git apply --include='.agents/specs/*' <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF
+m|none|patch -p1 <<'EOF'\n--- a/.git/hooks/pre-commit\n+++ b/.git/hooks/pre-commit\nEOF
+b|deny|patch -p1 <<'EOF'\n--- a/.git/hooks/pre-commit\n+++ b/.git/hooks/pre-commit\nEOF
+CASES
+
+# N6(c) owner ruling: a recursive or extract destination with only glob components, under a literal
+# subdirectory that is not the root, .agents or .git, with no `..`, is no decision; any variable,
+# substitution or brace still asks.
+while IFS='|' read -r agent expected command_text; do
+  [ -n "$expected" ] || continue
+  expect_equal "fix round 3 N6(c) ($agent): $command_text" "$expected" "$(decision_of "$(agent_output "$command_text" "$agent_repository" "$agent")")"
+done <<'CASES'
+m|none|cp -R x build/*/
+m|none|tar -xf a.tar -C vendor/*/lib
+m|none|cp -R x /tmp/*/out
+m|none|rsync -a x/ dist/??/
+m|ask|cp -R x */
+m|ask|cp -R x build/*/../..
+m|ask|cp -R x build/{a,b}
+m|ask|cp -R x "$D"/*
+m|ask|cp -R x build/$(date)/*
+m|ask|cp -R x .git-x/../*
+CASES
+
+# NR-5: the branch guess ignores case; a push spelled in mixed case while on main still asks.
+expect_equal "fix round 3 NR-5: a mixed-case push while on main asks" ask "$(guard_decision 'Git Push origin feature' "$main_repository")"
+expect_equal "fix round 3 NR-5: a mixed-case push on a feature branch is no decision" none "$(guard_decision 'Git Push origin feature')"
+# Reasons name what was found.
+reason="$(agent_output 'GIT_PAGER=x git log' "$agent_repository" b | jq -r '.hookSpecificOutput.permissionDecisionReason')"
+expect_contains "fix round 3 H5: the deny names the variable" "git with GIT_PAGER set" "$reason"
+reason="$(agent_output 'git clean -fdx' "$agent_repository" m | jq -r '.hookSpecificOutput.permissionDecisionReason')"
+expect_contains "fix round 3 NR-4: the clean ask names the operation" "git clean -x/-X/-d into ." "$reason"
+# The floor text over its jq budget is folded by the wrapper too (NR-2): a look-alike verb asks.
+{ printf 'foo'; i=0; while [ "$i" -lt 2500 ]; do printf ' word%s' "$i"; i=$((i + 1)); done; printf ' && docker pu%sh org/image:1\n' "$long_s"; } >"$work_directory/floor-large-look-alike.txt"
+jq -n --rawfile command "$work_directory/floor-large-look-alike.txt" --arg cwd "$feature_repository" '{tool_input: {command: $command}, cwd: $cwd}' >"$work_directory/floor-large-look-alike.json"
+expect_equal "fix round 3: a large floor text with a look-alike keyword asks" ask "$(decision_of "$("$scripts/guard-bash.sh" <"$work_directory/floor-large-look-alike.json")")"
+# lib.sh sees the fix-round-3 classifications.
+(
+  source "$scripts/lib.sh"
+  classify_command_impact "git clean -fdx" "$agent_repository"; [ "$impact_decision" = "ask" ] && [ "$impact_classes" = "protected-tree-overwrite" ] || exit 1
+  classify_command_impact "git rm .agents/specs/active/WORK-9.state.json" "$agent_repository"; [ "$impact_decision" = "deny" ] && [ "$impact_classes" = "authority-store-write" ] || exit 2
+  classify_command_impact "echo 'terraform apply' | tee >(sh)" "$agent_repository"; [ "$impact_decision" = "ask" ] || exit 3
+  classify_command_impact "terraform${no_break_space}apply" "$agent_repository"; [ "$impact_decision" = "ask" ] || exit 4
+)
+expect_equal "lib: classify_command_impact sees the fix-round-3 classifications (exit code identifies the failed check)" 0 "$?"
 
 # ---------------------------------------------------------------- run-gate
 commit_all() { git -C "$1" add -A && git -C "$1" -c user.name=test -c user.email=test@example.com commit -q -m "$2"; }

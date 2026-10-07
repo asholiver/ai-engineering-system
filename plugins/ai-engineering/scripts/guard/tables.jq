@@ -183,7 +183,8 @@ def ssh_value_flags: ["-p", "-i", "-o", "-l", "-F", "-J", "-L", "-R", "-D", "-b"
 def git_value_flags: ["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env", "--exec-path", "--list-cmds"];
 # Git commands (built in, plumbing and common extensions). A word that is none of these is an
 # alias or an external command, which the parser cannot see through.
-def git_commands: ["add", "am", "annotate", "apply", "archive", "bisect", "blame", "branch", "bundle", "cat-file", "check-attr", "check-ignore", "check-ref-format", "checkout", "cherry", "cherry-pick", "citool", "clean", "clone", "column", "commit", "commit-graph", "commit-tree", "config", "count-objects", "credential", "daemon", "describe", "diff", "diff-files", "diff-index", "diff-tree", "difftool", "fast-export", "fast-import", "fetch", "filter-branch", "flow", "fmt-merge-msg", "for-each-ref", "format-patch", "fsck", "gc", "get-tar-commit-id", "grep", "gui", "hash-object", "help", "init", "instaweb", "interpret-trailers", "lfs", "log", "ls-files", "ls-remote", "ls-tree", "mailinfo", "mailsplit", "maintenance", "merge", "merge-base", "mergetool", "mktag", "mktree", "mv", "name-rev", "notes", "pack-objects", "pack-refs", "patch-id", "prune", "pull", "push", "range-diff", "read-tree", "rebase", "reflog", "remote", "repack", "replace", "request-pull", "rerere", "reset", "restore", "rev-list", "rev-parse", "revert", "rm", "send-email", "shortlog", "show", "show-branch", "show-ref", "sparse-checkout", "stage", "stash", "status", "stripspace", "submodule", "subtree", "switch", "symbolic-ref", "tag", "update-index", "update-ref", "var", "verify-commit", "verify-pack", "verify-tag", "version", "whatchanged", "worktree"];
+def git_commands: ["add", "am", "annotate", "apply", "archive", "bisect", "blame", "branch", "bundle", "cat-file", "check-attr", "check-ignore", "check-ref-format", "checkout", "checkout-index", "cherry", "cherry-pick", "citool", "clean", "clone", "column", "commit", "commit-graph", "commit-tree", "config", "count-objects", "credential", "daemon", "describe", "diff", "diff-files", "diff-index", "diff-tree", "difftool", "fast-export", "fast-import", "fetch", "filter-branch", "flow", "fmt-merge-msg", "for-each-ref", "format-patch", "fsck", "gc", "get-tar-commit-id", "grep", "gui", "hash-object", "help", "init", "instaweb", "interpret-trailers", "lfs", "log", "ls-files", "ls-remote", "ls-tree", "mailinfo", "mailsplit", "maintenance", "merge", "merge-base", "mergetool", "mktag", "mktree", "mv", "name-rev", "notes", "pack-objects", "pack-refs", "patch-id", "prune", "pull", "push", "range-diff", "read-tree", "rebase", "reflog", "remote", "repack", "replace", "request-pull", "rerere", "reset", "restore", "rev-list", "rev-parse", "revert", "rm", "send-email", "shortlog", "show", "show-branch", "show-ref", "sparse-checkout", "stage", "stash", "status", "stripspace", "submodule", "subtree", "switch", "symbolic-ref", "tag", "update-index", "update-ref", "var", "verify-commit", "verify-pack", "verify-tag", "version", "whatchanged", "worktree",
+                      "write-tree", "merge-tree", "merge-file", "unpack-objects", "index-pack", "show-index", "update-server-info"];
 
 # ---------------------------------------------------------------- proven data (the only floor exemptions)
 # The keyword floor reads the whole command except these spans, which are proven to be data.
@@ -197,10 +198,29 @@ def search_programs: ["grep", "egrep", "fgrep", "rg", "ag"];
 def data_sinks: ["cat", "tee", "grep", "egrep", "fgrep", "rg", "ag", "head", "tail", "wc", "sort", "uniq", "cut", "tr", "jq", "yq",
                  "less", "more", "pbcopy", "base64", "xxd", "shasum", "sha256sum", "md5", "md5sum", "diff", "cmp", "column", "fold",
                  "nl", "od", "hexdump", "strings", "fmt", "rev", "paste", "comm", "iconv"];
+# NR-3b: options that make a data sink run a program. A sink given one of these is not a sink.
+# Audit of every other entry (none can run what it reads or a program named in its arguments):
+#   cat, tee, head, tail, wc, uniq, cut, tr, fold, nl, od, hexdump, strings, fmt, rev, paste, comm,
+#   column, iconv, base64, xxd, shasum, sha256sum, md5, md5sum, cmp: read, transform or write data
+#   only (tee writes files: its targets are judged by the store and tree policies; a process
+#   substitution target is handled separately);
+#   grep, egrep, fgrep: no option runs a program (GNU and BSD; BSD -Z decompresses in-process);
+#   diff: --paginate runs the fixed program pr, never one named on the command line;
+#   jq, yq: no function runs a program; pbcopy: clipboard only.
+# Executing options: sort --compress-program, rg --pre and --hostname-bin, ag --pager, and less or
+# more with an initial command (+cmd, which can be a shell escape) or a lesskey file.
+def data_sink_exec_regex: {
+  "sort": "^--compress-program",
+  "rg": "^--(pre|hostname-bin)",
+  "ag": "^--pager",
+  "less": "^(\\+|-[A-Za-z]*k|--lesskey)",
+  "more": "^(\\+|-[A-Za-z]*k|--lesskey)"
+};
 # A sed script made only of s commands with no e (execute) or w (write file) flag is data.
 #   one command: optional line address, s, a delimiter, two parts, flags; separated by ; or newline.
+#   Whitespace around commands is ASCII space, tab or newline only (NR-1: sed does not skip Unicode spaces).
 def sed_substitutions_regex:
-  "^(?:\\s*(?:[0-9]+|\\$)?(?:,(?:[0-9]+|\\$))?\\s*s(?<d>[^\\\\\\n\\s])(?:\\\\[\\s\\S]|(?!\\k<d>)[^\\n])*\\k<d>(?:\\\\[\\s\\S]|(?!\\k<d>)[^\\n])*\\k<d>[gpiImM0-9]*\\s*(?:[;\\n]|$))+$";
+  "^(?:[ \\t\\n]*(?:[0-9]+|\\$)?(?:,(?:[0-9]+|\\$))?[ \\t]*s(?<d>[^\\\\\\n\\s])(?:\\\\[\\s\\S]|(?!\\k<d>)[^\\n])*\\k<d>(?:\\\\[\\s\\S]|(?!\\k<d>)[^\\n])*\\k<d>[gpiImM0-9]*[ \\t]*(?:[;\\n]|$))+$";
 # Git subcommands whose non-flag operands are paths or revisions (data), and the ones whose
 # message values (-m/-F/--message/--file) are data.
 def git_operand_data_subcommands: ["add", "rm", "mv", "diff", "show", "blame", "ls-files", "status", "log", "grep", "restore"];
@@ -232,6 +252,26 @@ def exec_value_flags: {
   "ag": ["--pager"]
 };
 def awk_programs: ["awk", "gawk", "mawk", "nawk"];
+# N6(b): options of patch, git apply and git am that take a separate value (so a value is not
+# taken for a patch file).
+def patch_value_flags: ["-p", "-d", "-i", "-o", "-r", "-B", "-V", "-z", "-D", "-F", "-Y", "-g", "--input", "--output", "--directory",
+                        "--reject-file", "--strip", "--prefix", "--suffix", "--basename-prefix", "--fuzz", "--ifdef", "--version-control",
+                        "--quoting-style", "--get"];
+def git_patch_value_flags: ["-p", "-C", "--directory", "--include", "--exclude", "--whitespace", "--build-fake-ancestor", "--patch-format",
+                            "--resolvemsg", "--exec"];
+# H5: environment variables a restricted agent may set for Git (name, and the value when one is
+# required). Everything else is denied: GIT_EXTERNAL_DIFF, GIT_PAGER and PAGER (other values),
+# GIT_EDITOR, EDITOR, VISUAL, GIT_SSH, GIT_SSH_COMMAND, GIT_ASKPASS, SSH_ASKPASS, GIT_EXEC_PATH,
+# GIT_CONFIG*, GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, GIT_TEMPLATE_DIR, GIT_PROXY_COMMAND, ...
+def git_env_safe_names_regex: "^(LANG|LC_[A-Z_]+|TZ|NO_COLOR|TERM)$";
+def git_env_safe_values: {"GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0", "GIT_PAGER": "cat", "PAGER": "cat"};
+# Names whose export earlier in a submission changes what a later git runs (tracked across commands).
+def git_env_tracked_regex: "^(GIT_[A-Z0-9_]*|PAGER|EDITOR|VISUAL|SSH_ASKPASS|LESSOPEN|LESSCLOSE|LESS|PATH|HOME|XDG_CONFIG_HOME|BASH_ENV|ENV)$";
+# Input: an assignment word (NAME=value, or NAME alone for `export NAME`).
+def git_env_safe:
+  (sub("=.*$"; "")) as $name
+  | (if contains("=") then sub("^[^=]*="; "") else null end) as $value
+  | ($name | test(git_env_safe_names_regex)) or (git_env_safe_values[$name] != null and $value == git_env_safe_values[$name]);
 # Kubernetes subcommands that only read (a pipeline producer that cannot change anything).
 def kubernetes_read_subcommands: ["get", "describe", "logs", "top", "explain", "api-resources", "api-versions", "version", "cluster-info"];
 
@@ -304,7 +344,34 @@ def keyword_net_literals: [
 ];
 def keyword_net_may_match: ascii_downcase as $lower
   | any(keyword_net_literals[]; any(.[0][]; . as $word | $lower | contains($word)) and any(.[1][]; . as $word | $lower | contains($word)));
+# NR-1, NR-2: the texts the keyword rules read. Odd whitespace (CR, FF, VT, Unicode spaces) is a
+# separator for them. When the text has non-ASCII characters it is read twice: with the APFS
+# look-alikes folded (U+017F long s to s, U+212A Kelvin sign to k, the ff/fi/fl/ffi/ffl/st
+# ligatures), and with every other non-ASCII character removed (an unknown character inside a
+# word may be ignorable). Linear (explode/implode, no regex per character).
+def odd_space_codepoint: IN(9, 10, 11, 12, 13, 133, 160, 5760, 6158, 8232, 8233, 8239, 8287, 8288, 12288, 65279) or (. >= 8192 and . <= 8205);
+def keyword_fold_codepoint:
+  if . < 128 then (if IN(11, 12, 13) then 32 else . end)
+  elif odd_space_codepoint then 32
+  elif . == 383 then 115
+  elif . == 8490 then 107
+  elif . == 64256 then (102, 102)
+  elif . == 64257 then (102, 105)
+  elif . == 64258 then (102, 108)
+  elif . == 64259 then (102, 102, 105)
+  elif . == 64260 then (102, 102, 108)
+  elif . == 64261 or . == 64262 then (115, 116)
+  else . end;
+def keyword_text_variants:
+  if test("[^\\x01-\\x7f]") then
+    explode as $codes
+    | [ ([ $codes[] | keyword_fold_codepoint ] | implode),
+        ([ $codes[] | if odd_space_codepoint then 32 elif . < 128 then . else empty end ] | implode) ]
+  elif test("[\r\f\u000b]") then [ gsub("[\r\f\u000b]"; " ") ]
+  else [ . ] end;
 def keyword_net($text; $branch):
-  ($text | gsub("[\\n\\t]"; " ")) as $flat
-  | if ($flat | keyword_net_may_match) | not then []
-    else ([ keyword_net_rules[] | . as $rule | select($flat | test($rule[0]; "i")) | $rule[1] ] + keyword_net_push($flat; $branch)) | unique end;
+  [ ($text | keyword_text_variants[]) as $variant
+    | ($variant | gsub("[\\n\\t]"; " ")) as $flat
+    | if ($flat | keyword_net_may_match) | not then empty
+      else (keyword_net_rules[] | . as $rule | select($flat | test($rule[0]; "i")) | $rule[1]), keyword_net_push($flat; $branch)[] end ]
+  | unique;

@@ -90,7 +90,12 @@ Excluded (non-goals):
 - The guard never returns `allow`. Possible outputs: nothing, `ask`, `deny`, or context only.
 - Deny reasons are written for the agent: name the operation, and say to resubmit it alone or that the coordinator owns Git.
 - Ask reasons are written for the human: name the single operation and its class, and keep "Hooks are guardrails, not a sandbox."
-- Performance: p95 under 150 ms for commands up to 8 KB, and under 1 s up to 256 KB (large heredocs). Past the parser's size or time budget, use the fallback.
+- Performance (specification correction approved by the owner, 2026-10-07). Three independent properties, each tested, and each test validates its own fixture preconditions:
+  1. **Typical commands:** p95 under 150 ms (interactive latency).
+  2. **Per-command scaling:** analysis cost is linear in the number of commands, with an explicit upper bound per command. The bound is set conservatively from the measured implementation, with headroom for measurement variance, and recorded in `WORK-001.log.md`. The test asserts its fixture's command count.
+  3. **Large inert input:** commands dominated by heredoc or data content stay bounded independently of command count: under 1 s up to 256 KB. The test asserts its fixture's byte size.
+
+  Reason: the original criterion ("p95 under 150 ms for commands up to 8 KB") used bytes as a proxy, which was invalid. Runtime is driven mainly by command count (measured: a fixed jq compile cost plus a roughly constant cost per command, while a 12.6 KB heredoc costs only the fixed part). Its "8 KB" fixture was actually about 3.5 KB, which hid the overrun. This is a specification correction, not acceptance of a regression or a security trade. No size-triggered fallback is introduced. Past the parser's existing size or time budget (256 KB, the watchdog), the fallback applies as before.
 ## Business rules
 Invariants:
 - Destructive and reserved operations are never silently allowed.
@@ -191,7 +196,7 @@ Table-driven cases in `tests/run.sh`, fed hook JSON directly (no Claude, no netw
 - a no-decision command writes nothing;
 - an unwritable log directory still returns the correct decision.
 
-Performance: a test asserts the time budget on a 256 KB heredoc, within a tolerance generous enough for CI machines.
+Performance: three tests, matching the three properties in Requirements (typical latency, per-command bound, large inert input). Each asserts its fixture's preconditions (command count and/or byte size), within a tolerance generous enough for CI machines.
 ## Risks
 - **Parser complexity in bash.** Mitigated by a narrow grammar, the fail-safe fallback and table tests. Escalate if bash + jq proves inadequate.
 - **New false-positive categories** (for example interpreter inline code containing SQL-like prose). Documented as a residual category; measured through the guard log.

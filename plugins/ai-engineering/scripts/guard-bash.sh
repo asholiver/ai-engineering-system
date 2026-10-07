@@ -151,6 +151,25 @@ fallback_flag() {
 }
 fallback_matches() { grep -Eiq -- "$1" <<<"$fallback_command_text"; }
 
+# The text the keyword rules read, as one line per variant (NR-1, NR-2; same as
+# keyword_text_variants in guard/tables.jq). Newline, tab, CR, FF, VT and the Unicode spaces are
+# separators. Text with non-ASCII characters is read twice: with the APFS look-alikes folded
+# (U+017F long s, U+212A Kelvin sign, the ff/fi/fl/ffi/ffl/st ligatures) and with every other
+# non-ASCII byte removed. Byte-wise sed and tr (LC_ALL=C), so it is linear and locale-independent.
+keyword_text() {
+  local text spaced odd_space_sed look_alike_sed
+  text="$(tr '\n\t\r\f\v' '     ')"
+  if [ -z "$(printf '%s' "$text" | LC_ALL=C tr -d '\001-\177')" ]; then
+    printf '%s\n' "$text"
+    return 0
+  fi
+  odd_space_sed="$(printf 's/\xc2[\x85\xa0]/ /g;s/\xe1\x9a\x80/ /g;s/\xe1\xa0\x8e/ /g;s/\xe2\x80[\x80-\x8d\xa8\xa9\xaf]/ /g;s/\xe2\x81[\x9f\xa0]/ /g;s/\xe3\x80\x80/ /g;s/\xef\xbb\xbf/ /g')"
+  look_alike_sed="$(printf 's/\xc5\xbf/s/g;s/\xe2\x84\xaa/k/g;s/\xef\xac\x80/ff/g;s/\xef\xac\x81/fi/g;s/\xef\xac\x82/fl/g;s/\xef\xac\x83/ffi/g;s/\xef\xac\x84/ffl/g;s/\xef\xac[\x85\x86]/st/g')"
+  spaced="$(printf '%s' "$text" | LC_ALL=C sed -e "$odd_space_sed")"
+  printf '%s\n' "$(printf '%s' "$spaced" | LC_ALL=C sed -e "$look_alike_sed")"
+  printf '%s\n' "$(printf '%s' "$spaced" | LC_ALL=C tr -d '\200-\377')"
+}
+
 keyword_fallback() {
   local branch="$1" mode="${2:-fallback}"
   local word_start='(^|[^[:alnum:]_-])' word_end='([^[:alnum:]_-]|$)'
@@ -158,9 +177,9 @@ keyword_fallback() {
   local gap='([^[:alnum:]_-].*)?[^[:alnum:]_-]'
   local risky_task='[^[:space:]]*(deploy|release|publish|destroy|teardown)[^[:space:]]*'
   if [ "$mode" = "floor" ]; then
-    fallback_command_text="$(printf '%s' "$floor_text" | tr '\n\t' '  ')"
+    fallback_command_text="$(printf '%s' "$floor_text" | keyword_text)"
   else
-    fallback_command_text="$(jq -r '.tool_input.command // empty' <<<"$hook_input" 2>/dev/null | tr '\n\t' '  ')"
+    fallback_command_text="$(jq -r '.tool_input.command // empty' <<<"$hook_input" 2>/dev/null | keyword_text)"
   fi
   [ -n "$fallback_command_text" ] || return 0
 
@@ -222,13 +241,15 @@ keyword_fallback() {
   fallback_matches "${word_start}(npx|pnpm|yarn|bunx|bun)${gap}netlify-cli" && fallback_flag unclassified-deploy
 
   # A restricted agent (the allow-list for Git): a git word with a subcommand that is not a
-  # read-only one, a git word whose subcommand cannot be read, or a dynamic program name.
+  # read-only one, a git word whose subcommand cannot be read, a dynamic program name, or (H5) a
+  # Git-relevant environment variable assigned anywhere in a command that runs git.
   if restricted_agent && [ "$(jq -rn --arg text "$fallback_command_text" '
         ["status","diff","log","show","blame","grep","ls-files","ls-tree","cat-file","rev-parse","rev-list","merge-base","describe","shortlog","fetch","version","help","branch","tag","stash","worktree","remote","config"] as $reads
         | [ $text | scan("(?i)(?:^|[^A-Za-z0-9_-])git(?:[^A-Za-z0-9_-]|$)") ] | length as $git_words
         | [ $text | scan("(?i)(?:^|[^A-Za-z0-9_-])git(?:\\s+(?:-[Cc]\\s+\\S+|--[A-Za-z-]+(?:=\\S+)?|-[A-Za-z]))*\\s+([A-Za-z][A-Za-z0-9-]*)") | .[0] | ascii_downcase ] as $subcommands
         | if ($subcommands | map(select(IN($reads[]) | not)) | length) > 0 or $git_words > ($subcommands | length)
-             or ([ $text | scan("(?:^|[;&|(]\\s*)[$`]") ] | length) > 0 then "unsafe" else "ok" end' 2>/dev/null)" != "ok" ]; then
+             or ([ $text | scan("(?:^|[;&|(]\\s*)[$`]") ] | length) > 0
+             or ($git_words > 0 and ($text | test("(?:^|[^A-Za-z0-9_])(?:GIT_[A-Za-z0-9_]*|PAGER|EDITOR|VISUAL|SSH_ASKPASS|LESSOPEN|LESSCLOSE|PATH|HOME|XDG_CONFIG_HOME)="))) then "unsafe" else "ok" end' 2>/dev/null)" != "ok" ]; then
     fallback_flag git-write-by-subagent
   fi
   return 0
@@ -258,8 +279,11 @@ load_current_branch() {
   current_branch="$(git -C "$(directory_for_git)" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
   branch_loaded="1"
 }
-# A cheap guess saves a second pass; a push spelled so the text does not contain "push"
-# (p''ush) is found by the parser, which asks for the branch afterwards (need_branch).
+# Cheap guesses, matched without regard to case (NR-5: `git PUSH` and `GIT push` run a push on a
+# case-insensitive file system, and a missed guess costs a second jq run). A push spelled so the
+# text does not contain "push" (p''ush) is found by the parser, which asks for the branch
+# afterwards (need_branch).
+shopt -s nocasematch
 case "$hook_input" in
   *push*) load_current_branch ;;
 esac
@@ -272,24 +296,98 @@ case "$hook_input" in
 esac
 
 # The repository root matters only for whole-tree writers (recursive copy, archive extraction,
-# ref restores). Look it up only when the command mentions one; otherwise the classifier uses
-# the working directory in its place, which only over-asks.
+# ref restores, index plumbing, git rm and clean). Look it up only when the command mentions one;
+# otherwise the classifier uses the working directory in its place, which only over-asks.
 root_cdup="" root_known="0"
 case "$hook_input" in
-  *cp* | *rsync* | *ditto* | *tar* | *zip* | *cpio* | *pax* | *7z* | *checkout* | *restore* | *reset* | *read-tree*)
+  *cp* | *rsync* | *ditto* | *tar* | *zip* | *cpio* | *pax* | *7z* | *checkout* | *restore* | *reset* | *read-tree* | *rm* | *clean* | *index* | *hash-object*)
     if root_cdup="$(git -C "$(directory_for_git)" rev-parse --show-cdup 2>/dev/null)"; then root_known="1"; else root_cdup=""; fi
     ;;
 esac
+shopt -u nocasematch
 
 classifier_output_file="$(mktemp "${TMPDIR:-/tmp}/ai-engineering-guard.XXXXXX" 2>/dev/null)" || classifier_output_file=""
-cleanup() { [ -z "$classifier_output_file" ] || rm -f "$classifier_output_file"; }
+cleanup() { [ -z "$classifier_output_file" ] || rm -f "$classifier_output_file" "$classifier_output_file.git"; }
 trap cleanup EXIT
 
-decision="fallback" parse_mode="fallback" classes="" hook_output="" hint_state="none" hint_targets="[]" need_branch="0" floor_text=""
+decision="fallback" parse_mode="fallback" classes="" hook_output="" hint_state="none" hint_targets="[]" need_branch="0" floor_text="" state_checks="[]"
+
+# ---------------------------------------------------------------- state checks (N6(a))
+# The classifier found a branch switch, merge, rebase, cherry-pick, stash or no-ref whole-tree
+# restore with a literal ref (guard/policy.jq git_state_policy). At hook time, ask only if the
+# .agents/specs state files differ between HEAD (or the base) and the ref, the ref cannot be
+# resolved, or uncommitted state changes would be discarded. Each git call is bounded by a watchdog
+# like the classifier; a failed or stopped call asks.
+git_check_budget_seconds=2
+state_pathspec=':(top,glob,icase).agents/specs/**/*.state.json'
+git_check_output="" state_reason=""
+bounded_git() {
+  local pid watchdog status
+  [ -n "$classifier_output_file" ] || return 125
+  git -C "$(directory_for_git)" "$@" >"$classifier_output_file.git" 2>/dev/null &
+  pid=$!
+  ( sleep "$git_check_budget_seconds"; kill "$pid" 2>/dev/null ) >/dev/null 2>&1 &
+  watchdog=$!
+  wait "$pid" 2>/dev/null
+  status=$?
+  kill "$watchdog" 2>/dev/null
+  wait "$watchdog" 2>/dev/null
+  git_check_output="$(cat "$classifier_output_file.git" 2>/dev/null)"
+  return "$status"
+}
+# Returns 0 (and sets state_reason) when the state can change.
+state_can_change() {
+  local items op ref base discard path separator=$'\x1f'
+  [ "$state_checks" != "[]" ] && [ -n "$state_checks" ] || return 1
+  items="$(jq -r '.[] | [.op, (.ref // ""), (.base // ""), (if .discard then "1" else "0" end), (if .path then "1" else "0" end)] | join("\u001f")' <<<"$state_checks" 2>/dev/null)" \
+    || { state_reason="the state checks could not be read"; return 0; }
+  while IFS="$separator" read -r op ref base discard path; do
+    [ -n "$op" ] || continue
+    if [ -n "$ref" ] && ! bounded_git rev-parse --verify --quiet "$ref^{commit}"; then
+      # `git checkout <name>` restores a path from the index when <name> is not a ref.
+      if [ "$path" = 1 ] && [ -e "$(directory_for_git)/$ref" ]; then
+        ref="" discard=1
+      else
+        state_reason="$op: $ref cannot be resolved here"
+        return 0
+      fi
+    fi
+    if [ -n "$ref" ]; then
+      bounded_git diff --quiet "${base:-HEAD}" "$ref" -- "$state_pathspec"
+      case "$?" in
+        0) ;;
+        1) state_reason="$op: the .agents/specs state files differ between ${base:-HEAD} and $ref"; return 0 ;;
+        *) state_reason="$op: the .agents/specs state files could not be compared with $ref"; return 0 ;;
+      esac
+    fi
+    if [ "$discard" = 1 ]; then
+      if ! bounded_git status --porcelain --untracked-files=no -- "$state_pathspec"; then
+        state_reason="$op: the .agents/specs state files could not be checked"
+        return 0
+      fi
+      if [ -n "$git_check_output" ]; then
+        state_reason="$op: uncommitted .agents/specs state changes would be discarded"
+        return 0
+      fi
+    fi
+  done <<<"$items"
+  return 1
+}
+# No decision from the classifier or the floor: ask if a state check says so, else the hint.
+finish_without_decision() {
+  if state_can_change; then
+    if [ -n "$classify_only" ]; then printf 'ask\nprotected-tree-overwrite\n'; exit 0; fi
+    log_decision ask protected-tree-overwrite parsed
+    ask "ai-engineering guard: this command can replace protected state ($state_reason). It needs explicit human approval. $guardrail_note"
+  fi
+  if [ -n "$classify_only" ]; then printf 'none\n\n'; exit 0; fi
+  emit_shell_edit_hint
+  exit 0
+}
 
 # Runs the classifier once. Past the time budget it is stopped and the fallback rules apply.
 run_classifier() {
-  decision="fallback" parse_mode="fallback" classes="" hook_output="" hint_state="none" hint_targets="[]" need_branch="0" floor_text=""
+  decision="fallback" parse_mode="fallback" classes="" hook_output="" hint_state="none" hint_targets="[]" need_branch="0" floor_text="" state_checks="[]"
   jq -r -L "$guard_directory" --arg branch "$current_branch" --arg branchLoaded "$branch_loaded" --arg commonDir "$common_directory" \
     --arg rootCdup "$root_cdup" --arg rootKnown "$root_known" \
     -f "$guard_directory/main.jq" >"$classifier_output_file" 2>/dev/null <<<"$hook_input" &
@@ -306,6 +404,7 @@ run_classifier() {
       read -r hint_targets
       read -r need_branch
       read -r floor_text
+      read -r state_checks
     } <"$classifier_output_file"
   fi
   kill "$watchdog_pid" 2>/dev/null
@@ -323,9 +422,7 @@ fi
 
 case "$decision" in
   none)
-    if [ -n "$classify_only" ]; then printf 'none\n\n'; exit 0; fi
-    emit_shell_edit_hint
-    exit 0
+    finish_without_decision
     ;;
   ask | deny)
     if [ -n "$classify_only" ]; then printf '%s\n%s\n' "$decision" "$classes"; exit 0; fi
@@ -338,9 +435,7 @@ case "$decision" in
     if [ "$need_branch" = "1" ] && [ "$branch_loaded" = "0" ]; then load_current_branch; fi
     keyword_fallback "$current_branch" floor
     if [ "${#fallback_intents[@]}" -eq 0 ]; then
-      if [ -n "$classify_only" ]; then printf 'none\n\n'; exit 0; fi
-      emit_shell_edit_hint
-      exit 0
+      finish_without_decision
     fi
     classes="$(IFS=,; printf '%s' "${fallback_intents[*]}")"
     if [ -n "$classify_only" ]; then printf 'ask\n%s\n' "$classes"; exit 0; fi
@@ -351,7 +446,9 @@ esac
 
 # Fallback: the parse was not confident (or the classifier failed).
 if [ "$branch_loaded" = "0" ]; then
+  shopt -s nocasematch
   case "$hook_input" in *git*) load_current_branch ;; esac
+  shopt -u nocasematch
 fi
 keyword_fallback "$current_branch"
 if [ "${#fallback_intents[@]}" -eq 0 ]; then

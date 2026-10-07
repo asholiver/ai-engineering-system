@@ -23,7 +23,9 @@ def re_br: "(?<br>\\{(?>[^{}'\"`\\\\]+|\\\\[\\s\\S]|'[^']*'|\\g<dq>|\\g<bt>|\\g<
 #   bt: backquote command substitution
 def re_bt: "(?<bt>`(?>[^`\\\\]+|\\\\[\\s\\S])*`)";
 
-# One piece of a shell word: quoted string, substitution, escape or plain run.
+# One piece of a shell word: quoted string, substitution, escape or plain run. Bash splits words
+# only on space, tab and newline (NR-1), so the plain run stops only at those and at operators:
+# never use \s (Unicode spaces) for a word boundary.
 def re_atom:
   "(?>'[^']*'"
   + "|\\$'(?>[^'\\\\]+|\\\\[\\s\\S])*'"
@@ -35,16 +37,26 @@ def re_atom:
   + "|\\\\[\\s\\S]"
   + "|\\$(?<sus>(?=[({]))"
   + "|\\$"
-  + "|[^\\s;&|()<>'\"`\\\\$]+)";
+  + "|[^ \\t\\n;&|()<>'\"`\\\\$]+)";
 
 # Tokens: newline | comment | redirection | control operator | word | any other character.
+# A comment starts only where a token starts (a scan position after a separator or an operator),
+# never inside a word: `a\r#x` is one word, as in Bash.
 def re_token:
   "\\n"
   + "|#[^\\n]*"
   + "|[0-9]*(?:<<<|<<-?|>>|>&|<&|>\\||&>>|&>|<>|>|<)(?!\\()"
   + "|&&|\\|\\||\\|&|;;&?|;&|[;&|()]"
   + "|(?>" + re_atom + "+)"
-  + "|[^\\s]";
+  + "|[^ \\t\\n]";
+
+# Whitespace that Bash does not split on but a reader (or another shell) may: carriage return,
+# form feed, vertical tab and the Unicode spaces. Outside quotes it makes the parse uncertain.
+def odd_space_regex: "[\r\f\u000b\u0085  ᠎ -‍    ⁠　﻿]";
+# True when a token that is not a comment has odd whitespace outside quotes and escapes.
+def unquoted_odd_space($tokens):
+  any($tokens[]; (startswith("#") | not) and test(odd_space_regex)
+      and (gsub("'[^']*'|\\$'(?:[^'\\\\]|\\\\[\\s\\S])*'|\"(?:[^\"\\\\]|\\\\[\\s\\S])*\"|\\\\[\\s\\S]"; "") | test(odd_space_regex)));
 
 # Text inside double quotes, heredoc bodies and ${...}: finds $( ) and backquote substitutions.
 # The dq group is defined (never matched) because pa and br call it.
@@ -100,7 +112,8 @@ def expansion_substitutions:
         else empty end ]
   end;
 
-# Analyse one raw word token into {l, d, s}.
+# Analyse one raw word token into {l, d, s} plus ps: the texts of its process substitutions
+# (`<(...)`, `>(...)`), only when there are any.
 def word_info:
   . as $raw
   | if test("['\"\\\\$`<>]") | not then {l: $raw, d: test("[*?\\[]|\\{[^}]*,"), s: []}
@@ -122,7 +135,8 @@ def word_info:
               elif $next == "{" then .d = true | .l += $atom | .s += ($atom[2:-1] | expansion_substitutions)
               elif $next == "'" then .l += $atom[2:-1] | if ($atom | contains("\\")) then .d = true else . end
               else .d = true | .l += $atom end
-          elif $first == "<" or $first == ">" then .d = true | .l += $atom | .s += [$atom[2:-1]]
+          # Process substitution: its commands are kept apart (ps), so their pipeline heads are known.
+          elif $first == "<" or $first == ">" then .d = true | .l += $atom | .ps = ((.ps // []) + [$atom[2:-1]])
           else
             .l += $atom
             | if ($atom | test("[*?\\[]|\\{[^}]*,")) then .d = true else . end
@@ -227,9 +241,12 @@ def parse_raw($text; $depth):
   lex($text) as $lexed
   | reduce $lexed.toks[] as $token (
       {units: [[]], cur: empty_command, pending: null, hd_index: 0, parens: 0,
-       in_case_pattern: false, in_bracket: false, fn_name: false, bad: $lexed.bad};
+       in_case_pattern: false, in_bracket: false, fn_name: false,
+       bad: ($lexed.bad or (($text | test(odd_space_regex)) and unquoted_odd_space($lexed.toks)))};
       # Nested command text goes through the same parser; its commands join the current one.
       # $origin: index in w of the word holding the substitution (-1 when it is not a word).
+      # The first command of every pipeline in a process substitution is marked ph: it reads the
+      # stream of the outer command (`tee >(sh)`), not a producer of its own.
       def add_word($word; $origin):
         reduce $word.s[] as $text (.;
           if $depth >= 6 or ($word.s | length) > 100 then .bad = true
@@ -237,7 +254,14 @@ def parse_raw($text; $depth):
             parse_raw($text; $depth + 1) as $inner
             | .cur.n += [$inner.units[][] | .o = $origin]
             | .bad = (.bad or $inner.uncertain)
-          end);
+          end)
+        | reduce ($word.ps // [])[] as $text (.;
+            if $depth >= 6 or ($word.ps | length) > 100 then .bad = true
+            else
+              parse_raw($text; $depth + 1) as $inner
+              | .cur.n += ([ $inner.units[] | ((.[0] | .ph = true), .[1:][]) ] | map(.o = $origin))
+              | .bad = (.bad or $inner.uncertain)
+            end);
       def add_command_word($word): .cur.w += [$word] | add_word($word; (.cur.w | length) - 1);
       def word_in_command($raw):
         ($raw | word_info) as $word
@@ -250,13 +274,13 @@ def parse_raw($text; $depth):
                   | if ($lexed.hd[$index] // null) == null then .bad = true | .cur.r += [{op: "<<", t: $word.l, body: ""}]
                     else
                       $lexed.hd[$index] as $heredoc
-                      | .cur.r += [{op: "<<", t: $word.l, body: $heredoc.body}]
+                      | .cur.r += [{op: "<<", t: $word.l, body: $heredoc.body, q: $heredoc.quoted}]
                       | .hd_index += 1
                       | if $heredoc.quoted or ($heredoc.body | test("[$`]") | not) then .
                         else add_word({s: ($heredoc.body | expansion_substitutions)}; -1) end
                     end)
                else
-                 .cur.r += [{op: $redirect, t: $word.l, d: $word.d}] | add_word($word; -1)
+                 .cur.r += [{op: $redirect, t: $word.l, d: $word.d, p: ($word.ps != null)}] | add_word($word; -1)
                end)
             | .pending = null
           elif .in_bracket then
