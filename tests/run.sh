@@ -362,10 +362,13 @@ if [ "$heredoc_bytes" -gt 200000 ] && [ "$heredoc_bytes" -lt 262144 ]; then pass
 expect_equal "performance: large heredoc is data, no decision" none "$(decision_of "$("$scripts/guard-bash.sh" <"$work_directory/heredoc.json")")"
 heredoc_ms="$(elapsed_milliseconds "$work_directory/heredoc.json")"
 if [ "$heredoc_ms" -lt 2500 ]; then pass; else fail "performance: ${heredoc_bytes}-byte heredoc took ${heredoc_ms} ms (budget 1000 ms, tolerance 2500 ms)"; fi
-{ i=0; while [ "$i" -lt 60 ]; do printf 'grep -rn "foo\\|bar" --include=*.ts src/app%s | head -5 && ' "$i"; i=$((i + 1)); done; printf 'echo done'; } >"$work_directory/command-8k.txt"
+# A real 8 KB command (the fixture was 3.5 KB before fix round 2): 140 two-command pipelines.
+{ i=0; while [ "$i" -lt 140 ]; do printf 'grep -rn "foo\\|bar" --include=*.ts src/app%s | head -5 && ' "$i"; i=$((i + 1)); done; printf 'echo done'; } >"$work_directory/command-8k.txt"
+command_8k_bytes="$(wc -c <"$work_directory/command-8k.txt" | tr -d ' ')"
+if [ "$command_8k_bytes" -ge 8000 ] && [ "$command_8k_bytes" -le 8192 ]; then pass; else fail "performance: 8 KB fixture is $command_8k_bytes bytes"; fi
 jq -n --rawfile command "$work_directory/command-8k.txt" --arg cwd "$feature_repository" '{tool_input: {command: $command}, cwd: $cwd}' >"$work_directory/command-8k.json"
 medium_ms="$(elapsed_milliseconds "$work_directory/command-8k.json")"
-echo "info: guard timing, single run: ${heredoc_bytes}-byte heredoc ${heredoc_ms} ms, 8 KB command ${medium_ms} ms"
+echo "info: guard timing, single run: ${heredoc_bytes}-byte heredoc ${heredoc_ms} ms, ${command_8k_bytes}-byte command ${medium_ms} ms"
 if [ "$medium_ms" -lt 500 ]; then pass; else fail "performance: 8 KB command took ${medium_ms} ms (budget 150 ms, tolerance 500 ms)"; fi
 # A pathological command is cut off by the time budget or the fallback and still decides safely.
 pathological_file="$work_directory/pathological.txt"
@@ -1058,6 +1061,369 @@ risky_repository="$feature_repository"
   classify_command_impact "docker exec db psql -c 'DROP TABLE x'" "$risky_repository"; [ "$impact_decision" = "ask" ] || exit 8
 )
 expect_equal "lib: classify_command_impact sees the fix-round classifications (exit code identifies the failed check)" 0 "$?"
+
+# ---------------------------------------------------------------- WORK-001 fix round 2 (re-review N1-N6)
+# Safety floor by construction: the v0.2 keyword rules run over the whole command minus proven
+# data spans (guard/tables.jq), so classification can raise a decision but never drop it below
+# ask. Table cases are "agent|expected|command" (agent letters as above); "\n" is a newline.
+# Every probe of the re-review (rereview-probes.jsonl) except the two N6 owner-ruling cases:
+while IFS='|' read -r agent expected command_text; do
+  [ -n "$expected" ] || continue
+  expect_equal "fix round 2 re-review ($agent): $command_text" "$expected" "$(decision_of "$(agent_output "$command_text" "$agent_repository" "$agent")")"
+done <<'CASES'
+m|ask|alias terraform=terraform; terraform apply
+m|ask|terraform apply; alias terraform=x
+m|ask|alias x='terraform apply'; x
+m|ask|git submodule foreach 'terraform apply'
+m|ask|git rebase -x 'terraform apply' HEAD~1
+m|ask|git bisect run terraform apply
+m|ask|git difftool -x 'terraform apply'
+m|ask|git filter-branch --tree-filter 'terraform apply'
+m|ask|git grep -O'terraform apply' x
+m|ask|git fetch --upload-pack='terraform apply; git-upload-pack' .
+m|ask|git -c core.pager='terraform apply' -p log
+b|deny|git fetch --upload-pack='sh -c x' .
+b|deny|git grep -Ofoo x
+b|deny|git -c include.path=/tmp/x diff
+b|deny|git -c diff.x.textconv=foo show
+b|deny|git -c protocol.ext.allow=always fetch ext::foo
+b|deny|git -c gpg.ssh.program=foo log --show-signature
+b|deny|git -c uploadpack.packObjectsHook=foo fetch .
+m|ask|awk 'BEGIN{system("terraform apply")}'
+m|ask|sed 'e terraform apply' f
+m|ask|tar -xf a.tar --to-command='terraform apply'
+m|ask|zip -T -TT 'terraform apply' z.zip f
+m|ask|echo 'terraform apply' | xargs -0 sh -c
+m|ask|printf '%s' 'terraform apply' | xargs -I{} bash -c '{}'
+m|ask|kubectl run t --image=x --rm -i -- terraform apply
+m|ask|make --eval='x: ; terraform apply' x
+m|ask|gcloud compute ssh vm --command='terraform apply'
+m|deny|X=$(rm -rf y) terraform apply
+m|deny|terraform apply $(rm -rf y)
+m|deny|echo $(rm -rf y) $(terraform apply)
+m|deny|export X=$(cat a > b) && terraform apply
+m|deny|terraform apply | cat > out.txt
+m|deny|export X=$(git config core.hooksPath /tmp/h) && terraform apply
+m|deny|rm -rf y | psql -c 'DROP TABLE x'
+m|deny|echo x > .ag*/specs/active/W-1.st*
+m|deny|tee {.agents,.x}/specs/active/W-1.{state,x}.json
+m|deny|S=state; echo x > .agents/specs/active/W-1.$S.json
+b|deny|printf x >> .gi[t]/config
+b|deny|git log -1 --format=x --output .g?t/config
+b|deny|git -C .git log -1 --format=x --output=config
+m|deny|git -C .git/ai-engineering log -1 --format=x --output=tokens/t
+m|deny|env -C .git/ai-engineering sh -c 'echo x > tokens/t'
+m|deny|cp -l .agents/specs/active/W-1.state.json /tmp/h
+m|deny|link .agents/specs/active/W-1.state.json /tmp/h
+CASES
+
+# Proven data spans (the only floor exemptions), each with the shape that is not data.
+while IFS='|' read -r agent expected command_text; do
+  [ -n "$expected" ] || continue
+  expect_equal "fix round 2 floor ($agent): $command_text" "$expected" "$(decision_of "$(agent_output "$command_text" "$agent_repository" "$agent")")"
+done <<'CASES'
+m|none|echo "terraform apply" | tee notes.txt
+m|none|echo 'npm publish' | grep npm | wc -l
+m|ask|echo "terraform apply" | foo
+m|ask|cat <<'X' | foo\nterraform apply\nX
+m|ask|foo $(echo terraform) apply
+m|ask|echo terraform | xargs -I{} {} apply
+m|ask|echo apply | xargs terraform
+m|none|grep -rn 'terraform apply' . | head -5
+m|ask|rg --pre 'terraform apply' x
+m|none|git -c color.ui=always log -S 'TRUNCATE'
+m|ask|git -c core.pager=cat log -S 'TRUNCATE'
+m|ask|git -c core.editor='terraform apply' commit -m x
+m|none|git commit -F - <<'EOF'\nrelease: terraform destroy notes\nEOF
+m|none|git commit -m "$(echo terraform destroy)"
+m|none|git log --oneline main && git push origin feature
+m|none|gh api repos/o/r/releases --method GET
+m|ask|curl -X POST https://example.com/x/scripts/deploy.sh
+m|none|sed 's/terraform apply/x/' f
+m|none|sed -i '' 's/a/npm publish/' f.ts
+m|ask|sed 's/x/terraform apply/e' f
+m|ask|sed -e 's/a/b/' -e 'e terraform apply' f
+m|ask|sed -n '/terraform apply/p' notes.md
+m|ask|pnpm run release-it
+m|ask|FOO='terraform apply' make test
+m|ask|echo x > scripts/release.sh
+m|ask|alias ls='terraform apply'
+m|ask|bash -c 'git commit -m "npm publish notes"'
+m|ask|echo 'npm publish' | psql
+CASES
+
+# Executing constructs are parsed (precise labels) and bundling counts effectful substitutions (N3, N4).
+while IFS='|' read -r agent expected command_text; do
+  [ -n "$expected" ] || continue
+  expect_equal "fix round 2 carriers and bundling ($agent): $command_text" "$expected" "$(decision_of "$(agent_output "$command_text" "$agent_repository" "$agent")")"
+done <<'CASES'
+m|ask|tar -cf a.tar --checkpoint=1 --checkpoint-action=exec='terraform apply' .
+m|ask|sort --compress-program='terraform apply' f
+m|deny|git rebase -x 'echo hi' HEAD~1 && terraform apply
+m|deny|export X=$(op read x) && terraform apply
+m|ask|terraform apply -var x=$(git rev-parse HEAD)
+m|deny|export X=$(git -c core.pager=x log) && terraform apply
+m|deny|echo $(rm -rf y) | psql -c 'DROP TABLE x'
+m|ask|cat a | psql -c 'DROP TABLE x'
+m|deny|git commit -m "$(rm -rf y)" && terraform apply
+m|deny|node -e "await sql`DROP DATABASE x` $(rm -rf y)"
+m|ask|node -e "await sql\`DROP DATABASE x\`"
+m|ask|kubectl debug node/x -it --image=busybox -- terraform apply
+m|none|kubectl run t --image=x
+CASES
+reason="$(guard_reason "git submodule foreach 'terraform apply'")"
+expect_contains "fix round 2: an executing construct is labelled precisely" "terraform apply [infrastructure-apply]" "$reason"
+reason="$(guard_reason "sed 'e terraform apply' f")"
+expect_contains "fix round 2: a floor-only ask names the floor and the class" "not proven to be data (class: infrastructure-apply)" "$reason"
+expect_contains "fix round 2: a floor-only ask keeps the guardrail note" "Hooks are guardrails, not a sandbox." "$reason"
+
+# Paths and Git by subagents (N2, N5).
+while IFS='|' read -r agent expected command_text; do
+  [ -n "$expected" ] || continue
+  expect_equal "fix round 2 paths and Git ($agent): $command_text" "$expected" "$(decision_of "$(agent_output "$command_text" "$agent_repository" "$agent")")"
+done <<'CASES'
+m|none|echo x > "$HOME/.gitconfig"
+m|none|echo x > "$TMPDIR/out.json"
+m|none|rm -rf */*
+m|none|rm -rf build/*/cache
+m|deny|rm -rf .git/ai-engineering/tok*
+m|deny|sudo -D .git/ai-engineering sh -c 'echo x > tokens/t'
+m|deny|env --chdir=.agents/specs/active touch W-1.state.json
+m|deny|cp --link .agents/specs/active/W-1.state.json /tmp/h
+m|deny|ln .agents/specs/active/W-1.state.json /tmp/h
+m|none|cp .agents/specs/active/W-1.state.json /tmp/h
+m|none|echo x > docs/notes.md
+b|none|git log -Oorder.txt
+b|none|git -c color.ui=always status
+b|none|git -c core.quotepath=false status
+b|deny|git -c core.pager=cat log
+b|deny|git log --ext-diff
+b|deny|git diff --textconv
+b|deny|git --config-env=core.pager=X log
+b|none|git fetch origin
+b|deny|git fetch --receive-pack=x origin
+CASES
+# N6 owner ruling: whole-tree writers ask (protected-tree-overwrite) when the destination is the
+# repository root, an ancestor of it, inside .git or .agents/specs, or cannot be resolved; no
+# decision when it cannot contain a protected path; existing denies win. Each form runs for the
+# main session (m) and a specialist (b); "agent|expected|command", the agent repository is the cwd.
+while IFS='|' read -r agent expected command_text; do
+  [ -n "$expected" ] || continue
+  expect_equal "fix round 2 N6 ($agent): $command_text" "$expected" "$(decision_of "$(agent_output "$command_text" "$agent_repository" "$agent")")"
+done <<'CASES'
+m|ask|cp -R /tmp/src/. .
+b|ask|cp -R /tmp/src/. .
+m|ask|cp -a /tmp/src/. ..
+b|ask|cp -a /tmp/src/. ..
+m|ask|cp -r /tmp/src .git/hooks
+m|none|cp -R src/ build/
+b|none|cp -R src/ build/
+m|none|cp -a src/. dist
+m|ask|rsync -a /tmp/src/ ./
+b|ask|rsync -a /tmp/src/ ./
+m|deny|rsync -r x/ .agents/specs/
+m|ask|rsync -r x/ .git/info/
+m|none|rsync -a x/ dist/
+b|none|rsync -a x/ dist/
+m|ask|tar -xf a.tar
+b|ask|tar -xf a.tar
+m|ask|tar -xzf a.tgz -C ..
+m|ask|tar xf a.tar -C .
+m|ask|bsdtar -xf a.tar
+m|none|tar -xf a.tar -C vendor/
+b|none|tar -xf a.tar -C vendor/
+m|none|tar -tf a.tar
+m|ask|unzip a.zip
+b|ask|unzip a.zip
+m|none|unzip a.zip -d vendor
+b|none|unzip a.zip -d vendor
+m|none|unzip -l a.zip
+m|ask|ditto /tmp/src .
+b|ask|ditto /tmp/src .
+m|none|ditto /tmp/src build/out
+b|none|ditto /tmp/src build/out
+m|ask|cpio -idm < a.cpio
+b|ask|cpio -idm < a.cpio
+m|none|cpio -idm -D vendor < a.cpio
+m|none|cpio -o < list > a.cpio
+m|ask|pax -r < a.pax
+m|none|pax -rw src build
+m|ask|7z x a.7z
+m|none|7z x a.7z -obuild
+m|ask|git checkout main -- .
+b|deny|git checkout main -- .
+m|ask|git restore --source HEAD~1 .
+b|deny|git restore --source HEAD~1 .
+m|ask|git restore -s HEAD~1 -- ..
+m|ask|git reset --hard HEAD~1
+b|deny|git reset --hard HEAD~1
+m|ask|git read-tree -u --reset HEAD~1
+m|none|git checkout -- .
+m|none|git restore .
+m|none|git reset --hard
+m|none|git checkout main -- src/app.ts
+m|none|git restore --source HEAD~1 src
+m|none|git restore --staged --source HEAD~1 .
+m|ask|cp -R "$SRC"/. .
+b|ask|cp -R "$SRC"/. .
+m|ask|tar -xf "$ARCHIVE"
+m|ask|cp -R x "$DEST"
+m|ask|cp -R /tmp/src/* .
+m|ask|git checkout "$REF" -- .
+m|ask|sudo cp -R /tmp/src/. .
+m|ask|bash -c 'tar -xf a.tar'
+m|ask|env -C .. tar -xf a.tar
+m|deny|cp -r x .git/ai-engineering
+m|deny|tar -xf a.tar -C .agents/specs/active
+b|deny|tar -xf a.tar -C .git/hooks
+m|deny|cp -R /tmp/src/. . && rm .agents/specs/active/WORK-9.state.json
+CASES
+reason="$(agent_output 'cp -R /tmp/src/. .' "$agent_repository" m | jq -r '.hookSpecificOutput.permissionDecisionReason')"
+expect_contains "fix round 2 N6: the ask names the operation" "cp (recursive) into ." "$reason"
+expect_contains "fix round 2 N6: the ask names the protected path it can reach" "the repository root" "$reason"
+expect_contains "fix round 2 N6: the ask keeps the guardrail note" "Hooks are guardrails, not a sandbox." "$reason"
+(
+  source "$scripts/lib.sh"
+  classify_command_impact "git checkout main -- ." "$agent_repository"; [ "$impact_decision" = "ask" ] && [ "$impact_classes" = "protected-tree-overwrite" ] || exit 1
+  classify_command_impact "tar -xf a.tar -C vendor/" "$agent_repository"; [ "$impact_decision" = "none" ] || exit 2
+)
+expect_equal "lib: classify_command_impact labels whole-tree writers (exit code identifies the failed check)" 0 "$?"
+# From a subdirectory the repository root is looked up: extracting into the subdirectory is not
+# a protected ancestor, extracting into its parent (the root) is.
+expect_equal "fix round 2 N6: extraction into a subdirectory is no decision" none "$(decision_of "$(agent_output 'tar -xf a.tar' "$agent_repository/src" m)")"
+expect_equal "fix round 2 N6: extraction into the root from a subdirectory asks" ask "$(decision_of "$(agent_output 'tar -xf a.tar -C ..' "$agent_repository/src" m)")"
+
+long_s="$(printf '\xc5\xbf')"
+expect_equal "fix round 2: a long-s look-alike store target denies (Bash)" deny "$(decision_of "$(agent_output "echo x > .agents/specs/active/WORK-9.${long_s}tate.json" "$agent_repository" m)")"
+expect_equal "fix round 2: non-ASCII outside the store is no decision (Bash)" none "$(decision_of "$(agent_output "echo x > docs/caf$(printf '\xc3\xa9').md" "$agent_repository" m)")"
+
+# Floor property: every v0.2 ask case still asks when an inert-looking runner carries it: awk
+# system(), an alias that shadows its program, and a Git pager.
+while IFS= read -r command_text; do
+  [ -n "$command_text" ] || continue
+  awk_text="${command_text//\\/\\\\}"
+  awk_text="${awk_text//\"/\\\"}"
+  first_word="$(printf '%s\n' "$command_text" | tr ' ' '\n' | grep -v '=' | head -n 1)"
+  expect_equal "floor property (awk system): $command_text" ask "$(guard_decision "awk 'BEGIN{system(\"$awk_text\")}'")"
+  expect_equal "floor property (alias shadow): $command_text" ask "$(guard_decision "alias $first_word=true; $command_text")"
+  expect_equal "floor property (git pager): $command_text" ask "$(guard_decision "git -c core.pager='$command_text' -p log")"
+done <<'CASES'
+terraform apply
+terraform -chdir=infra apply -auto-approve
+tofu destroy
+terragrunt run-all apply
+FOO=1 terraform apply
+bash -c "terraform apply"
+pulumi up --yes
+npx cdk deploy MyStack
+cdk destroy
+kubectl delete pod web-1
+sudo kubectl -n prod delete deployment api
+helm uninstall api
+aws s3 rm s3://bucket/key
+aws s3 rb s3://bucket --force
+aws ec2 terminate-instances --instance-ids i-123
+aws s3 sync . s3://bucket --delete
+gcloud compute instances delete vm-1
+az group delete -n rg
+psql -c "DROP TABLE users"
+mysql -e "drop database app"
+psql -c "TRUNCATE orders"
+git push --force origin feature
+git push -f origin feature
+git push --force-with-lease origin feature
+git push origin +feature
+git push origin --delete feature
+git push origin :feature
+git push origin main
+git push origin HEAD:master
+git push --tags
+gh pr merge 12 --squash
+gh release create v1.0.0
+npm publish
+pnpm publish --access public
+yarn npm publish
+cargo publish
+twine upload dist/*
+docker push org/image:1
+npm run deploy:prod
+make deploy
+./scripts/release.sh
+CASES
+
+# The floor text over its jq budget (16 KB) is scanned by the wrapper (linear grep), never skipped.
+{ printf 'foo'; i=0; while [ "$i" -lt 2500 ]; do printf ' word%s' "$i"; i=$((i + 1)); done; printf ' terraform apply\n'; } >"$work_directory/floor-large.txt"
+jq -n --rawfile command "$work_directory/floor-large.txt" --arg cwd "$feature_repository" '{tool_input: {command: $command}, cwd: $cwd}' >"$work_directory/floor-large.json"
+expect_equal "fix round 2: a large floor text with a reserved keyword asks" ask "$(decision_of "$("$scripts/guard-bash.sh" <"$work_directory/floor-large.json")")"
+sed 's/ terraform apply$/ terraform plan/' "$work_directory/floor-large.txt" >"$work_directory/floor-large-harmless.txt"
+jq -n --rawfile command "$work_directory/floor-large-harmless.txt" --arg cwd "$feature_repository" '{tool_input: {command: $command}, cwd: $cwd}' >"$work_directory/floor-large-harmless.json"
+expect_equal "fix round 2: a large harmless floor text is no decision" none "$(decision_of "$("$scripts/guard-bash.sh" <"$work_directory/floor-large-harmless.json")")"
+floor_large_ms="$(elapsed_milliseconds "$work_directory/floor-large.json")"
+if [ "$floor_large_ms" -lt 2500 ]; then pass; else fail "performance: large floor text took ${floor_large_ms} ms"; fi
+
+# lib.sh sees the fix-round-2 classifications.
+(
+  source "$scripts/lib.sh"
+  classify_command_impact "awk 'BEGIN{system(\"terraform apply\")}'" "$agent_repository"; [ "$impact_decision" = "ask" ] || exit 1
+  classify_command_impact "git -c core.pager='terraform apply' -p log" "$agent_repository"; [ "$impact_decision" = "ask" ] || exit 2
+  classify_command_impact "alias terraform=terraform; terraform apply" "$agent_repository"; [ "$impact_decision" = "ask" ] || exit 3
+  classify_command_impact "X=\$(rm -rf y) terraform apply" "$agent_repository"; [ "$impact_decision" = "deny" ] || exit 4
+  classify_command_impact "echo x > .ag*/specs/active/W-1.st*" "$agent_repository"; [ "$impact_decision" = "deny" ] && [ "$impact_classes" = "authority-store-write" ] || exit 5
+  classify_command_impact "sed 'e terraform apply' f" "$agent_repository"; [ "$impact_decision" = "ask" ] && [ "$impact_classes" = "infrastructure-apply" ] || exit 6
+  classify_command_impact "rg 'terraform apply' docs/" "$agent_repository"; [ "$impact_decision" = "none" ] || exit 7
+  classify_command_impact "$(cat "$work_directory/floor-large.txt")" "$agent_repository"; [ "$impact_decision" = "ask" ] || exit 8
+)
+expect_equal "lib: classify_command_impact sees the fix-round-2 classifications (exit code identifies the failed check)" 0 "$?"
+
+# N6: log rotation never follows a planted guard-log.jsonl.1 (a link to a file or a directory).
+for planted in file directory; do
+  planted_repository="$(new_repository "planted-$planted-repo" feature)"
+  planted_directory="$planted_repository/.git/ai-engineering"
+  mkdir -p "$planted_directory" "$work_directory/planted-$planted-target"
+  printf 'keep\n' >"$work_directory/planted-$planted-target/content"
+  head -c 1100000 /dev/zero | tr '\0' 'x' >"$planted_directory/guard-log.jsonl"
+  if [ "$planted" = file ]; then
+    ln -s "$work_directory/planted-$planted-target/content" "$planted_directory/guard-log.jsonl.1"
+  else
+    ln -s "$work_directory/planted-$planted-target" "$planted_directory/guard-log.jsonl.1"
+  fi
+  output="$(agent_output 'cd infra && terraform apply' "$planted_repository" b)"
+  expect_equal "guard log: a planted $planted link as the rotated log still asks" ask "$(decision_of "$output")"
+  expect_equal "guard log: the planted $planted link target is unchanged" "content" "$(ls "$work_directory/planted-$planted-target")"
+  expect_equal "guard log: the planted $planted link target content is unchanged" keep "$(cat "$work_directory/planted-$planted-target/content")"
+  if [ -L "$planted_directory/guard-log.jsonl.1" ]; then fail "guard log: the planted $planted link was kept as the rotated log"; else pass; fi
+done
+blocked_rotation_repository="$(new_repository blocked-rotation-repo feature)"
+mkdir -p "$blocked_rotation_repository/.git/ai-engineering/guard-log.jsonl.1"
+head -c 2200000 /dev/zero | tr '\0' 'x' >"$blocked_rotation_repository/.git/ai-engineering/guard-log.jsonl"
+output="$(agent_output 'cd infra && terraform apply' "$blocked_rotation_repository" b)"
+expect_equal "guard log: a directory in the rotation slot still asks" ask "$(decision_of "$output")"
+expect_equal "guard log: a directory in the rotation slot keeps the log bounded" 2200000 "$(wc -c <"$blocked_rotation_repository/.git/ai-engineering/guard-log.jsonl" | tr -d ' ')"
+
+# N5: a Write/Edit to a hard link of a store file is denied; a hard link to another file is not.
+ln "$state_repository/.agents/specs/active/WORK-9.state.json" "$state_repository/hard-link-state.json"
+printf 'x\n' >"$state_repository/plain-original.txt"
+ln "$state_repository/plain-original.txt" "$state_repository/plain-link.txt"
+expect_equal "guard-writes: a hard link to a store file is denied" deny "$(decision_of "$(write_input "" "$state_repository/hard-link-state.json" "$state_repository" | "$scripts/guard-writes.sh")")"
+expect_equal "guard-writes: a hard link to a store file is denied for subagents" deny "$(decision_of "$(write_input ai-engineering:backend "hard-link-state.json" "$state_repository" | "$scripts/guard-writes.sh")")"
+expect_equal "guard-writes: a hard link to an ordinary file is no decision" none "$(decision_of "$(write_input "" "$state_repository/plain-link.txt" "$state_repository" | "$scripts/guard-writes.sh")")"
+rm -f "$state_repository/hard-link-state.json" "$state_repository/plain-link.txt" "$state_repository/plain-original.txt"
+
+# N6: on macOS (APFS) check whether a long-s look-alike opens the store file, and that Write/Edit
+# and Bash deny such paths on every platform.
+long_s_state="$state_repository/.agents/specs/active/WORK-9.${long_s}tate.json"
+if [ "$(uname -s)" = Darwin ]; then
+  if [ -e "$long_s_state" ]; then
+    echo "info: APFS check: a long-s (U+017F) look-alike path opens the store file (case folding)"
+  else
+    echo "info: APFS check: a long-s (U+017F) look-alike path does not open the store file on this volume"
+  fi
+fi
+expect_equal "guard-writes: a long-s look-alike store path is denied" deny "$(decision_of "$(write_input "" "$long_s_state" "$state_repository" | "$scripts/guard-writes.sh")")"
+expect_equal "guard-writes: a Kelvin-sign look-alike token path is denied" deny "$(decision_of "$(write_input "" "$state_repository/.git/ai-engineering/to$(printf '\xe2\x84\xaa')ens/t" "$state_repository" | "$scripts/guard-writes.sh")")"
+expect_equal "guard-writes: a long-s look-alike Git hooks directory is denied for subagents" deny "$(decision_of "$(write_input ai-engineering:backend "$state_repository/.git/hook$(printf '\xc5\xbf')/pre-commit" "$state_repository" | "$scripts/guard-writes.sh")")"
+expect_equal "guard-writes: a non-ASCII name outside the store is no decision" none "$(decision_of "$(write_input "" "$state_repository/src/caf$(printf '\xc3\xa9').ts" "$state_repository" | "$scripts/guard-writes.sh")")"
+expect_equal "guard-writes: a non-ASCII learning file inside .agents is allowed" none "$(decision_of "$(write_input ai-engineering:learning "$state_repository/.agents/learnings/caf$(printf '\xc3\xa9').md" "$state_repository" | "$scripts/guard-writes.sh")")"
 
 # ---------------------------------------------------------------- run-gate
 commit_all() { git -C "$1" add -A && git -C "$1" -c user.name=test -c user.email=test@example.com commit -q -m "$2"; }

@@ -5,9 +5,11 @@
 #
 # Structure: this script is the hook wrapper. guard/lexer.jq parses, guard/classify.jq and
 # guard/tables.jq classify, guard/policy.jq decides, all in one jq run (guard/main.jq).
-# When the parse is not confident (unbalanced quotes, a dynamic program name, an error, a
-# timeout or an oversized command) it falls back to v0.2-style keyword rules, which only
-# ever ask. The guard never returns "allow".
+# Safety floor: the v0.2 keyword rules always run over the command text minus proven data
+# spans (guard/tables.jq lists them), so classification can raise a decision but never drop
+# it below ask. When the parse is not confident (unbalanced quotes, a dynamic program name, an
+# error, a timeout or an oversized command) the keyword rules run over the whole command
+# instead, and only ever ask. The guard never returns "allow".
 #
 # This is a guardrail, not a security sandbox: it only sees the command text Claude
 # submits. Indirection (scripts, aliases, variables, encoded strings) can evade it.
@@ -74,13 +76,21 @@ resolve_common_directory() {
 
 # Rotation under a mkdir lock, so two hooks do not rotate at once. Best effort: when another
 # hook holds the lock this one skips rotating and never waits. A lock older than a minute is stale.
+# A symbolic link planted as the previous log is removed first (mv onto a link to a directory
+# would move the log into that directory); anything else there that is not a regular file
+# stops the rotation.
 rotate_guard_log() {
   local log_directory="$1" log_file="$2" lock size
   lock="$log_directory/.rotate.lock"
   if [ -d "$lock" ] && [ -n "$(find "$lock" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then rmdir "$lock" 2>/dev/null; fi
   mkdir "$lock" 2>/dev/null || return 0
   size="$(wc -c <"$log_file" 2>/dev/null | tr -d ' ')"
-  if [ "${size:-0}" -gt "$log_max_bytes" ]; then mv -f "$log_file" "$log_file.1" 2>/dev/null; fi
+  if [ "${size:-0}" -gt "$log_max_bytes" ]; then
+    if [ -L "$log_file.1" ]; then rm -f "$log_file.1" 2>/dev/null; fi
+    if [ ! -e "$log_file.1" ] || { [ -f "$log_file.1" ] && [ ! -L "$log_file.1" ]; }; then
+      mv -f "$log_file" "$log_file.1" 2>/dev/null
+    fi
+  fi
   rmdir "$lock" 2>/dev/null
   return 0
 }
@@ -99,6 +109,9 @@ write_guard_log() {
   if [ -f "$log_file" ]; then
     size="$(wc -c <"$log_file" 2>/dev/null | tr -d ' ')"
     if [ "${size:-0}" -gt "$log_max_bytes" ]; then rotate_guard_log "$log_directory" "$log_file"; fi
+    # Still over the cap (rotation refused or skipped): stay bounded and drop this line.
+    size="$(wc -c <"$log_file" 2>/dev/null | tr -d ' ')"
+    [ "${size:-0}" -le $((log_max_bytes * 2)) ] || return 0
   fi
   digest="$(command_sha256)"
   jq -c --arg time "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg decision "$decision" --arg classes "$classes" \
@@ -121,7 +134,11 @@ log_decision() {
 }
 
 # ---------------------------------------------------------------- keyword fallback
-# v0.2-style keyword rules, used only when the parse is not confident. They only ever ask.
+# v0.2-style keyword rules (the same rules as keyword_net in guard/tables.jq). Mode "fallback":
+# the parse is not confident, so they run over the whole command, with a few extra rules. Mode
+# "floor": the parse found nothing to decide but its floor text (the command minus proven data)
+# was too large to scan in jq, so the same rules run over that text here (grep is linear).
+# They only ever ask.
 # Word boundaries: a keyword starts after start-of-text or a non-word character and ends
 # before a non-word character or end-of-text. Arguments may follow the tool name after any
 # separator, so `$(echo terraform) apply` and `which kubectl` in backquotes are caught.
@@ -135,12 +152,16 @@ fallback_flag() {
 fallback_matches() { grep -Eiq -- "$1" <<<"$fallback_command_text"; }
 
 keyword_fallback() {
-  local branch="$1"
+  local branch="$1" mode="${2:-fallback}"
   local word_start='(^|[^[:alnum:]_-])' word_end='([^[:alnum:]_-]|$)'
   local argument_start='(^|[[:space:]])'
   local gap='([^[:alnum:]_-].*)?[^[:alnum:]_-]'
   local risky_task='[^[:space:]]*(deploy|release|publish|destroy|teardown)[^[:space:]]*'
-  fallback_command_text="$(jq -r '.tool_input.command // empty' <<<"$hook_input" 2>/dev/null | tr '\n\t' '  ')"
+  if [ "$mode" = "floor" ]; then
+    fallback_command_text="$(printf '%s' "$floor_text" | tr '\n\t' '  ')"
+  else
+    fallback_command_text="$(jq -r '.tool_input.command // empty' <<<"$hook_input" 2>/dev/null | tr '\n\t' '  ')"
+  fi
   [ -n "$fallback_command_text" ] || return 0
 
   fallback_matches "${word_start}(terraform|tofu|terragrunt)${gap}(apply|destroy)${word_end}" && fallback_flag infrastructure-apply
@@ -161,14 +182,14 @@ keyword_fallback() {
     fallback_matches "(^|[^[:alnum:]_])(--force|--force-with-lease(=[^[:space:]]*)?|--mirror|--delete|-[[:alpha:]]*[fd][[:alpha:]]*)${word_end}" && fallback_flag git-force-push
     fallback_matches "${argument_start}(\+|:)[^[:space:]]+" && fallback_flag git-force-push
     fallback_matches "${argument_start}([^[:space:]]*:)?(refs/heads/)?(main|master)${word_end}" && fallback_flag git-main-push
-    fallback_matches "${argument_start}(--tags|[^[:space:]]*refs/tags/[^[:space:]]*)${word_end}" && fallback_flag git-tag-push
+    fallback_matches "${argument_start}(--tags|--follow-tags|[^[:space:]]*refs/tags/[^[:space:]]*)${word_end}" && fallback_flag git-tag-push
     case "$branch" in main | master) fallback_flag git-main-push ;; esac
   fi
 
   fallback_matches "${word_start}gh${gap}pr[[:space:]]+merge${word_end}" && fallback_flag pr-merge
   fallback_matches "${word_start}glab${gap}mr[[:space:]]+merge${word_end}" && fallback_flag pr-merge
   fallback_matches "${word_start}gh${gap}api${word_end}.*pulls/[0-9]+/merge" && fallback_flag pr-merge
-  fallback_matches "${word_start}(gh|glab)${gap}release[[:space:]]+(create|delete|edit)${word_end}" && fallback_flag release-create
+  fallback_matches "${word_start}(gh|glab)${gap}release[[:space:]]+(create|delete|edit|upload)${word_end}" && fallback_flag release-create
   fallback_matches "${word_start}(npm|pnpm|yarn|bun)${gap}publish${word_end}" && fallback_flag package-publish
   fallback_matches "${word_start}(cargo|poetry|flit|hatch)${gap}publish${word_end}" && fallback_flag package-publish
   fallback_matches "${word_start}twine${gap}upload${word_end}" && fallback_flag package-publish
@@ -184,6 +205,10 @@ keyword_fallback() {
   fallback_matches "${word_start}(npm|pnpm|yarn|bun)${gap}${risky_task}" && fallback_flag unclassified-deploy
   fallback_matches "${word_start}(make|just|task|mage)${gap}${risky_task}" && fallback_flag unclassified-deploy
   fallback_matches "${argument_start}[^[:space:]]*/[^[:space:]/]*(deploy|release|publish|destroy|teardown)[^[:space:]/]*" && fallback_flag unclassified-deploy
+
+  # The floor needs only the rules above: the parsed policy has already judged the store,
+  # HTTP endpoints and Git by subagents.
+  [ "$mode" = "floor" ] && return 0
 
   # The authority store cannot be proven untouched when the parse is not confident, so a
   # command that names it asks (the parsed path denies writes outright).
@@ -246,16 +271,27 @@ case "$hook_input" in
   *tokens*) common_directory="$(resolve_common_directory)" ;;
 esac
 
+# The repository root matters only for whole-tree writers (recursive copy, archive extraction,
+# ref restores). Look it up only when the command mentions one; otherwise the classifier uses
+# the working directory in its place, which only over-asks.
+root_cdup="" root_known="0"
+case "$hook_input" in
+  *cp* | *rsync* | *ditto* | *tar* | *zip* | *cpio* | *pax* | *7z* | *checkout* | *restore* | *reset* | *read-tree*)
+    if root_cdup="$(git -C "$(directory_for_git)" rev-parse --show-cdup 2>/dev/null)"; then root_known="1"; else root_cdup=""; fi
+    ;;
+esac
+
 classifier_output_file="$(mktemp "${TMPDIR:-/tmp}/ai-engineering-guard.XXXXXX" 2>/dev/null)" || classifier_output_file=""
 cleanup() { [ -z "$classifier_output_file" ] || rm -f "$classifier_output_file"; }
 trap cleanup EXIT
 
-decision="fallback" parse_mode="fallback" classes="" hook_output="" hint_state="none" hint_targets="[]" need_branch="0"
+decision="fallback" parse_mode="fallback" classes="" hook_output="" hint_state="none" hint_targets="[]" need_branch="0" floor_text=""
 
 # Runs the classifier once. Past the time budget it is stopped and the fallback rules apply.
 run_classifier() {
-  decision="fallback" parse_mode="fallback" classes="" hook_output="" hint_state="none" hint_targets="[]" need_branch="0"
+  decision="fallback" parse_mode="fallback" classes="" hook_output="" hint_state="none" hint_targets="[]" need_branch="0" floor_text=""
   jq -r -L "$guard_directory" --arg branch "$current_branch" --arg branchLoaded "$branch_loaded" --arg commonDir "$common_directory" \
+    --arg rootCdup "$root_cdup" --arg rootKnown "$root_known" \
     -f "$guard_directory/main.jq" >"$classifier_output_file" 2>/dev/null <<<"$hook_input" &
   local classifier_pid=$! watchdog_pid
   ( sleep "$parse_time_budget_seconds"; kill "$classifier_pid" 2>/dev/null ) >/dev/null 2>&1 &
@@ -269,6 +305,7 @@ run_classifier() {
       read -r hint_state
       read -r hint_targets
       read -r need_branch
+      read -r floor_text
     } <"$classifier_output_file"
   fi
   kill "$watchdog_pid" 2>/dev/null
@@ -295,6 +332,20 @@ case "$decision" in
     printf '%s\n' "$hook_output"
     log_decision "$decision" "$classes" "$parse_mode"
     exit 0
+    ;;
+  floor)
+    # Parsed with no decision, but the floor text was too large to scan in jq: scan it here.
+    if [ "$need_branch" = "1" ] && [ "$branch_loaded" = "0" ]; then load_current_branch; fi
+    keyword_fallback "$current_branch" floor
+    if [ "${#fallback_intents[@]}" -eq 0 ]; then
+      if [ -n "$classify_only" ]; then printf 'none\n\n'; exit 0; fi
+      emit_shell_edit_hint
+      exit 0
+    fi
+    classes="$(IFS=,; printf '%s' "${fallback_intents[*]}")"
+    if [ -n "$classify_only" ]; then printf 'ask\n%s\n' "$classes"; exit 0; fi
+    log_decision ask "$classes" parsed
+    ask "ai-engineering guard: words in this command look like a reserved operation and are not proven to be data (class: ${classes//,/, }). It needs explicit human approval. $guardrail_note"
     ;;
 esac
 

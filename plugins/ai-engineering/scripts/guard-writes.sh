@@ -95,6 +95,64 @@ case "$lowered_path" in
     ;;
 esac
 
+# ---------------------------------------------------------------- hard links (N5)
+# A hard link to a store file is that file under another name. Deny a write to an existing file
+# with more than one link when a file in this repository's store is the same file.
+repository_top="$(git -C "$working_directory" rev-parse --show-toplevel 2>/dev/null)"
+store_common_directory="$(git -C "$working_directory" rev-parse --git-common-dir 2>/dev/null)"
+if [ -n "$store_common_directory" ]; then
+  case "$store_common_directory" in /*) ;; *) store_common_directory="$working_directory/$store_common_directory" ;; esac
+fi
+link_count() { stat -c %h "$1" 2>/dev/null || stat -f %l "$1" 2>/dev/null; }
+if [ -f "$resolved_path" ] && [ "$(link_count "$resolved_path")" -gt 1 ] 2>/dev/null; then
+  for store_directory in "${repository_top:+$repository_top/.agents/specs}" "${store_common_directory:+$store_common_directory/ai-engineering/tokens}"; do
+    [ -n "$store_directory" ] && [ -d "$store_directory" ] || continue
+    if [ -n "$(find "$store_directory" -maxdepth 8 -type f -samefile "$resolved_path" -print 2>/dev/null | head -n 1)" ]; then
+      deny "$authority_store_reason (the target is a hard link to a store file)"
+    fi
+  done
+fi
+
+# ---------------------------------------------------------------- look-alike names (N6)
+# APFS folds case with full Unicode case folding, so U+017F (long s) opens "s", U+212A (Kelvin
+# sign) opens "k" and ligatures open "st" or "fi". A target with any non-ASCII character is
+# checked with each such character as a wildcard: denied when its components could be
+# .agents/specs/.../*.state.json or ai-engineering/tokens (and, for subagents, Git's own files).
+component_matches() { [[ "$1" == $2 ]]; }
+could_end_with() {
+  local pattern="$1" suffix="$2" tail
+  case "$pattern" in
+    *'*'*) tail="${pattern##*\*}"; [[ "$suffix" == *"$tail" ]] || [[ "$tail" == *"$suffix" ]] ;;
+    *) [[ "$pattern" == *"$suffix" ]] ;;
+  esac
+}
+look_alike_reaches() {
+  local pattern="$1" restricted="$2" old_ifs="$IFS" index count
+  local -a parts
+  IFS=/
+  read -r -a parts <<<"$pattern"
+  IFS="$old_ifs"
+  count="${#parts[@]}"
+  for ((index = 0; index + 1 < count; index++)); do
+    if component_matches .agents "${parts[index]}" && component_matches specs "${parts[index + 1]}" && could_end_with "${parts[count - 1]}" .state.json; then return 0; fi
+    if component_matches ai-engineering "${parts[index]}" && component_matches tokens "${parts[index + 1]}"; then return 0; fi
+    if [ "$restricted" = 1 ] && component_matches .git "${parts[index]}"; then
+      case "${parts[index + 1]}" in *'*'* | hooks | info | config) return 0 ;; esac
+    fi
+  done
+  return 1
+}
+if [ -n "$(printf '%s' "$target_path$resolved_path" | LC_ALL=C tr -d '\000-\177')" ]; then
+  restricted_writer=0
+  case "$agent_type" in ai-engineering:frontend | ai-engineering:backend | ai-engineering:platform | ai-engineering:qa | ai-engineering:security-reviewer | ai-engineering:learning) restricted_writer=1 ;; esac
+  for candidate in "$resolved_path" "$target_path"; do
+    look_alike="$(printf '%s' "$candidate" | tr '[:upper:]' '[:lower:]' | LC_ALL=C tr '\200-\377' '*')"
+    if look_alike_reaches "$look_alike" "$restricted_writer"; then
+      deny "ai-engineering guard: the path has non-ASCII characters that the file system may fold into the authority store (.agents/specs/**/*.state.json, the token store) or, for subagents, Git's own files; use the plain ASCII name (attempted: $target_path)."
+    fi
+  done
+fi
+
 # ---------------------------------------------------------------- Git's own files
 # Subagents may not write Git hooks, configuration or info files (they run code or change how
 # the coordinator's Git behaves). The coordinator and other callers are not affected.

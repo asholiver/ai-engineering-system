@@ -120,9 +120,11 @@ def wrappers: {
   "docker": {sub: ["exec", "run"], vf: ["-H", "--host", "--context", "-c", "-l", "--log-level", "-e", "--env", "-u", "--user", "-w", "--workdir", "--env-file", "--detach-keys", "--name", "--network", "--entrypoint", "-v", "--volume", "-p", "--publish", "--platform"], subskip: 1},
   "podman": {sub: ["exec", "run"], vf: ["-e", "--env", "-u", "--user", "-w", "--workdir", "--env-file", "--detach-keys", "--name", "--network", "--entrypoint", "-v", "--volume", "-p", "--publish"], subskip: 1},
   "docker-compose": {sub: ["exec", "run"], vf: ["-e", "--env", "-u", "--user", "-w", "--workdir", "-f", "--file", "-p", "--project-name", "--index", "--profile", "-v", "--volume", "--name", "--entrypoint"], subskip: 1},
-  "kubectl": {sub: ["exec"], vf: ["-n", "--namespace", "-c", "--container", "--context", "--kubeconfig", "-f", "--filename", "-s", "--server", "--cluster", "--user", "--as", "--request-timeout", "-l", "--selector"], dashdash_optional: true, subskip: 1},
-  "oc": {sub: ["exec"], vf: ["-n", "--namespace", "-c", "--container", "--context", "--kubeconfig", "-f", "--filename", "-s", "--server"], dashdash_optional: true, subskip: 1}
+  "kubectl": {sub: ["exec", "run", "debug"], sub_dashdash: ["run", "debug"], vf: ["-n", "--namespace", "-c", "--container", "--context", "--kubeconfig", "-f", "--filename", "-s", "--server", "--cluster", "--user", "--as", "--request-timeout", "-l", "--selector", "--image", "--target", "--profile", "--copy-to", "--env", "--overrides", "--port", "--labels", "--restart"], dashdash_optional: true, subskip: 1},
+  "oc": {sub: ["exec", "run", "debug"], sub_dashdash: ["run", "debug"], vf: ["-n", "--namespace", "-c", "--container", "--context", "--kubeconfig", "-f", "--filename", "-s", "--server", "--image"], dashdash_optional: true, subskip: 1}
 };
+# Wrapper options that change the working directory of the wrapped command (path resolution).
+def wrapper_chdir_flags: {"env": ["-C", "--chdir"], "sudo": ["-D", "--chdir"]};
 
 # Programs that run a binary from the package's own bin when the word is not a built-in
 # command (pnpm and yarn): `pnpm vercel --prod` runs vercel.
@@ -131,18 +133,6 @@ def runner_builtins: ["add", "install", "i", "remove", "rm", "uninstall", "updat
 
 # Package names that run a binary with a different name.
 def program_aliases: {"netlify-cli": "netlify", "vercel-cli": "vercel", "neon-cli": "neonctl"};
-
-# Commands whose arguments are data or searches, never reserved operations of their own; the
-# residual keyword net does not read their words. Programs with classification of their own
-# (the tables above), interpreters (inline code is checked for SQL only) and shells (their
-# text is parsed) are skipped by the net as well.
-def inert_programs: ["echo", "printf", "cat", "grep", "egrep", "fgrep", "rg", "ag", "ack", "sed", "awk", "gawk", "mawk", "jq", "yq",
-                     "test", "[", "[[", "head", "tail", "wc", "sort", "uniq", "cut", "tr", "diff", "cmp", "ls", "tree", "stat", "file",
-                     "du", "df", "basename", "dirname", "realpath", "readlink", "pwd", "date", "which", "type", "whoami", "id", "uname",
-                     "hostname", "touch", "mkdir", "rmdir", "cp", "mv", "rm", "ln", "chmod", "chown", "tee", "less", "more", "man",
-                     "open", "pbcopy", "pbpaste", "git", "cd", "pushd", "popd", "export", "set", "unset", "declare", "typeset",
-                     "readonly", "local", "true", "false", ":", "read", "shift", "return", "exit", "wait", "sleep", "xxd", "base64",
-                     "shasum", "sha256sum", "md5", "md5sum", "find", "tar", "zip", "unzip", "gzip", "gunzip", "mktemp", "env", "printenv"];
 
 # Commands that only set up the environment. A reserved operation preceded only by these
 # still asks instead of denying.
@@ -195,10 +185,60 @@ def git_value_flags: ["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--
 # alias or an external command, which the parser cannot see through.
 def git_commands: ["add", "am", "annotate", "apply", "archive", "bisect", "blame", "branch", "bundle", "cat-file", "check-attr", "check-ignore", "check-ref-format", "checkout", "cherry", "cherry-pick", "citool", "clean", "clone", "column", "commit", "commit-graph", "commit-tree", "config", "count-objects", "credential", "daemon", "describe", "diff", "diff-files", "diff-index", "diff-tree", "difftool", "fast-export", "fast-import", "fetch", "filter-branch", "flow", "fmt-merge-msg", "for-each-ref", "format-patch", "fsck", "gc", "get-tar-commit-id", "grep", "gui", "hash-object", "help", "init", "instaweb", "interpret-trailers", "lfs", "log", "ls-files", "ls-remote", "ls-tree", "mailinfo", "mailsplit", "maintenance", "merge", "merge-base", "mergetool", "mktag", "mktree", "mv", "name-rev", "notes", "pack-objects", "pack-refs", "patch-id", "prune", "pull", "push", "range-diff", "read-tree", "rebase", "reflog", "remote", "repack", "replace", "request-pull", "rerere", "reset", "restore", "rev-list", "rev-parse", "revert", "rm", "send-email", "shortlog", "show", "show-branch", "show-ref", "sparse-checkout", "stage", "stash", "status", "stripspace", "submodule", "subtree", "switch", "symbolic-ref", "tag", "update-index", "update-ref", "var", "verify-commit", "verify-pack", "verify-tag", "version", "whatchanged", "worktree"];
 
-# ---------------------------------------------------------------- residual keyword net
-# The v0.2 keyword rules, ported to jq. They run over the words of a command whose program has
-# no classification of its own and is not known to be inert (an unknown runner such as
-# `foo terraform apply`). Ask-only: a hit asks, never denies. [regular expression, class].
+# ---------------------------------------------------------------- proven data (the only floor exemptions)
+# The keyword floor reads the whole command except these spans, which are proven to be data.
+# classify.jq (proven_data) applies them; each one has a test in tests/run.sh. Keep this narrow.
+# Search tools: their patterns and paths are data unless an option makes them run a program.
+def search_programs: ["grep", "egrep", "fgrep", "rg", "ag"];
+# (classify.jq tests these as prefixes: --pre, --hostname-bin, --pager.)
+# Programs whose output stays data when they are the only readers of an echo, printf or cat:
+# they cannot run what they read. Shells, SQL clients, xargs and interpreters read it too, but
+# their input is parsed, scanned or (interpreters) a documented residual; anything else is not data.
+def data_sinks: ["cat", "tee", "grep", "egrep", "fgrep", "rg", "ag", "head", "tail", "wc", "sort", "uniq", "cut", "tr", "jq", "yq",
+                 "less", "more", "pbcopy", "base64", "xxd", "shasum", "sha256sum", "md5", "md5sum", "diff", "cmp", "column", "fold",
+                 "nl", "od", "hexdump", "strings", "fmt", "rev", "paste", "comm", "iconv"];
+# A sed script made only of s commands with no e (execute) or w (write file) flag is data.
+#   one command: optional line address, s, a delimiter, two parts, flags; separated by ; or newline.
+def sed_substitutions_regex:
+  "^(?:\\s*(?:[0-9]+|\\$)?(?:,(?:[0-9]+|\\$))?\\s*s(?<d>[^\\\\\\n\\s])(?:\\\\[\\s\\S]|(?!\\k<d>)[^\\n])*\\k<d>(?:\\\\[\\s\\S]|(?!\\k<d>)[^\\n])*\\k<d>[gpiImM0-9]*\\s*(?:[;\\n]|$))+$";
+# Git subcommands whose non-flag operands are paths or revisions (data), and the ones whose
+# message values (-m/-F/--message/--file) are data.
+def git_operand_data_subcommands: ["add", "rm", "mv", "diff", "show", "blame", "ls-files", "status", "log", "grep", "restore"];
+def git_message_subcommands: ["commit", "tag", "notes"];
+# gh release subcommands that only read.
+def gh_release_read_subcommands: ["download", "view", "list"];
+
+# ---------------------------------------------------------------- executing constructs
+# An inert-looking program with one of these is never data, and the shell text it runs is parsed.
+# Git: -c keys a restricted agent may set (everything else is denied to it), options and
+# subcommands that run a program, and configuration keys whose value is a command.
+def git_safe_config_key_regex: "^(color\\..*|core\\.quotepath)$";
+def git_exec_flag_regex: "^(--upload-pack|--receive-pack|--exec|--extcmd|--ext-diff|--textconv|--tool|--[A-Za-z-]+-filter)(=|$)";
+# git grep only: open the matching files in a pager (a program).
+def git_grep_pager_regex: "^(-O|--open-files-in-pager)";
+def git_exec_subcommands: ["filter-branch", "filter-repo", "difftool", "mergetool"];
+def git_command_config_regex:
+  "^(core\\.(pager|editor|sshcommand|fsmonitor|askpass|gitproxy)|sequence\\.editor|pager\\..*|diff\\.external|gpg\\.(.*\\.)?program|gpg\\.ssh\\.defaultkeycommand|uploadpack\\.packobjectshook|merge\\..*\\.driver|filter\\..*\\.(clean|smudge|process)|diff\\..*\\.(textconv|command)|credential\\..*helper|alias\\..*)$";
+# Options of other programs that run a command given as their value.
+def exec_value_flags: {
+  "tar": ["--to-command", "--use-compress-program", "-I", "--info-script", "--new-volume-script", "-F"],
+  "gtar": ["--to-command", "--use-compress-program", "-I", "--info-script", "--new-volume-script", "-F"],
+  "zip": ["-TT", "--unzip-command"],
+  "sort": ["--compress-program"],
+  "gsort": ["--compress-program"],
+  "make": ["--eval", "-E"],
+  "gmake": ["--eval", "-E"],
+  "rg": ["--pre", "--hostname-bin"],
+  "ag": ["--pager"]
+};
+def awk_programs: ["awk", "gawk", "mawk", "nawk"];
+# Kubernetes subcommands that only read (a pipeline producer that cannot change anything).
+def kubernetes_read_subcommands: ["get", "describe", "logs", "top", "explain", "api-resources", "api-versions", "version", "cluster-info"];
+
+# ---------------------------------------------------------------- keyword floor
+# The v0.2 keyword rules, ported to jq. They run over the whole command text except the proven
+# data spans above (see classify.jq floor_text), whatever the programs are: the result never
+# drops below ask when one of them matches. Ask-only: a hit asks, never denies. [regex, class].
 def kw_ws: "(^|[^A-Za-z0-9_-])";
 def kw_we: "([^A-Za-z0-9_-]|$)";
 def kw_gap: "([^A-Za-z0-9_-].*)?[^A-Za-z0-9_-]";
@@ -241,6 +281,30 @@ def keyword_net_push($text; $branch):
       (if ($text | test("(^|\\s)([^\\s]*:)?(refs/heads/)?(main|master)" + kw_we; "i") or ($branch | IN("main", "master"))) then "git-main-push" else empty end),
       (if ($text | test("(^|\\s)(--tags|--follow-tags|[^\\s]*refs/tags/[^\\s]*)" + kw_we; "i")) then "git-tag-push" else empty end) ]
   end;
+# Literal prefilter (compiling the rule regexes costs about 2.5 ms per call): every rule needs one
+# of its program words and one of its verb words in the (lower-case) text. When no pair is
+# present no rule can match, so the regexes are skipped; otherwise they decide.
+def keyword_net_literals: [
+  [["terraform", "tofu", "terragrunt"], ["apply", "destroy"]],
+  [["pulumi"], ["up", "destroy"]],
+  [["cdk"], ["deploy", "destroy"]],
+  [["serverless", "sls", "sam"], ["deploy", "remove", "delete"]],
+  [["kubectl", "oc"], ["delete", "drain"]],
+  [["helm"], ["uninstall", "delete"]],
+  [["aws", "gcloud", "az", "gsutil"], ["rm", "rb", "delete", "terminate", "destroy", "purge", "remove", "deregister", "sync"]],
+  [["drop"], ["table", "database", "schema", "view", "index", "user", "role", "function", "procedure"]],
+  [["truncate"], ["truncate"]],
+  [["gh", "glab"], ["merge", "release"]],
+  [["npm", "pnpm", "yarn", "bun", "cargo", "poetry", "flit", "hatch", "make", "just", "task", "mage"], ["publish", "deploy", "release", "destroy", "teardown"]],
+  [["twine"], ["upload"]],
+  [["gem", "nuget", "docker", "podman", "git"], ["push"]],
+  [["neon"], ["delete", "rm"]],
+  [["vercel", "vc", "netlify", "ntl"], ["remove", "rm", "promote", "rollback", "prod", "deploy"]],
+  [["/"], ["deploy", "release", "publish", "destroy", "teardown"]]
+];
+def keyword_net_may_match: ascii_downcase as $lower
+  | any(keyword_net_literals[]; any(.[0][]; . as $word | $lower | contains($word)) and any(.[1][]; . as $word | $lower | contains($word)));
 def keyword_net($text; $branch):
   ($text | gsub("[\\n\\t]"; " ")) as $flat
-  | ([ keyword_net_rules[] | . as $rule | select($flat | test($rule[0]; "i")) | $rule[1] ] + keyword_net_push($flat; $branch)) | unique;
+  | if ($flat | keyword_net_may_match) | not then []
+    else ([ keyword_net_rules[] | . as $rule | select($flat | test($rule[0]; "i")) | $rule[1] ] + keyword_net_push($flat; $branch)) | unique end;

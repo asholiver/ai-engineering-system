@@ -1,9 +1,12 @@
 # Guard v2 lexer and raw command parser (jq, no dependencies beyond jq itself).
 #
 # Turns a Bash command string into units (a unit is one pipeline) of simple commands:
-#   {w: [word], a: [assignment word], r: [redirect], n: [nested command], hdr: "loop"?}
+#   {w: [word], a: [assignment word], r: [redirect], n: [nested command], fw: [text], hdr: "loop"?}
 # where a word is {l: literal text with quotes removed, d: true when it expands at run time,
-# s: [command substitution text]}. Nothing here decides anything; classify.jq does that.
+# s: [command substitution text]}. A nested command carries o: the index in w of the word it
+# came from (-1 for assignments, redirections and header words). fw holds the words of loop
+# and case headers, which run nothing but still count for the keyword floor.
+# Nothing here decides anything; classify.jq does that.
 #
 # Anything the parser is not sure about sets `uncertain`, and the caller falls back to the
 # v0.2 keyword rules (which only ever ask). Written for jq 1.6+ (Oniguruma, Perl_NT syntax).
@@ -203,12 +206,12 @@ def lex($text):
   | .bad = (.bad or .rest != "");
 
 # ---------------------------------------------------------------- raw parser
-def empty_command: {w: [], a: [], r: [], n: []};
-def command_words_count: (.w | length) + (.a | length) + (.r | length) + (.n | length);
+def empty_command: {w: [], a: [], r: [], n: [], fw: []};
+def command_words_count: (.w | length) + (.a | length) + (.r | length) + (.n | length) + (.fw | length);
 
 def finish_command:
   if .cur.skip then
-    .cur = ({w: [], a: [], r: [], n: .cur.n} + (if .cur.hdr then {hdr: .cur.hdr} else {} end))
+    .cur = ({w: [], a: [], r: [], n: .cur.n, fw: .cur.fw} + (if .cur.hdr then {hdr: .cur.hdr} else {} end))
   else . end
   | if (.cur | command_words_count) > 0 or .cur.hdr == "loop"
     then .units[-1] += [.cur] | .cur = empty_command
@@ -226,18 +229,20 @@ def parse_raw($text; $depth):
       {units: [[]], cur: empty_command, pending: null, hd_index: 0, parens: 0,
        in_case_pattern: false, in_bracket: false, fn_name: false, bad: $lexed.bad};
       # Nested command text goes through the same parser; its commands join the current one.
-      def add_word($word):
+      # $origin: index in w of the word holding the substitution (-1 when it is not a word).
+      def add_word($word; $origin):
         reduce $word.s[] as $text (.;
           if $depth >= 6 or ($word.s | length) > 100 then .bad = true
           else
             parse_raw($text; $depth + 1) as $inner
-            | .cur.n += [$inner.units[][]]
+            | .cur.n += [$inner.units[][] | .o = $origin]
             | .bad = (.bad or $inner.uncertain)
           end);
+      def add_command_word($word): .cur.w += [$word] | add_word($word; (.cur.w | length) - 1);
       def word_in_command($raw):
         ($raw | word_info) as $word
         | if .in_case_pattern then
-            (if $raw == "esac" then .in_case_pattern = false else add_word($word) end)
+            (if $raw == "esac" then .in_case_pattern = false else .cur.fw += [$word.l] | add_word($word; -1) end)
           elif .pending != null then
             .pending as $redirect
             | (if $redirect == "<<" or $redirect == "<<-" then
@@ -248,14 +253,14 @@ def parse_raw($text; $depth):
                       | .cur.r += [{op: "<<", t: $word.l, body: $heredoc.body}]
                       | .hd_index += 1
                       | if $heredoc.quoted or ($heredoc.body | test("[$`]") | not) then .
-                        else add_word({s: ($heredoc.body | expansion_substitutions)}) end
+                        else add_word({s: ($heredoc.body | expansion_substitutions)}; -1) end
                     end)
                else
-                 .cur.r += [{op: $redirect, t: $word.l, d: $word.d}] | add_word($word)
+                 .cur.r += [{op: $redirect, t: $word.l, d: $word.d}] | add_word($word; -1)
                end)
             | .pending = null
           elif .in_bracket then
-            .cur.w += [$word] | add_word($word) | if $raw == "]]" then .in_bracket = false else . end
+            add_command_word($word) | if $raw == "]]" then .in_bracket = false else . end
           elif (.cur.w | length) == 0 and (.cur.skip | not) then
             # `function NAME { ...; }`: the word after `function` is the name, not a command.
             if .fn_name then .fn_name = false
@@ -263,13 +268,13 @@ def parse_raw($text; $depth):
             elif ($raw | IN(reserved_heads[])) then .
             elif $raw == "for" or $raw == "select" then .cur.skip = true | .cur.hdr = "loop"
             elif $raw == "case" then .cur.skip = true | .in_case_pattern = true
-            elif ($raw | test("^[A-Za-z_][A-Za-z0-9_]*\\+?=")) then .cur.a += [$word] | add_word($word)
+            elif ($raw | test("^[A-Za-z_][A-Za-z0-9_]*\\+?=")) then .cur.a += [$word] | add_word($word; -1)
             else
-              .cur.w += [$word] | add_word($word)
+              add_command_word($word)
               | if $raw == "[[" then .in_bracket = true else . end
             end
           else
-            if .cur.skip then .cur.n += [] | add_word($word) else .cur.w += [$word] | add_word($word) end
+            if .cur.skip then .cur.fw += [$word.l] | add_word($word; -1) else add_command_word($word) end
           end;
       def operator($op):
         if .in_bracket and ($op | IN("&&", "||", "(", ")")) then .cur.w += [{l: $op, d: false, s: []}]

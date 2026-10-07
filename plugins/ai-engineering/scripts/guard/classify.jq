@@ -1,13 +1,16 @@
 # Guard v2 classifier: turns parsed commands into operations with classes, using the tables
 # in tables.jq. It decides nothing. policy.jq turns the result into ask, deny or no decision.
 #
-# Result of parse_script: {units: [{kind, ops, cmds}], uncertain}
+# Result of parse_script: {units: [{kind, ops, cmds, others, floor}], uncertain}
 #   unit   one pipeline (a command list joined by |), plus the units of any shell text it
-#          runs (bash -c, eval, ssh) appended after it
+#          runs (bash -c, eval, ssh, git -x, awk system(), an alias call) appended after it
 #   kind   "eff" (does something), "ctx" (only sets up the environment) or "none"
 #   ops    [{l: operation text, c: [classes]}], at most one per command
-#   cmds   [{prog, sub, args, redirs, stdin}] for every command (see command_facts), so policy
-#          can reason about programs, arguments and redirections
+#   cmds   [{prog, sub, args, redirs, stdin, chdir}] for every command (see command_facts), so
+#          policy can reason about programs, arguments, redirections and working directories
+#   others effectful commands that carry no operation (bundling)
+#   floor  the unit's command text minus proven data spans (see proven_data): the keyword
+#          floor runs over all of it, so classification can only add to the v0.2 rules
 include "lexer";
 include "tables";
 
@@ -72,6 +75,15 @@ def shell_quote: "'" + gsub("'"; "'\\''") + "'";
 
 def before_double_dash: (index("--")) as $at | if $at == null then . else .[0:$at] end;
 
+# Values of the given options in a list of argument strings: `--opt V`, `--opt=V`, `-x V`, `-xV`.
+def option_texts($args; $flags):
+  [ range(0; $args | length) as $i
+    | $args[$i] as $arg
+    | if has_word($flags; $arg) then ($args[$i + 1] // empty)
+      elif ($arg | test("^--[A-Za-z-]+=")) and has_word($flags; ($arg | sub("=.*$"; ""))) then ($arg | sub("^[^=]*="; ""))
+      elif ($arg | length) > 2 and ($arg | test("^-[A-Za-z]")) and has_word($flags; $arg[0:2]) then $arg[2:]
+      else empty end ];
+
 # {name, path, dynamic} for a command word. A path with a dynamic directory part
 # ("$PLUGIN/scripts/run.sh") is a script call, not a dynamic program name.
 # The name is lower case (a case-insensitive file system runs `GIT` and `Terraform`), loses a
@@ -117,8 +129,22 @@ def parallel_texts($after):
     # `parallel {} ::: 'cmd'`: the arguments are the commands.
     else {texts: (if ($template[0] | test("^\\{.*\\}$")) then $arguments else [ ($template | map(shell_quote) | join(" ")) ] end), unc: false} end;
 
+# The replacement string of an xargs (-I R, -IR, --replace=R, -i, --replace), or null.
+def xargs_replace($flags):
+  [ range(0; $flags | length) as $i
+    | $flags[$i].l as $word
+    | if $word == "-I" then ($flags[$i + 1].l // empty)
+      elif ($word | test("^-I.")) then $word[2:]
+      elif $word == "--replace" or $word == "-i" then "{}"
+      elif ($word | startswith("--replace=")) then $word[10:]
+      elif ($word | test("^-i.")) then $word[2:]
+      else empty end
+    | select(length > 0) ] | first // null;
+
+# Also returns dirs (working directories set by env -C / sudo -D, in order) and xargs
+# ({replace}: the wrapped command reads its arguments from standard input).
 def unwrap($words):
-  {ws: $words, lookup: false, n: 0, stop: false, texts: [], names: [], unc: false}
+  {ws: $words, lookup: false, n: 0, stop: false, texts: [], names: [], unc: false, dirs: [], xargs: null}
   | until(.stop or .n >= 8 or (.ws | length) == 0;
       .n += 1
       # `docker compose exec` is the docker-compose program.
@@ -130,6 +156,9 @@ def unwrap($words):
         else
           (.ws[1:]) as $rest
           | .names += [$program.name]
+          | (skip_flags($rest; $spec.vf // [])) as $flags_end
+          | (if wrapper_chdir_flags[$program.name] != null then .dirs += flag_texts($rest[0:$flags_end]; wrapper_chdir_flags[$program.name]) else . end)
+          | (if $program.name == "xargs" then .xargs = {replace: xargs_replace($rest[0:$flags_end])} else . end)
           | if $spec.lookup != null and any($rest[]; .l | IN($spec.lookup[])) then .lookup = true | .ws = []
             elif $spec.coproc then
               # `coproc NAME { cmd; }` or `coproc cmd`
@@ -147,7 +176,10 @@ def unwrap($words):
               | if $subcommand != null and ($subcommand | IN($spec.sub[])) then
                   ($rest[$at + 1:]) as $after
                   | ([ range(0; $after | length) as $j | select($after[$j].l == "--") | $j ] | first) as $dashes
-                  | if ($spec.dashdash or $spec.dashdash_optional) and $dashes != null then .ws = $after[$dashes + 1:]
+                  # `kubectl run|debug ... -- CMD`: only the words after -- are a command.
+                  | if has_word($spec.sub_dashdash // []; $subcommand) then
+                      (if $dashes != null then .ws = $after[$dashes + 1:] else .stop = true end)
+                    elif ($spec.dashdash or $spec.dashdash_optional) and $dashes != null then .ws = $after[$dashes + 1:]
                     elif $spec.dashdash then .stop = true
                     else .ws = $after[(skip_flags($after; $spec.vf // []) + ($spec.subskip // 0)):] end
                 else .stop = true end
@@ -165,8 +197,9 @@ def unwrap($words):
         end);
 
 # ---------------------------------------------------------------- context commands
+# An alias definition only sets up the shell; a later call of the alias is classified (see analyse).
 def is_context($program; $args):
-  ($program | IN(context_programs[]))
+  ($program | IN(context_programs[])) or $program == "alias"
   or ($program == "nvm" and has_word($args; "use"))
   or ($program == "corepack" and has_word($args; "enable"))
   or (($program | IN("source", ".")) and ((($args | positionals | first) // "") | test(activation_script_regex)));
@@ -518,8 +551,11 @@ def shell_run($program; $args):
     | if ($args | length) > $at + 1 then {texts: [($args[$at + 1:] | join(" "))]} else null end
   elif $program == "find" then
     (find_exec_texts($args)) as $texts | if ($texts | length) > 0 then {texts: $texts} else null end
-  elif $program == "alias" then
-    ([ $args[] | select(contains("=")) | sub("^[^=]*="; "") ]) as $texts
+  # gcloud compute ssh runs --command (or the words after --) on the remote host, like ssh.
+  elif $program == "gcloud" and has_word(($args | positionals); "ssh") then
+    (option_texts($args; ["--command"])
+     + (($args | index("--")) as $at | if $at == null then [] else [ $args[$at + 1:] | join(" ") ] end)
+     | map(select(length > 0))) as $texts
     | if ($texts | length) > 0 then {texts: $texts} else null end
   else null end;
 
@@ -562,23 +598,28 @@ def echoed_texts($before):
       else ($words | join(" ")) end ];
 
 # Facts about one command for policy.jq: program (lower case), Git subcommand, the arguments
-# after the program (after the Git subcommand for Git), redirections (heredoc bodies left out)
-# and the text fed to it on standard input (heredoc bodies and here-strings).
+# after the program (after the Git subcommand for Git), redirections (heredoc bodies left out),
+# the text fed to it on standard input (heredoc bodies and here-strings) and chdir: the
+# directories it runs in, in order (an enclosing env -C or sudo -D, then git -C).
 def redirect_facts($command): [ $command.r[] | {op: .op, t: .t, d: (.d // false)} ];
 
-def command_facts($command; $program; $args; $git):
-  [{prog: ($program | ascii_downcase), sub: (if ($program | ascii_downcase) == "git" then $git.sub else null end),
-    args: (if ($program | ascii_downcase) == "git" then $git.rest else $args end),
-    globals: (if ($program | ascii_downcase) == "git" then $git.globals else [] end),
-    redirs: redirect_facts($command), stdin: own_stdin($command)}];
+def git_directory_options($globals): [ range(0; $globals | length) as $i | select($globals[$i] == "-C") | ($globals[$i + 1] // empty) ];
+
+def command_facts($command; $program; $args; $git; $chdir):
+  ($program | ascii_downcase) as $name
+  | [{prog: $name, sub: (if $name == "git" then $git.sub else null end),
+      args: (if $name == "git" then $git.rest else $args end),
+      globals: (if $name == "git" then $git.globals else [] end),
+      redirs: redirect_facts($command), stdin: own_stdin($command),
+      chdir: ($chdir + (if $name == "git" then git_directory_options($git.globals) else [] end))}];
 
 # A command with no program of its own (only redirections, or only a lookup) still carries its redirections.
-def redirect_only_facts($command):
-  if ($command.r | length) > 0 then [{prog: null, sub: null, args: [], redirs: redirect_facts($command), stdin: []}] else [] end;
+def redirect_only_facts($command; $chdir):
+  if ($command.r | length) > 0 then [{prog: null, sub: null, args: [], globals: [], redirs: redirect_facts($command), stdin: [], chdir: $chdir}] else [] end;
 
 # What the whole submission sets up, for commands that depend on it: the text written to files
-# by heredocs, here-strings, echo and printf (`cat > f <<EOF ... EOF`, then `psql -f f`), and the
-# alias names it defines (an alias invocation is not another command: its text is counted).
+# by heredocs, here-strings, echo and printf (`cat > f <<EOF ... EOF`, then `psql -f f`).
+# Aliases are tracked in order instead (see parse_script_in): only one defined earlier counts.
 def file_key: sub("^\\./"; "");
 
 def all_raw_commands($raw): [ $raw.units[][] | recurse(.n[]?) ];
@@ -590,7 +631,6 @@ def collect_context($raw; $outer):
     | ([ $command.r[] | select(.op | IN(">", ">>")) | .t ]
        + (if $head == "tee" then [ $words[1:][] | select(startswith("-") | not) ] else [] end)) as $targets
     | (own_stdin($command) + (if $head | IN("echo", "printf") then echoed_texts([$command]) else [] end)) as $content
-    | (if $head == "alias" then .aliases += [ $words[1:][] | select(contains("=")) | sub("=.*$"; "") | ascii_downcase ] else . end)
     | reduce $targets[] as $target (.;
         .files[($target | file_key)] = ((.files[($target | file_key)] // "") + ($content | join("\n")) + "\n")));
 
@@ -610,23 +650,252 @@ def readonly_programs: ["echo", "printf", "cat", "grep", "egrep", "fgrep", "rg",
                         "uniq", "cut", "tr", "diff", "cmp", "ls", "tree", "stat", "file", "du", "df", "basename", "dirname", "realpath",
                         "readlink", "pwd", "date", "which", "type", "whoami", "id", "uname", "hostname", "test", "[", "[[", "shasum",
                         "sha256sum", "md5", "md5sum", "base64", "xxd", "printenv"];
-def readonly_git_subcommands: ["status", "diff", "log", "show", "blame", "grep", "ls-files", "ls-tree", "cat-file", "rev-parse", "rev-list",
-                               "merge-base", "describe", "shortlog", "branch", "tag", "remote", "config", "name-rev", "for-each-ref", "show-ref"];
 
-# Programs that have classification of their own (so unknown dynamic words in them decide), and
-# programs the residual keyword net leaves alone.
+# A redirection that writes a file (not /dev/null, a terminal or a file descriptor duplicate).
+def writes_files($command):
+  any($command.r[]; (.op | IN(">", ">>", ">|", "&>", "&>>", "<>", ">&")) and ((.t | test("^(/dev/(null|stdout|stderr|tty)|-|[0-9]+-?)$")) | not));
+
+# Programs that have classification of their own (so unknown dynamic words in them decide).
 def decisive_programs:
   ([ rules[].p[] ] + ["vercel", "vc", "netlify", "ntl", "curl", "wget", "http", "https", "xh", "xhs"] + task_runners_packages + task_runners_other) | unique;
-def net_skipped($program):
-  has_word(inert_programs; $program) or has_word(shells; $program) or has_word(decisive_programs; $program)
-  or ($program | IN("eval", "ssh", "source", ".", "alias"));
 
-# Interpreter words that are not inline code.
-def without_inline_code($args):
-  [ range(0; $args | length) as $j
-    | select(($args[$j] | test("^--(eval|print|command)=")) | not)
-    | select($j == 0 or (($args[$j - 1] | test("^(-[A-Za-z]*[cepr]|--eval|--print|--command)$")) | not))
-    | $args[$j] ];
+# ---------------------------------------------------------------- git read forms
+# Git subcommands a restricted agent may run (an allow-list: everything else is denied), also the
+# read-only test for bundling. branch, tag, stash, worktree, remote and config are allowed in
+# their pure read forms only. version and help change nothing.
+def git_read_subcommands: ["status", "diff", "log", "show", "blame", "grep", "ls-files", "ls-tree", "cat-file", "rev-parse", "rev-list",
+                           "merge-base", "describe", "shortlog", "fetch", "version", "help"];
+# Flags that take a separate value in branch and tag listings.
+def git_listing_value_flags: ["--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--sort", "--format"];
+def git_branch_write_flags: "^(--(delete|move|copy|force|set-upstream-to|unset-upstream|edit-description|track|no-track)(=.*)?|-[A-Za-z]*[dDmMcCufqt][A-Za-z]*)$";
+def git_tag_write_flags: "^(--(delete|force|annotate|sign|message|file|local-user)(=.*)?|-[A-Za-z]*[dfasmFu][A-Za-z]*)$";
+def git_list_flag: "^(-l|--list)$";
+def git_config_read_flag: "^(--get|--get-all|--get-regexp|--get-urlmatch|--list|-l)$";
+def git_config_write_flag: "^(--add|--unset|--unset-all|--replace-all|--edit|-e|--rename-section|--remove-section|--global|--system|--file|-f|--worktree)$";
+
+# True when a Git command is on the read-only list. Input: {sub, args} (args after the subcommand).
+def git_read_form:
+  .sub as $sub | .args as $args | ($args | positionals) as $positional
+  | if $sub == null then true
+    elif ($sub | IN(git_read_subcommands[])) then true
+    elif $sub == "remote" then (($positional | length) == 0 or ($positional[0] | IN("show", "get-url")))
+    elif $sub == "config" then (any($args[]; test(git_config_read_flag)) and (any($args[]; test(git_config_write_flag)) | not))
+    elif $sub == "branch" then
+      (any(($args | flags_skipping(git_listing_value_flags))[]; test(git_branch_write_flags)) | not)
+      and (any($args[]; test(git_list_flag)) or (($args | positionals_skipping(git_listing_value_flags)) | length) == 0)
+    elif $sub == "tag" then
+      (any(($args | flags_skipping(git_listing_value_flags))[]; test(git_tag_write_flags)) | not)
+      and (any($args[]; test("^(-l|--list|-v|--verify|--contains|--no-contains|--points-at|--merged|--no-merged|-n[0-9]*)$"))
+           or (($args | positionals_skipping(git_listing_value_flags)) | length) == 0)
+    elif $sub == "stash" then (($positional | first) // "") | IN("list", "show")
+    elif $sub == "worktree" then (($positional | first) // "") == "list"
+    else false end;
+
+# ---------------------------------------------------------------- executing constructs
+# -c / --config-env settings before the Git subcommand: {key (lower case), value, env}.
+def git_config_settings($globals):
+  [ range(0; $globals | length) as $i
+    | if $globals[$i] == "-c" then {setting: ($globals[$i + 1] // ""), env: false}
+      elif $globals[$i] == "--config-env" then {setting: ($globals[$i + 1] // ""), env: true}
+      elif ($globals[$i] | startswith("--config-env=")) then {setting: ($globals[$i] | sub("^[^=]*="; "")), env: true}
+      else empty end
+    | . + {key: (.setting | sub("=.*$"; "") | ascii_downcase), value: (if (.setting | contains("=")) then (.setting | sub("^[^=]*="; "")) else "" end)} ];
+
+# Options that make Git run a program: --exec-path, executing options, git grep -O, ext:: transport.
+def git_exec_options($git):
+  [ ($git.globals[] | select(startswith("--exec-path"))),
+    ($git.rest[] | select(test(git_exec_flag_regex))),
+    (if $git.sub == "grep" then ($git.rest[] | select(test(git_grep_pager_regex))) else empty end),
+    (($git.globals + $git.rest)[] | select(test("ext::"; "i"))) ];
+
+# True when a Git command can run a program it was given (so none of its words are proven data):
+# any -c outside the safe list, an executing option, or a subcommand that runs commands
+# (foreach, bisect run, filter-branch, difftool, rebase -x).
+def git_exec_construct($git):
+  ($git.sub // "") as $sub
+  | any(git_config_settings($git.globals)[]; .key | test(git_safe_config_key_regex; "i") | not)
+    or (git_exec_options($git) | length) > 0
+    or ($sub | IN(git_exec_subcommands[]))
+    or ($sub == "submodule" and has_word($git.rest; "foreach"))
+    or ($sub == "bisect" and has_word($git.rest; "run"))
+    or (($sub | IN("rebase", "difftool")) and has_word($git.rest; "-x"))
+    or (($sub | IN("clone", "ls-remote", "archive")) and has_word($git.rest; "-u"));
+
+# Shell text Git runs because of an executing construct, parsed like bash -c text. The values of
+# --upload-pack and --receive-pack are left to the floor (they end in Git's own helper program).
+def git_exec_texts($git):
+  ($git.sub // "") as $sub | $git.rest as $rest
+  | [ (git_config_settings($git.globals)[]
+       | select((.env | not) and (.key | test(git_command_config_regex)) and (.key | startswith("alias.") | not)) | .value | sub("^!"; "")),
+      option_texts($rest; ["--open-files-in-pager", "--exec", "--extcmd"])[],
+      (if $sub == "grep" then ($rest[] | select(test("^-O.")) | .[2:]) else empty end),
+      (if ($sub | IN("rebase", "difftool")) then option_texts($rest; ["-x"])[] else empty end),
+      option_texts($rest; [ $rest[] | select(test("^--[A-Za-z-]+-filter(=|$)")) | sub("=.*$"; "") ])[],
+      (if $sub == "submodule" then
+         (($rest | index("foreach")) as $at
+          | if $at == null then empty else ($rest[$at + 1:] | map(select(test("^(--recursive|-q|--quiet)$") | not)) | join(" ")) end)
+       else empty end),
+      (if $sub == "bisect" then
+         (($rest | index("run")) as $at | if $at == null then empty else ($rest[$at + 1:] | map(shell_quote) | join(" ")) end)
+       else empty end) ]
+  | map(select(length > 0));
+
+# Commands an awk program runs: string literals given to system(), piped to or read with getline.
+def awk_texts($args):
+  if any($args[]; test("^(--file(=.*)?|-[A-Za-z]*f)$")) then []
+  else
+    ((($args | positionals_skipping(["-F", "-v", "--field-separator", "--assign"])) | first) // "") as $program
+    | [ ($program | [match("system\\s*\\(\\s*\"((?:\\\\.|[^\"\\\\])*)\""; "g") | .captures[0].string][]),
+        ($program | [match("\\|&?\\s*\"((?:\\\\.|[^\"\\\\])*)\""; "g") | .captures[0].string][]),
+        ($program | [match("\"((?:\\\\.|[^\"\\\\])*)\"\\s*\\|&?\\s*getline"; "g") | .captures[0].string][]) ]
+    | map(gsub("\\\\(?<c>[\"\\\\])"; .c))
+  end;
+
+# Recipe lines of make --eval text (`x: ; cmd` and tab-indented lines).
+def make_recipes:
+  [ split("\n")[]
+    | if startswith("\t") then .[1:]
+      elif test("^[^=#\\t][^=#]*:([^=]|$)") and contains(";") then sub("^[^;]*;"; "")
+      else empty end
+    | sub("^\\s*[@+-]*"; "") | select(length > 0) ] | join("\n");
+
+# Shell text a program runs because of an executing construct: {texts, unc}. Unlike bash -c,
+# the program does something itself as well (see own_op in analyse). A --config-env value comes
+# from the environment (documented residual): its words are floor-scanned and restricted agents
+# are denied it, so it does not make the parse uncertain.
+def carrier_texts($program; $args; $git):
+  if $program == "git" and $git != null then {texts: git_exec_texts($git), unc: false}
+  elif has_word(awk_programs; $program) then {texts: awk_texts($args), unc: false}
+  elif exec_value_flags[$program] != null then
+    (option_texts($args; exec_value_flags[$program]) + [ $args[] | select(startswith("--checkpoint-action=exec=")) | .[25:] ]) as $values
+    | {texts: (if ($program | IN("make", "gmake")) then [ $values[] | make_recipes ] else $values end), unc: false}
+  else {texts: [], unc: false} end;
+
+# A shell with -c and no script argument (xargs supplies it).
+def shell_without_script($args):
+  skip_flags_s($args; ["-o", "-O", "--rcfile", "--init-file"]) as $at
+  | ($args[0:$at] | any(.[]; test("^-[A-Za-z]*c[A-Za-z]*$"))) and ($args[$at] == null);
+
+# ---------------------------------------------------------------- proven data spans
+# The only spans the keyword floor leaves out (tables.jq lists them). Each function returns
+# indexes into the arguments after the program.
+def message_value_indexes($args):
+  [ range(0; $args | length) as $i
+    | $args[$i] as $arg
+    | if ($arg | test("^(--message|--file|-[A-Za-z]*[mF])$")) then ($i + 1)
+      elif ($arg | test("^(--message=|--file=|-[mF].)")) then $i
+      else empty end
+    | select(. < ($args | length)) ];
+
+def git_message_from_stdin($args):
+  any(range(0; $args | length) as $i
+      | ((($args[$i] | test("^(--file|-[A-Za-z]*F)$")) and $args[$i + 1] == "-") or ($args[$i] | IN("--file=-", "-F-"))); .);
+
+def pickaxe_indexes($args):
+  [ range(0; $args | length) as $i
+    | $args[$i] as $arg
+    | if ($arg | test("^-[SG]$")) then ($i + 1) elif ($arg | test("^-[SG].")) then $i else empty end ];
+
+# Git: {rest: indexes into the arguments after the subcommand, stdin: the heredoc is a message}.
+def git_proven_data($git):
+  if git_exec_construct($git) then {rest: [], stdin: false}
+  else
+    ($git.rest | length) as $count
+    | ($git.sub // "") as $sub
+    | {rest: ([ (if $sub == "grep" then range(0; $count) else empty end),
+                (if ($sub | IN(git_operand_data_subcommands[])) then (range(0; $count) as $i | select($git.rest[$i] | startswith("-") | not) | $i) else empty end),
+                (if $sub == "log" then pickaxe_indexes($git.rest)[] else empty end),
+                (if ($sub | IN(git_message_subcommands[])) then message_value_indexes($git.rest)[] else empty end) ] | unique),
+       stdin: (($sub | IN(git_message_subcommands[])) and git_message_from_stdin($git.rest))}
+  end;
+
+# URL operands of a read-only (GET or HEAD) request.
+def http_url_indexes($program; $args):
+  http_request($program; $args) as $request
+  | if $request == null or (($request.method | IN("GET", "HEAD")) | not) then []
+    else [ range(0; $args | length) as $i
+           | select((($args[$i] | startswith("-") | not) and ($args[$i] | IN($request.urls[])))
+                    or (($args[$i] | startswith("--url=")) and (($args[$i] | sub("^--url="; "")) | IN($request.urls[]))))
+           | $i ] end;
+
+def inline_code_indexes($program; $args):
+  ($args | length) as $count
+  | [ (range(1; $count) as $j | select($args[$j - 1] | test("^(-[A-Za-z]*[cepr]|--eval|--print|--command)$")) | $j),
+      (range(0; $count) as $j | select($args[$j] | test("^--(eval|print|command)=")) | $j),
+      (if ($program | IN("deno", "bun")) and (($args | positionals | first) == "eval") then range(($args | index("eval")) + 1; $count) else empty end) ];
+
+# A sed script (the first operand, or every -e value) made only of s commands with no e or w flag.
+def sed_script_indexes($args):
+  ($args | length) as $count
+  | if any($args[]; test("^(--file(=.*)?|-[A-Za-z]*f)$")) then []
+    else
+      [ (range(1; $count) as $j | select($args[$j - 1] | test("^(-[A-Za-z]*e|--expression)$")) | $j),
+        (range(0; $count) as $j | select($args[$j] | test("^--expression=")) | $j) ] as $expressions
+      | (if ($expressions | length) > 0 then $expressions
+         else
+           skip_flags_s($args; ["-l", "--line-length"]) as $at
+           # BSD sed: `-i ''` takes the (empty) backup suffix as a separate word.
+           | (if ($args[$at] // null) == "" and $at > 0 and ($args[$at - 1] | test("^-[A-Za-z]*i$")) then [$at + 1] else [$at] end)
+           | map(select(. < $count))
+         end) as $scripts
+      | if ($scripts | length) > 0 and all($scripts[]; ($args[.] | sub("^--expression="; "") | test(sed_substitutions_regex))) then $scripts else [] end
+    end;
+
+# Package names given to a package manager's own non-task commands (`pnpm add release-it`).
+def package_operand_indexes($program; $args):
+  if has_word(task_runners_packages; $program) then
+    skip_flags_s($args; ["-C", "--dir", "--filter", "-F", "--cwd", "--prefix", "-w", "--workspace"]) as $at
+    | if (($args[$at] // "") | IN(package_non_task_subcommands[])) then [ range($at + 1; $args | length) ] else [] end
+  else [] end;
+
+def gh_release_read_indexes($program; $args):
+  if ($program | IN("gh", "glab")) then
+    ($args | positionals_skipping(gh_value_flags)) as $words
+    | if ($words[0] // "") == "release" and (($words[1] // "") | IN(gh_release_read_subcommands[])) then
+        ([ range(0; $args | length) as $i | select($args[$i] == $words[1]) | $i ] | first) as $at
+        | [ range($at + 1; $args | length) ]
+      else [] end
+  else [] end;
+
+# {args: indexes of argument words that are proven data, stdin: heredoc bodies and here-strings
+# are proven data}. $exposed: the command's output is captured or read by a program that is not
+# a data sink, so echo, printf, cat and tee are not data. $git: git_parts plus offset (index of
+# the first argument after the subcommand), or null when an inline alias was expanded.
+def proven_data($program; $args; $git; $exposed):
+  ($args | length) as $count
+  | if ($program | IN("echo", "printf")) then
+      (if $exposed then {args: [], stdin: false} else {args: [range(0; $count)], stdin: true} end)
+    elif $program == "cat" then
+      (if $exposed then {args: [], stdin: false} else {args: [range(0; $count) as $i | select($args[$i] | startswith("-") | not) | $i], stdin: true} end)
+    elif $program == "tee" then {args: [], stdin: ($exposed | not)}
+    elif has_word(search_programs; $program) then
+      (if any($args[]; startswith("--pre") or startswith("--hostname-bin") or startswith("--pager"))
+       then {args: [], stdin: false} else {args: [range(0; $count)], stdin: false} end)
+    elif $program == "git" then
+      (if $git == null then {args: [], stdin: false} else (git_proven_data($git) | {args: [ .rest[] + $git.offset ], stdin: .stdin}) end)
+    elif ($program | test(interpreters_regex)) then {args: inline_code_indexes($program; $args), stdin: true}
+    elif $program == "sed" then {args: sed_script_indexes($args), stdin: false}
+    else {args: ((http_url_indexes($program; $args) + package_operand_indexes($program; $args) + gh_release_read_indexes($program; $args)) | unique), stdin: false} end;
+
+# Every later command of the pipeline is a data sink, or a reader whose input is parsed or scanned.
+def downstream_ok($after):
+  all($after[]; ((.w | length) == 0)
+      or ((.w[0].l | split("/") | last | ascii_downcase) as $head
+          | has_word(data_sinks; $head) or has_word(shells; $head) or has_word(sql_clients; $head) or $head == "xargs"
+            or ($head | test(interpreters_regex))));
+
+# The floor text of one command: assignments, the words that are not proven data, loop and case
+# header words, redirection targets, the standard input unless it is proven data, and $fed (text
+# a producer pipes into a SQL client).
+def command_floor($command; $words; $data; $stdin_data; $fed):
+  [ ($command.a[] | .l),
+    ([ range(0; $words | length) as $index | select(has_word($data; $index) | not) | $words[$index].l ] | join(" ")),
+    ($command.fw // [])[],
+    ($command.r[] | if .op == "<<" then (if $stdin_data then empty else .body end)
+                    elif .op == "<<<" then (if $stdin_data then empty else .t end)
+                    else .t end),
+    $fed[] ]
+  | map(select(length > 0));
 
 # Analyses one parsed command. Substitution commands it contains are analysed too and
 # their operations belong to it. Shell text it runs is parsed into extra units.
@@ -637,35 +906,48 @@ def parse_script_in($text; $depth; $branch; $outer):
       parse_script_in($inner_text; $depth + 1; $branch; $ctx) as $result
       | .units += $result.units | .uncertain = (.uncertain or $result.uncertain));
 
-  def analyse($command; $before; $ctx):
-    (reduce range(0; $command.n | length) as $i ({ops: [], extra: [], cmds: [], unc: false, net: [], effectful_inner: false};
-       analyse($command.n[$i]; $command.n[0:$i]; $ctx) as $inner
-       | .ops += $inner.ops | .extra += $inner.extra | .cmds += $inner.cmds | .net += $inner.net
-       | .unc = (.unc or $inner.unc)
-       # A substitution that runs something other than a read-only command makes the command effectful.
-       | .effectful_inner = (.effectful_inner or ($inner.kind == "eff" and ($inner.own_op | not) and ($inner.readonly | not))))) as $nested
+  # $before / $after: the other commands of the same pipeline. $ctx: files (written by this
+  # submission), aliases (defined earlier: name -> {value, dynamic}), captured (the output is
+  # used as words, so echo and friends are not data) and chdir (directories set by wrappers).
+  def analyse($command; $before; $after; $ctx):
+    ($ctx.captured or (downstream_ok($after) | not)) as $exposed
     | ( if ($command.w | length) == 0 then
           {kind: (if $command.hdr == "loop" then "eff"
                   elif ($command.a | length) > 0 and ($command.r | length) == 0 then "ctx"
                   elif ($command.r | length) > 0 then "eff"
                   else "none" end),
-           ops: [], extra: [], cmds: redirect_only_facts($command), unc: false, own_op: false, consumer: false, readonly: false, net: []}
+           ops: [], extra: [], cmds: redirect_only_facts($command; $ctx.chdir), unc: false, own_op: false, consumer: false, readonly: false,
+           data_words: [], defines: {}, floor: command_floor($command; []; []; false; [])}
         else
           unwrap($command.w) as $unwrapped
-          | parse_texts([ $unwrapped.texts[] | select(length > 0) ]; $ctx) as $wrapped
+          | ($ctx + {chdir: ($ctx.chdir + $unwrapped.dirs), captured: $exposed}) as $wrapped_ctx
+          | parse_texts([ $unwrapped.texts[] | select(length > 0) ]; $wrapped_ctx) as $wrapped
           | if $unwrapped.lookup or ($unwrapped.ws | length) == 0 then
-              {kind: "none", ops: [], extra: $wrapped.units, cmds: redirect_only_facts($command), unc: ($unwrapped.unc or $wrapped.uncertain),
-               own_op: false, consumer: false, readonly: false, net: []}
+              {kind: "none", ops: [], extra: $wrapped.units, cmds: redirect_only_facts($command; $ctx.chdir), unc: ($unwrapped.unc or $wrapped.uncertain),
+               own_op: false, consumer: false, readonly: false, data_words: [], defines: {}, floor: command_floor($command; $command.w; []; false; [])}
+            elif ($unwrapped.ws[0] | program_of).dynamic then
+              {kind: "eff", ops: [], extra: $wrapped.units, cmds: [], unc: true, own_op: false, consumer: false, readonly: false,
+               data_words: [], defines: {}, floor: command_floor($command; $command.w; []; false; [])}
             else
-              ($unwrapped.ws[0] | program_of) as $program
-              | if $program.dynamic then {kind: "eff", ops: [], extra: $wrapped.units, cmds: [], unc: true, own_op: false, consumer: false, readonly: false, net: []}
-                elif has_word($ctx.aliases; $program.name) then
-                  {kind: "none", ops: [], extra: $wrapped.units, cmds: [], unc: $wrapped.uncertain, own_op: false, consumer: false, readonly: false, net: []}
-                else
-                  ($unwrapped.ws[1:]) as $words
+                  # xargs: the producer's text becomes arguments (appended, or in place of the -I string).
+                  (if $unwrapped.xargs != null then producer_input($before) else {texts: [], unknown: true} end) as $xargs_input
+                  | ($xargs_input.texts | join("\n")) as $fed_text
+                  | (if $unwrapped.xargs == null or $xargs_input.unknown or $fed_text == "" then $unwrapped.ws
+                     elif $unwrapped.xargs.replace != null then [ $unwrapped.ws[] | .l |= (split($unwrapped.xargs.replace) | join($fed_text)) ]
+                     elif has_word(shells; ($unwrapped.ws[0] | program_of).name) and shell_without_script($unwrapped.ws[1:] | map(.l)) then
+                       $unwrapped.ws + [{l: $fed_text, d: false, s: []}]
+                     else $unwrapped.ws + [ $fed_text | [scan("[^\\s]+")][] | {l: ., d: false, s: []} ] end) as $ws
+                  | ($command.w[0:(($command.w | length) - ($unwrapped.ws | length))] + $ws) as $all_words
+                  | (($all_words | length) - ($ws | length) + 1) as $first_argument
+                  | ($ws[0] | program_of) as $program
+                  | ($ws[1:]) as $words
                   | ($words | map(.l)) as $raw_args
                   | (if $program.name == "git" then git_resolved($raw_args) else {args: $raw_args, text: null, unc: false} end) as $git
                   | $git.args as $args
+                  | (if $program.name == "git" then git_parts($args) else null end) as $git_parts
+                  # N1: an alias defined earlier in this submission runs its value with these arguments.
+                  | ($ctx.aliases[$program.name] // null) as $alias
+                  | (if $alias == null or $alias.dynamic then [] else [ ([$alias.value] + ($raw_args | map(shell_quote))) | join(" ") ] end) as $alias_texts
                   | own_stdin($command) as $own_input
                   | is_sql_program($program.name; $args) as $is_sql
                   # Files a SQL program reads: scanned when this submission wrote them, otherwise unknown.
@@ -686,7 +968,7 @@ def parse_script_in($text; $depth; $branch; $outer):
                            | classify_invocation($inner_program.name; $inner_program.path; $args[$at + 1:]; $stdin; $branch)
                          else null end
                      else null end) as $runner_op
-                  | ([ $direct_op, $runner_op ] | map(select(. != null)) | merge_ops) as $op
+                  | ([ $direct_op, $runner_op ] | map(select(. != null)) | merge_ops) as $classified_op
                   | (shell_run($program.name; $args) // {}) as $run
                   | (if $run.stdin == true then producer_input($before) else {texts: [], unknown: false} end) as $fed
                   | (if $run.stdin == true then
@@ -702,66 +984,109 @@ def parse_script_in($text; $depth; $branch; $outer):
                        (if $run.procsub != null then ($procsub.texts | join("\n")) else empty end),
                        (if $run.file != null then ($ctx.files[($run.file | file_key)] // empty) else empty end),
                        (if $git.text != null then $git.text else empty end) ]
-                     | map(select(. != ""))) as $inner_texts
-                  | parse_texts($inner_texts; $ctx) as $inner
+                     | map(select(. != ""))) as $shell_texts
+                  | ($ctx.chdir + $unwrapped.dirs) as $chdir
+                  | ($ctx + {chdir: ($chdir + (if $git_parts != null then git_directory_options($git_parts.globals) else [] end)), captured: $exposed}) as $run_ctx
+                  | parse_texts($shell_texts; $run_ctx) as $shell_run
+                  # Bash does not expand an alias again inside its own expansion.
+                  | parse_texts($alias_texts; $run_ctx | .aliases |= del(.[$program.name])) as $expansion
+                  | ($shell_texts + $alias_texts) as $inner_texts
+                  | {units: ($shell_run.units + $expansion.units), uncertain: ($shell_run.uncertain or $expansion.uncertain)} as $inner
+                  # Executing constructs of other programs (git -x, awk system(), tar --to-command, ...).
+                  | carrier_texts($program.name; $args; $git_parts) as $carrier
+                  | parse_texts([ $carrier.texts[] | select(length > 0) ]; $run_ctx) as $carried
+                  # An alias call is classified as written and as its expansion; one operation found both ways counts once.
+                  | (if $classified_op != null and ($alias_texts | length) > 0 and any($inner.units[].ops[]; .l == $classified_op.l)
+                     then null else $classified_op end) as $op
                   # H3: a dynamic word where it can decide which operation runs makes the parse not confident.
-                  | (if $op != null then false
+                  | (if $classified_op != null then false
                      elif $program.name == "git" then
-                       (any(prefix_words($words; git_value_flags)[]; .d) or ((git_parts($args).sub == "push") and any($words[]; .d)))
+                       (any(prefix_words($words; git_value_flags)[]; .d) or (($git_parts.sub == "push") and any($words[]; .d)))
                      else
                        http_dynamic($program.name; $words; $args)
                        or (has_word(decisive_programs; $program.name) and (http_request($program.name; $args) == null) and any($words[]; .d))
                      end) as $dynamic_decides
-                  # Residual keyword net: the v0.2 keyword rules over commands the tables do not know.
-                  | (if $op != null or net_skipped($program.name) then null
-                     else (if ($program.name | test(interpreters_regex)) then (without_inline_code($args) | join(" ")) else ($unwrapped.ws | map(.l) | join(" ")) end)
-                     end) as $net_text
-                  | (if $net_text == null then [] elif ($net_text | length) > 8192 then [] else keyword_net($net_text; $branch) end) as $net_classes
+                  # Proven data spans: left out of the keyword floor. None inside a captured substitution.
+                  | (if $ctx.captured then {args: [], stdin: false}
+                     else proven_data($program.name; $args;
+                                      (if $git_parts != null and $git.args == $raw_args then $git_parts + {offset: (skip_flags_s($args; git_value_flags) + 1)} else null end);
+                                      $exposed) end) as $proven
+                  | ([ $proven.args[] | . + $first_argument ]) as $data_words
                   | {kind: (if ($inner_texts | length) > 0 then "none"
                             elif is_context($program.name; $args) and $op == null then "ctx" else "eff" end),
                      ops: (if $op == null then [] else [$op] end),
-                     extra: ($wrapped.units + $inner.units),
-                     cmds: command_facts($command; $program.name; $args; (if $program.name == "git" then git_parts($args) else null end)),
-                     unc: ($unwrapped.unc or $wrapped.uncertain or $inner.uncertain or $dynamic_decides or $git.unc
-                           or ($sql_files.unknown and $op == null) or $fed.unknown or $procsub.unknown or ($procsub.unknown_parse // false)
-                           or ($net_text != null and ($net_text | length) > 8192)),
-                     own_op: ($op != null),
+                     extra: ($wrapped.units + $inner.units + $carried.units),
+                     cmds: command_facts($command; $program.name; $args; $git_parts; $chdir),
+                     unc: ($unwrapped.unc or $wrapped.uncertain or $inner.uncertain or $carried.uncertain or $carrier.unc or $dynamic_decides or $git.unc
+                           or ($alias != null and $alias.dynamic)
+                           or ($sql_files.unknown and $op == null) or $fed.unknown or $procsub.unknown or ($procsub.unknown_parse // false)),
+                     # A program that runs the operation through an executing construct carries it (`git rebase -x 'op'`).
+                     own_op: ($op != null or any($carried.units[]; (.ops | length) > 0)),
                      consumer: ((($unwrapped.names | index("xargs")) != null) or $is_sql or ($run.stdin == true)),
-                     readonly: (has_word(readonly_programs; $program.name) or ($program.name == "git" and ((git_parts($args).sub // "") | IN(readonly_git_subcommands[])))),
-                     net: $net_classes}
-                end
+                     # Read-only: cannot change anything (Git read forms with no executing construct), and writes no file.
+                     readonly: ((has_word(readonly_programs; $program.name)
+                                 or ($git_parts != null and ({sub: $git_parts.sub, args: $git_parts.rest} | git_read_form) and (git_exec_construct($git_parts) | not))
+                                 or (($program.name | IN("kubectl", "oc"))
+                                     and (((($args | positionals_skipping(wrappers.kubectl.vf)) | first) // "") | IN(kubernetes_read_subcommands[]))))
+                                and (writes_files($command) | not) and (($carrier.texts | length) == 0)),
+                     data_words: $data_words,
+                     defines: (if $program.name == "alias" then
+                                 reduce ($words[] | select(.l | contains("="))) as $definition ({};
+                                   .[($definition.l | sub("=.*$"; "") | ascii_downcase)] = {value: ($definition.l | sub("^[^=]*="; "")), dynamic: $definition.d})
+                               else {} end),
+                     floor: command_floor($command; $all_words; $data_words; $proven.stdin; (if $is_sql then producer_texts($before) else [] end))}
             end
         end ) as $own
+    # Commands in substitutions. One in a proven-data word feeds that data; any other is captured.
+    | (reduce range(0; $command.n | length) as $i ({ops: [], extra: [], cmds: [], unc: false, floor: [], nested_others: 0, effectful_inner: false};
+         $command.n[$i] as $nested_command
+         | (if has_word($own.data_words; ($nested_command.o // -1)) then $ctx else $ctx + {captured: true} end) as $nested_ctx
+         | analyse($nested_command; $command.n[0:$i]; $command.n[$i + 1:]; $nested_ctx) as $inner
+         | .ops += $inner.ops | .extra += $inner.extra | .cmds += $inner.cmds | .floor += $inner.floor
+         | .unc = (.unc or $inner.unc)
+         # N4: a substitution that runs something other than a read-only command is another effectful command,
+         # except the SQL statement a destructive-SQL operation was classified from (node -e "sql`DROP ...`").
+         | (any($own.ops[]; has_word(.c; "destructive-sql"))
+            and (([ $nested_command.w[].l ] | join(" ") | strip_sql_comments) | test(sql_destructive_regex; "i"))) as $operation_sql
+         | ($inner.kind == "eff" and ($inner.own_op | not) and ($inner.readonly | not) and ($operation_sql | not)) as $effectful
+         | .nested_others += $inner.nested_others + (if $effectful then 1 else 0 end)
+         | .effectful_inner = (.effectful_inner or $effectful))) as $nested
     | {kind: (if $own.kind == "ctx" and $nested.effectful_inner then "eff" else $own.kind end),
        ops: ($own.ops + $nested.ops), extra: ($own.extra + $nested.extra),
        cmds: ($own.cmds + $nested.cmds), unc: ($own.unc or $nested.unc),
        # A read-only command that only hosts a substitution holding the operation (`echo $(op)`) is not another command.
        own_op: ($own.own_op or ($own.readonly and ($nested.ops | length) > 0)), consumer: $own.consumer,
-       readonly: $own.readonly, net: ($own.net + $nested.net)};
+       readonly: $own.readonly, floor: ($own.floor + $nested.floor), nested_others: $nested.nested_others, defines: $own.defines};
 
   if $depth >= 6 then {units: [], uncertain: true}
   else
     parse_raw($text; $depth) as $raw
     | collect_context($raw; $outer) as $ctx
-    | reduce $raw.units[] as $unit ({units: [], uncertain: $raw.uncertain};
-        (reduce range(0; $unit | length) as $i ({ops: [], extra: [], cmds: [], items: [], unc: false, net: []};
-           analyse($unit[$i]; $unit[0:$i]; $ctx) as $result
-           | .ops += $result.ops | .extra += $result.extra | .cmds += $result.cmds | .net += $result.net
-           | .items += [{kind: $result.kind, own_op: $result.own_op, consumer: $result.consumer, readonly: $result.readonly}]
+    | reduce $raw.units[] as $unit ({units: [], uncertain: $raw.uncertain, aliases: $ctx.aliases};
+        (reduce range(0; $unit | length) as $i ({ops: [], extra: [], cmds: [], items: [], unc: false, floor: [], nested_others: 0, aliases: .aliases};
+           analyse($unit[$i]; $unit[0:$i]; $unit[$i + 1:]; $ctx + {aliases: .aliases}) as $result
+           | .ops += $result.ops | .extra += $result.extra | .cmds += $result.cmds | .floor += $result.floor
+           | .nested_others += $result.nested_others
+           | .aliases += $result.defines
+           | .items += [{kind: $result.kind, own_op: $result.own_op, readonly: $result.readonly}]
            | .unc = (.unc or $result.unc))) as $unit_result
+        | .aliases = $unit_result.aliases
         | ([ $unit_result.items[] | .kind ]) as $kinds
         | (if has_word($kinds; "eff") then "eff" elif has_word($kinds; "ctx") then "ctx" else "none" end) as $kind
-        # Effectful commands that carry no operation of their own. Commands before the first
-        # consumer of their output (a SQL client, a shell, xargs) only feed it and do not count.
-        | ([ range(0; $unit_result.items | length) as $j | select($unit_result.items[$j].consumer) | $j ] | first // 0) as $first_consumer
-        # A read-only filter inside a pipeline (`op | tail -5`) does not count either.
+        # Effectful commands that carry no operation of their own, plus effectful substitutions (N4).
+        # A read-only command inside a pipeline (`op | tail -5`, `echo sql | psql`) does not count;
+        # any other producer feeding a SQL client, shell or xargs does (`rm -rf y | psql`).
         | ($unit_result.items | length) as $pipeline_size
-        | ([ range($first_consumer; $pipeline_size) as $j
-             | $unit_result.items[$j] | select(.kind == "eff" and (.own_op | not) and (($pipeline_size > 1 and .readonly) | not)) ] | length) as $others
+        | (([ $unit_result.items[] | select(.kind == "eff" and (.own_op | not) and (($pipeline_size > 1 and .readonly) | not)) ] | length)
+           + $unit_result.nested_others) as $others
         | .uncertain = (.uncertain or $unit_result.unc)
-        | .units += (if $kind == "none" and ($unit_result.ops | length) == 0 and ($unit_result.cmds | length) == 0 and ($unit_result.net | length) == 0 then []
-                     else [{kind: $kind, ops: $unit_result.ops, cmds: $unit_result.cmds, others: $others, net: ($unit_result.net | unique)}] end)
+        | .units += (if $kind == "none" and ($unit_result.ops | length) == 0 and ($unit_result.cmds | length) == 0 and ($unit_result.floor | length) == 0 then []
+                     else [{kind: $kind, ops: $unit_result.ops, cmds: $unit_result.cmds, others: $others, floor: $unit_result.floor}] end)
         | .units += $unit_result.extra)
+    | {units: .units, uncertain: .uncertain}
   end;
 
-def parse_script($text; $depth; $branch): parse_script_in($text; $depth; $branch; {files: {}, aliases: []});
+def parse_script($text; $depth; $branch): parse_script_in($text; $depth; $branch; {files: {}, aliases: {}, captured: false, chdir: []});
+
+# The keyword floor text of a parse: every unit's floor fragments, in order, on one line.
+def floor_text($parsed): [ $parsed.units[].floor[] ] | join(" ") | gsub("[\\n\\t]"; " ");

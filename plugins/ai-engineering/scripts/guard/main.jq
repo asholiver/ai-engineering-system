@@ -1,12 +1,16 @@
-# Entry point for guard-bash.sh. Reads the PreToolUse hook JSON and emits seven lines:
-#   decision (none | ask | deny | fallback), parse mode, classes (comma separated),
+# Entry point for guard-bash.sh. Reads the PreToolUse hook JSON and emits eight lines:
+#   decision (none | ask | deny | fallback | floor), parse mode, classes (comma separated),
 #   the hook output JSON ("" when there is no decision), the shell-edit hint state
-#   (none | hint | check), a JSON array of redirection targets for "check", and
-#   needBranch ("1" when a push was found and the branch was not looked up).
-# "fallback" asks the wrapper to apply the v0.2 keyword rules (parse not confident).
+#   (none | hint | check), a JSON array of redirection targets for "check", needBranch ("1"
+#   when a push was found and the branch was not looked up), and the floor text (one line).
+# "fallback" asks the wrapper to apply the v0.2 keyword rules to the whole command (parse not
+# confident). "floor" means the parse found no decision but its floor text was too large to scan
+# here: the wrapper applies the same keyword rules to the floor text (linear grep) and asks on a hit.
 # Named arguments: --arg branch (current Git branch, "" when unknown), --arg branchLoaded
-# ("1" when the branch was looked up) and --arg commonDir (resolved Git common directory,
-# "" when not looked up).
+# ("1" when the branch was looked up), --arg commonDir (resolved Git common directory,
+# "" when not looked up), --arg rootCdup and --arg rootKnown (git rev-parse --show-cdup from
+# the working directory, and "1" when it was looked up; otherwise the working directory stands
+# in for the repository root, which only over-asks for whole-tree writers).
 include "classify";
 include "policy";
 
@@ -14,6 +18,8 @@ def hook_output($decision; $reason):
   {hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: $decision, permissionDecisionReason: $reason}} | tojson;
 
 def parse_budget_bytes: 262144;
+# Floor text scanned here; above this the wrapper scans it (the regexes backtrack on long text).
+def floor_budget_bytes: 16384;
 
 . as $input
 | ($input.tool_input.command // "") as $command
@@ -25,13 +31,24 @@ def parse_budget_bytes: 262144;
      (try parse_script($text; 0; $branch) catch {uncertain: true, units: []}) as $parsed
      | if $parsed.uncertain then {decision: "fallback", parseMode: "fallback", classes: [], output: "", hint: "none", targets: []}
        else
-         decide($parsed; {agentType: ($input.agent_type // null), cwd: ($input.cwd // ""), commonDir: $commonDir}) as $verdict
-         # The current branch matters only for pushes. When it was not looked up and the parse found a
-         # push (however it was spelled), the wrapper looks it up and runs this again.
-         | (($branchLoaded != "1") and (any($parsed.units[].cmds[]; .prog == "git" and .sub == "push"))) as $needBranch
-         | {decision: $verdict.decision, parseMode: "parsed", classes: $verdict.classes,
+         floor_text($parsed) as $floor_text
+         | (($floor_text | utf8bytelength) > floor_budget_bytes) as $floor_deferred
+         | (if $floor_deferred then [] else floor_classes($floor_text; $branch) end) as $floor
+         # The repository root, spelled from the working directory (git rev-parse --show-cdup), or "" when unknown.
+         | (if $rootKnown == "1" then ($rootCdup | normalize_path($input.cwd // "")) else "" end) as $root
+         | decide($parsed; {agentType: ($input.agent_type // null), cwd: ($input.cwd // ""), commonDir: $commonDir, floor: $floor, root: $root}) as $verdict
+         # The current branch matters only for pushes. When it was not looked up and the parse or the
+         # floor text found a push (however it was spelled), the wrapper looks it up and runs this again.
+         | (($branchLoaded != "1")
+            and (any($parsed.units[].cmds[]; .prog == "git" and .sub == "push")
+                 or (if $floor_deferred then ($floor_text | test("push"; "i"))
+                     else floor_mentions_push($floor_text) end))) as $needBranch
+         | {decision: (if $floor_deferred and $verdict.decision == "none" then "floor" else $verdict.decision end),
+            parseMode: "parsed", classes: $verdict.classes,
             output: (if $verdict.decision == "none" then "" else hook_output($verdict.decision; $verdict.reason) end),
-            hint: $verdict.hint, targets: $verdict.hintTargets, needBranch: $needBranch}
+            hint: $verdict.hint, targets: $verdict.hintTargets, needBranch: $needBranch,
+            floorText: (if $floor_deferred and $verdict.decision == "none" then $floor_text else "" end)}
        end
    end)
-| .decision, .parseMode, (.classes | join(",")), .output, (.hint // "none"), ((.targets // []) | tojson), (if .needBranch then "1" else "0" end)
+| .decision, .parseMode, (.classes | join(",")), .output, (.hint // "none"), ((.targets // []) | tojson), (if .needBranch then "1" else "0" end),
+  (.floorText // "")

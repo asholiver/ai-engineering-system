@@ -85,12 +85,55 @@ Detailed evidence for WORK-001 delivery. The spec's "Implementation state" keeps
   - Status of each finding is tracked separately under "Finding status" below.
 - **Owner ruling (2026-10-07): lessons are kept as dogfood evidence.** No separate global-standards PR yet. The semantic-denial incident, these rulings and the other findings will be considered together with the other v0.3 system improvements before release. They do not expand WORK-001 and do not become one-off system changes.
 
+## Focused security re-review (Opus, 89d1dcd..da81e8b)
+- Verdict: **not ready to merge.**
+  - Resolved: H2, H3, H4, M2, M4, L1, L2, L3, and H6 for ASCII.
+  - Partially resolved: H1, H5, M1, M3.
+  - F-SEC-0 and F-SEC-0b: resolved for the listed shapes, but the general floor is broken again by N1–N3.
+- New findings, all confirmed by the coordinator (`rereview-probes.jsonl`: 43 of 46 probes mismatch, 19 of them safety-floor regressions where v0.2 asks and the source guard is silent):
+  - **N1 (high).** An alias name anywhere in the submission disables classification of that program.
+  - **N2 (high).** `git` is treated as inert, but `submodule foreach`, `rebase -x`, `bisect run`, `difftool -x`, `filter-branch`, `grep -O`, `--upload-pack` and `-c core.pager` all execute commands. Restricted agents can still run commands through allowed reads and unlisted `-c` keys.
+  - **N3 (high).** Other "inert" programs execute: `awk system()`, `sed e`, `tar --to-command`, `zip -TT`, `xargs sh -c` reading stdin, and `kubectl run --`, `make --eval`, `gcloud ssh --command`.
+  - **N4 (medium).** Bundling through the operation's own substitutions, read-only commands with write redirections, Git "read" subcommands that write, and a producer exemption that is too broad.
+  - **N5 (medium-high).** Store and `.git` path matching misses globs, braces and `$` targets, `git -C`/`env -C` directory changes, and hard links.
+  - **N6 (low).** Log `.1` symlink on rotation; Unicode case folding not verified; repository root as a store ancestor for recursive/extract writers and `git checkout <ref> -- .` (**escalated to the owner**); unknown Git aliases (documented residual).
+- Process note: no guard prompt was denied. The reviewer kept reserved vocabulary out of its output after a safety-classifier interruption.
+- Fix round 2 (Opus backend, per the deliver skill's retry-with-Opus step, because round 1 introduced new holes) changes the root cause. The v0.2 keyword floor (ask-only) now applies to the whole command text minus a narrow, tested list of proven data spans, instead of only to "unclassified" commands. Classification and policy may raise a decision but never lower it below the floor. Brief: `scratchpad/guard-probes/FIX-BRIEF-2.md`.
+
 ## Finding status (verified facts only)
 | Finding | Status |
 | :- | :- |
 | F-T1-1 | Resolved: closed by T3, test proves no execution, confirmed by the security review |
 | F-T3-1 | Resolved: env switch removed, regression tests, confirmed by the security review |
-| F-SEC-0, F-SEC-0b, H1–H6, M1–M4, L1–L3 | Open: fix round 1 implemented. Verified by the coordinator:<br>- fast gate `GATE fast: PASSED (exit 0) command: tests/run.sh` (912 passed);<br>- `compare.sh` with 0 mismatches and 0 v0.2-ask→none regressions on all three probe sets (101 Git, 221 HTTP/SQL/platform, 184 fix probes);<br>- `tests/run.sh` against `main` has 0 removed lines; one T2 expectation was made stricter (specialist bare `git checkout`: none→deny).<br>Focused security re-review pending; not resolved until it confirms. |
+| F-SEC-0, F-SEC-0b, H1–H6, M1–M4, L1–L3 | Open: fix round 1 implemented. Verified by the coordinator:<br>- fast gate `GATE fast: PASSED (exit 0) command: tests/run.sh` (912 passed);<br>- `compare.sh` with 0 mismatches and 0 v0.2-ask→none regressions on all three probe sets (101 Git, 221 HTTP/SQL/platform, 184 fix probes);<br>- `tests/run.sh` against `main` has 0 removed lines; one T2 expectation was made stricter (specialist bare `git checkout`: none→deny).<br>Focused re-review done: H2, H3, H4, M2, M4, L1, L2, L3 are **resolved**, and H6 is resolved for ASCII (Unicode folding continues under N6). H1, H5, M1, M3, F-SEC-0 and F-SEC-0b are **open** (partially resolved; fix round 2). |
+| N1–N6 (including the owner's N6 ruling), H1/H5/M1/M3 remainders | Open: fix round 2 implemented. Coordinator verification (independent of the agent's report; it was produced while the auto-mode safety classifier was unavailable):<br>- diff limited to the guard scripts, `tests/run.sh`, docs, changelog and log; no protected or system file changed;<br>- the only removed test lines are the 8 KB fixture generator and info line, replaced by a genuine 8159-byte fixture with a size assertion;<br>- the installed v0.2 cache is identical to tag `v0.2.0`, the install record is `b875f32`, and there is no `--plugin-dir`;<br>- `GATE fast: PASSED (exit 0) command: tests/run.sh` (1240 passed);<br>- `compare.sh` gives 0 mismatches and 0 v0.2-ask→none regressions on all four probe sets (552 probes); the probe-file edit changed only the two N6 lines (`any`→`ask`).<br>Focused re-review pending; not resolved until it confirms. |
+| Performance (spec: p95 < 150 ms up to 8 KB) | **Not met**; see "Performance analysis". Not accepted; an owner recommendation is pending. |
+
+## Owner ruling N6 (2026-10-07): ask, narrowly
+- Whole-directory restore, recursive copy/synchronisation, archive extraction and equivalent operations are legitimate and are never denied merely for writing broadly.
+- When such an operation **can** overwrite or replace a protected authority or repository-control path, it **asks**. Protected targets are:
+  - the repository root, where the operation can affect protected descendants;
+  - `.agents` and `.agents/specs`;
+  - the authority-store files;
+  - `.git`.
+- **Every caller**, the coordinator included. No weaker path for the coordinator.
+- The test is whether the operation **can** affect a protected path, not proof that the source or archive currently contains one. Failing to inspect or resolve the source must never turn a potentially protected overwrite into no decision.
+- Narrow:
+  - no prompt for ordinary writes that cannot affect protected paths;
+  - no blanket deny;
+  - checkout/restore of ordinary individual non-protected files stays under the existing policy;
+  - a whole-tree or ref restore that can replace protected repository state asks;
+  - equivalent recursive and extract operations get equivalent treatment, whichever supported tool performs them.
+- Not accepted as residual risk. It is implemented in WORK-001 and included in fix round 2 verification and the next focused re-review. No expansion into WORK-002 and no standards PR in this run.
+- **Dogfood lesson (preserve):** authority-store protection must consider the *write effect* of an operation, including writes through ancestor directories, not only literal protected path strings.
+- Process note: fix round 2's first run was cut short by a usage limit (HTTP 429) and was resumed from its transcript. Partial work was kept, not discarded.
+
+## Performance analysis (coordinator, 2026-10-07; genuine 8159-byte fixture of 140 pipelines, 280 commands)
+- End to end, 30 runs: committed `da81e8b` p50 167 / p95 182 ms; fix round 2 p50 201 / p95 215 ms. Typical command: p95 54 → 79 ms (within budget). The old "8 KB" fixture was 3.5 KB, which hid that `da81e8b` was already over.
+- Stages (p50): jq compile ≈ 48 ms fixed; lexing +14; raw parse +25; per-command classification (`parse_script_in`) +84; floor +4; policy +8; wrapper ≈ 10–15 ms.
+- Scaling is linear, ≈ 0.47 ms per command (35/70/140/280 pipelines: 81/113/178/321 ms of jq). There is no quadratic hotspot. Heredoc-heavy text costs almost nothing: a 12.6 KB heredoc command takes 49 ms (compile only).
+- jq regex calls cost ≈ 2.5–4 µs each and `IN()` ≈ 2 µs. The per-command cost is spread across many checks, so there is no single hot regex.
+- Conclusion: no simple, maintainable optimisation was found. Meeting 150 ms for about 280 dense commands would need restructuring of the security-sensitive per-command analysis. The budget is met up to about 90–100 dense commands (about 5 KB) and for large heredocs.
 
 ## Gate runs
 | Task | Gate | Verdict line |
@@ -98,6 +141,7 @@ Detailed evidence for WORK-001 delivery. The spec's "Implementation state" keeps
 | T1 | fast | `GATE fast: FAILED (exit 1) command: tests/run.sh` (350 passed, 4 failed; the 4 are T3-dependent gate cases, see F-T1-1) |
 | T1+T3 | fast | `GATE fast: PASSED (exit 0) command: tests/run.sh` (386 passed, 0 failed) |
 | T2 | fast | `GATE fast: PASSED (exit 0) command: tests/run.sh` (619 passed, 0 failed) |
+| Fix round 2 (working tree before commit) | fast | `GATE fast: PASSED (exit 0) command: tests/run.sh` (1240 passed, 0 failed) |
 | Fix round 1 | fast | `GATE fast: PASSED (exit 0) command: tests/run.sh` (912 passed, 0 failed) |
 | T4 (HEAD 89d1dcd) | full | `GATE full: PASSED (exit 0) command: scripts/check.sh` (shellcheck not installed; skipped, so AC 11 is not yet met) |
 
