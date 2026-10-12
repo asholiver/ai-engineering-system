@@ -714,6 +714,45 @@ Detailed evidence for WORK-001 delivery. The spec's "Implementation state" keeps
 - Docstring coverage warning (50% against 80%): treated as non-blocking. It names no concrete defect.
 - c2, c3, c7 and c8 remain OPEN security findings. Not remediated.
 
+## CI run 38305373417 (2026-10-12, PR #5 head 233fec8): first executing run
+- Event `pull_request`; job `check (ubuntu, ShellCheck 0.11.0)`, 7 m 00 s (20:37:03-20:44:03 UTC).
+- Runner tools: bash 5.2.21, git 2.55.0, jq 1.7, ShellCheck 0.11.0 (checksum `OK`, version asserted), Claude Code 2.1.296.
+- Executed:
+  - plugin and marketplace validation: both `✔ Validation passed`, offline;
+  - script syntax and ShellCheck: passed, nothing skipped;
+  - **`tests/run.sh`: 2085 passed, 1 failed**;
+  - template names, version, context budget, routing;
+  - `scripts/check.sh`: `CHECK: FAILED (1)`, the hook tests only.
+- Timing within tolerance: 8 KB command 371 ms (tolerance 500 ms), marginal 745 µs per command (bound 1500 µs).
+- Linux-only stderr noise ("jq: error: writing output failed: Broken pipe", "yes: … Broken pipe") from early-closed pipes; no test failed because of it.
+- **Failure:** `fix round 3 N6(c) (m): cp -R x /tmp/*/out` expected none, got ask.
+  - **Cause (confirmed):** the runner leaves `TMPDIR` unset, so `tests/run.sh` (`mktemp -d "${TMPDIR:-/tmp}/…"`) created its fixture repositories under `/tmp`. The literal destination `/tmp/*/out` then sits under an ancestor of the fixture repository, and the guard asks.
+  - Reproduced locally: with a fixture repository under `/tmp` the decision is ask; under the macOS `TMPDIR` it is none.
+  - The guard is not wrong: the stricter result follows from the fixture location.
+- **Portability fix** (`89bf819`, CI only): the check step exports `TMPDIR="$RUNNER_TEMP"`.
+  - `$RUNNER_TEMP` is `/home/runner/work/_temp`, outside the checkout and outside `/tmp`.
+  - The harness honours `TMPDIR` (line 7), so `/tmp` is no longer an ancestor of the fixtures.
+  - The test's expected decision, the guard code and the tolerances are unchanged. Not yet verified in CI.
+
+## CodeRabbit c2/c3/c7/c8 remediation (owner-authorised 2026-10-12, scope: these four and close spellings)
+- policy.jq `short_cluster_values` is used **only** for the `curl` `-o/--output` and `wget` `-O/--output-document` and `-o/--output-file` write targets. It recognises:
+  - exact `-o V`;
+  - `--output=V`;
+  - a short cluster containing the output letter: last letter, so the next word (`-sSLo V`); or followed by text, so that text (`-oV`, `-sSLoV`).
+
+  `output_option_values` (sort, base64, …) is unchanged.
+- Before → after (the inert fixture `scratchpad/cr1`; regression table "CodeRabbit curl/wget output options", 19 cases):
+  - c2 `curl -sSLo .agents/specs/active/WORK-9.state.json URL`: none → **deny**;
+  - c3 `curl -o.agents/…state.json URL`: none → **deny**;
+  - c7 `wget -O.agents/…state.json URL`: none → **deny**;
+  - c8 (backend) `curl -sSLo .git/hooks/pre-commit URL`: none → **deny**.
+  - Controls stay none: `curl -sSLo out.json`, `curl -sSL`, `wget -qO-`, `wget -qO out.html`, backend `curl -fsSLo build/out.json`.
+- Verification:
+  - `tests/run.sh`: 2105 passed, 0 failed.
+  - `scripts/check.sh` with ShellCheck 0.11.0: `CHECK: PASSED`.
+  - Comparison with `233fec8` (1357 commands, coordinator and backend): 6 coordinator and 9 backend none → deny, all the targeted curl/wget forms. Nothing else changed; nothing lowered.
+- Status: implemented and coordinator-verified. CodeRabbit's re-review on the pushed head is pending, so the findings are not closed until it confirms.
+
 ## Finding status (verified facts only)
 | Finding | Status |
 | :- | :- |
