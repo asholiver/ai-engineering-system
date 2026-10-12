@@ -628,6 +628,27 @@ Detailed evidence for WORK-001 delivery. The spec's "Implementation state" keeps
     - (a) strip leading tabs from `<<-` bodies in the lexer, as Bash does. This affects every heredoc consumer (SQL scans, scripts, patches) and makes them more correct.
     - (b) exclude `<<-` from the H1/H2 shapes, so it asks. Without (a), the deny for octal-escaped store names inside `<<-` stays an ask.
 
+## Owner decision (2026-10-12): N1 option 3, final bounded containment
+- **Lexer** (`read_heredoc_bodies`): a `<<-` body loses the leading tabs of every line, as in Bash, for every heredoc consumer. Its redirection carries `strip: true`.
+- **Shapes:** a `<<-` heredoc is not one of the exact direct patch shapes (H1/H2), so it asks unless a deny applies. No new parser.
+- **Required results, tested:**
+  - fixture `scratchpad/n1`: n1 and n1d deny (were none), n1c asks (was none), n1b still denies;
+  - fc-r, rr312-fix: 0 mismatches;
+  - opt1-r, rr312-r2, rr312: only the documented by-design differences.
+- **Tests:** table "N1 tab-stripped heredocs", 12 cases:
+  - the four N1 probes;
+  - `patch <<-` harmless (ask);
+  - a tab-doubled Git-file and store patch (deny);
+  - a specialist (deny);
+  - other consumers: `psql <<-` with `DROP TABLE` (ask), `bash <<-` with `terraform apply` (ask), backend `bash <<-` with `git commit` (deny), `cat <<-` (none);
+  - a plain-heredoc control (none).
+  - The `@TAB@` marker was added to the test helper.
+- Verification:
+  - `tests/run.sh`: 2086 passed, 0 failed.
+  - `scripts/check.sh` with ShellCheck 0.11.0 executing: `CHECK: PASSED`.
+  - Comparison with `9bb143a` (1338 commands, coordinator and backend): 3 coordinator and 1 backend none → deny, 2 coordinator and 1 backend none → ask, all `<<-` patch forms. Nothing lowered.
+- Note: the owner's instruction text arrived truncated after "scripts/check.sh with". The coordinator applied the earlier standing instructions: ShellCheck executing, corpus measurement, one narrow independent review, local commits only, then a report.
+
 ## Finding status (verified facts only)
 | Finding | Status |
 | :- | :- |

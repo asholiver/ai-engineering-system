@@ -174,10 +174,13 @@ def read_heredoc_bodies($rest; $start; $ops):
     | ($rest[.p:]) as $tail
     | ([ $tail | match("(?:\\A|\\n)" + (if $op.strip then "\\t*" else "" end) + $delimiter + "(?:\\n|\\z)") ] | .[0]) as $end
     | ($op.word | test("['\"\\\\]")) as $quoted
-    | if $end == null then
-        .bodies += [{body: $tail, quoted: $quoted}] | .p = ($rest | length) | .unterminated = true
+    # N1: `<<-` strips leading tabs from every body line, as Bash does, so consumers (patch
+    # headers, SQL scans, script text) read what the program receives.
+    | def body_text: if $op.strip then gsub("(?<start>^|\n)\t+"; "\(.start)") else . end;
+    if $end == null then
+        .bodies += [{body: ($tail | body_text), quoted: $quoted, strip: $op.strip}] | .p = ($rest | length) | .unterminated = true
       else
-        .bodies += [{body: $tail[0:$end.offset], quoted: $quoted}] | .p += $end.offset + $end.length
+        .bodies += [{body: ($tail[0:$end.offset] | body_text), quoted: $quoted, strip: $op.strip}] | .p += $end.offset + $end.length
       end);
 
 def append_tokens($tokens): .toks += [$tokens[] | if type == "number" then "\n" else . end];
@@ -275,7 +278,7 @@ def parse_raw($text; $depth):
                   | if ($lexed.hd[$index] // null) == null then .bad = true | .cur.r += [{op: "<<", t: $word.l, body: "", fd: $fd}]
                     else
                       $lexed.hd[$index] as $heredoc
-                      | .cur.r += [{op: "<<", t: $word.l, body: $heredoc.body, q: $heredoc.quoted, fd: $fd}]
+                      | .cur.r += [{op: "<<", t: $word.l, body: $heredoc.body, q: $heredoc.quoted, fd: $fd, strip: ($redirect == "<<-")}]
                       | .hd_index += 1
                       | if $heredoc.quoted or ($heredoc.body | test("[$`]") | not) then .
                         else add_word({s: ($heredoc.body | expansion_substitutions)}; -1) end

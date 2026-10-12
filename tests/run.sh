@@ -1476,7 +1476,7 @@ expand_characters() {
   text="${text//@CR@/$carriage_return}"; text="${text//@FF@/$form_feed}"; text="${text//@VT@/$vertical_tab}"
   text="${text//@NBSP@/$no_break_space}"; text="${text//@EMSP@/$em_space}"; text="${text//@IDSP@/$ideographic_space}"
   text="${text//@ZWSP@/$zero_width_space}"; text="${text//@KELVIN@/$kelvin_sign}"; text="${text//@LONGS@/$long_s}"
-  text="${text//@ST@/$st_ligature}"; text="${text//@EACUTE@/$e_acute}"
+  text="${text//@ST@/$st_ligature}"; text="${text//@EACUTE@/$e_acute}"; text="${text//@TAB@/$'\t'}"
   printf '%s' "$text"
 }
 # Every probe of re-review 2 (rereview2-probes.jsonl) except the five N6 boundary cases (owner
@@ -2680,6 +2680,22 @@ m|none|patch --dry-run -p1 0< fix.patch
 m|deny|time git apply <<'EOF'\ndiff --git "a/.agents/specs/active/W.state\056json" "b/.agents/specs/active/W.state\056json"\nEOF
 m|deny|cat <<'EOF' | git apply\ndiff --git "a/.agents/specs/active/W.state\056json" "b/.agents/specs/active/W.state\056json"\nEOF
 m|deny|git -C . apply <<'EOF'\ndiff --git "a/.agents/specs/active/W.state\056json" "b/.agents/specs/active/W.state\056json"\nEOF
+CASES
+# N1 (owner option 3): `<<-` bodies lose their leading tabs, as in Bash, for every heredoc consumer;
+# and a `<<-` heredoc is not one of the exact direct patch shapes, so it asks unless a deny applies.
+fix4_table "N1 tab-stripped heredocs" "$agent_repository" <<'CASES'
+m|deny|git apply <<-'EOF'\n@TAB@diff --git "a/.agents/specs/active/W.state\056json" "b/.agents/specs/active/W.state\056json"\n@TAB@--- "a/.agents/specs/active/W.state\056json"\n@TAB@+++ "b/.agents/specs/active/W.state\056json"\nEOF
+m|deny|git apply <<-'EOF'\n@TAB@--- a/.agents/specs/active/W.state.json\n@TAB@+++ b/.agents/specs/active/W.state.json\nEOF
+m|ask|git apply <<-'EOF'\n@TAB@--- a/src/x\n@TAB@+++ b/src/x\nEOF
+m|deny|patch -p1 <<-'EOF'\n@TAB@--- "a/.agents/specs/active/W.state\056json"\n@TAB@+++ "b/.agents/specs/active/W.state\056json"\nEOF
+m|ask|patch -p1 <<-'EOF'\n@TAB@--- a/src/x\n@TAB@+++ b/src/x\n@TAB@EOF
+m|deny|git apply <<-'EOF'\n@TAB@@TAB@--- "a/.git/hooks/pre-commit"\n@TAB@+++ "b/.agents/specs/active/W.state\056json"\nEOF
+b|deny|git apply <<-'EOF'\n@TAB@--- a/src/x\n@TAB@+++ b/src/x\nEOF
+m|ask|psql "$URL" <<-'SQL'\n@TAB@DROP TABLE users;\n@TAB@SQL
+m|ask|bash <<-'EOF'\n@TAB@terraform apply\n@TAB@EOF
+b|deny|bash <<-'EOF'\n@TAB@git commit -m x\nEOF
+m|none|cat <<-'EOF'\n@TAB@hello\n@TAB@EOF
+m|none|git apply <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF
 CASES
 
 # Closure pass: the WORK-001 replacement probe set (tests/guard-probes.txt; not the lost historical

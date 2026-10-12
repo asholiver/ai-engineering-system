@@ -1450,7 +1450,9 @@ def parse_script_in($text; $depth; $branch; $outer):
                        | ([ $tool_args[] | select(startswith("-") | not) ] | length) as $operand_count
                        # Only standard input counts (no fd number, or 0): `3<<EOF` or `3< f` feed
                        # another descriptor, so the tool still reads whatever stdin it inherits.
-                       | [ $command.r[] | if (.fd // "") == "" or .fd == "0" then .op else "fd" + .fd + .op end ] as $redirections
+                       # N1: a tab-stripping heredoc (`<<-`) is not one of the exact direct shapes.
+                       | [ $command.r[] | if (.strip // false) then "<<-"
+                                          elif (.fd // "") == "" or .fd == "0" then .op else "fd" + .fd + .op end ] as $redirections
                        | ($redirections == ["<<"] or $redirections == ["<<<"]) as $own_text
                        | def only_flags($allowed): all($flags[]; test("^-p[0-9]+$") or IN($allowed[]));
                          def one_of($names): ([ $flags[] | select(IN($names[])) ] | length) == 1;
