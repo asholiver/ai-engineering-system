@@ -13,8 +13,8 @@
 # guard/fallback.jq establishes independently of the failed parse; unparseable alone never denies.
 # The guard never returns "allow".
 #
-# Hook-time Git is limited to lookups (branch, root and common directory, the shell-edit hint's
-# tracked-file test) through guard/hook-git.sh; it reads no objects or trees (Option B, owner
+# Hook-time Git is limited to lookups (branch, root and common directory) through
+# guard/hook-git.sh; it reads no objects, trees or index (Option B and F5-3, owner
 # decision 2026-10-12). State-changing Git commands ask instead (guard/policy.jq git_state_policy).
 # A lookup that a decision depends on and that fails, or that the hook environment redirects,
 # turns no decision into ask (NF-3).
@@ -334,15 +334,18 @@ run_fallback_git_check() {
 # ---------------------------------------------------------------- shell-edit hint
 # For implementation agents that edit a file through the shell, PreToolUse context with NO
 # permission decision (never asked, denied or logged). The classifier says "hint" outright, or
-# "check" with redirection targets; a redirection counts only when it overwrites a tracked file.
+# "check" with redirection targets; a redirection counts when it overwrites an existing regular
+# file. F5-3: no Git is run for this (an index read can expand a sparse index and read trees); an
+# existing untracked file also gets the hint, which is harmless context.
 emit_shell_edit_hint() {
-  local target tracked=""
+  local target existing=""
   if [ "$hint_state" = "check" ]; then
     while IFS= read -r target; do
       [ -n "$target" ] || continue
-      if hook_git_is_tracked "$(directory_for_git)" "$target" && [ -n "$hook_git_output" ]; then tracked=1; break; fi
+      case "$target" in /*) ;; *) target="$(directory_for_git)/$target" ;; esac
+      if [ -f "$target" ]; then existing=1; break; fi
     done < <(jq -r '.[]' <<<"$hint_targets" 2>/dev/null)
-    [ -n "$tracked" ] && hint_state="hint"
+    [ -n "$existing" ] && hint_state="hint"
   fi
   [ "$hint_state" = "hint" ] || return 0
   printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"Use Edit/Write for file changes."}}'

@@ -581,6 +581,12 @@ def git_state_value_flags($sub):
    "stash": ["-m", "--message", "--pathspec-from-file"],
    "restore": ["-s", "--source", "--pathspec-from-file", "--conflict"],
    "reset": ["--pathspec-from-file"]}[$sub // ""] // [];
+# P-1: Git accepts a long option abbreviated to any unambiguous prefix (`--har`), and a value joined
+# with `=` (`--orphan=x`). An argument matches one of $names (full long options) when, without its
+# `=value`, it is `--` plus at least one letter and a prefix of the name. Used only where a match adds
+# an ask, never for an exemption; matching a prefix that Git would reject as ambiguous can only add an ask.
+def git_long_option($names):
+  sub("=.*$"; "") as $given | ($given | test("^--[a-z]")) and any($names[]; startswith($given));
 def git_state_items($context; $root):
   .sub as $sub | .args as $args
   # NF-2: a bare `-` is the previous branch (@{-1}), an operand, not an option.
@@ -588,36 +594,44 @@ def git_state_items($context; $root):
   | ([ range(0; $args | length) as $i | select($args[$i] == "--") | $i ] | first) as $dashes
   | ($context + {cwd: .dir, base: $context.cwd}) as $where
   | def reaches($dests): any($dests[]; protected_reach(.; $where; $root) != null);
+    def has_long($names): any($args[]; git_long_option($names));
     def item($op): [{op: $op, why: "the guard does not inspect Git state, so it cannot show that the .agents/specs state files are unaffected"}];
     if $sub == "pull" then item("git pull")
     elif $sub == "checkout" then
       # With `--`, the paths decide, whatever ref comes before them.
       (if $dashes != null then (if reaches($args[$dashes + 1:]) then item("git checkout -- <paths>") else [] end)
-       elif any($args[]; . == "--orphan") then item("git checkout --orphan")
+       elif has_long(["--orphan"]) then item("git checkout --orphan")
        elif any($args[]; test("^(-b|-B)$")) then (if ($operands | length) > 0 then item("git checkout -b <start point>") else [] end)
        # One operand is a branch or a path; the guard cannot tell which, so it asks.
        elif ($operands | length) == 1 then item("git checkout <branch>")
        # RR3-7: checkout -f with no ref discards every local change.
-       elif ($operands | length) == 0 and any($args[]; test("^(-f|--force)$")) then item("git checkout -f")
+       elif ($operands | length) == 0 and (any($args[]; . == "-f") or has_long(["--force"])) then item("git checkout -f")
        else [] end)
     elif $sub == "switch" then
-      (if any($args[]; . == "--orphan") then item("git switch --orphan")
+      (if has_long(["--orphan"]) then item("git switch --orphan")
        elif ($operands | length) == 0 then []
-       elif any($args[]; test("^(-c|-C|--create|--force-create)$")) then item("git switch -c <start point>")
+       elif any($args[]; test("^(-c|-C)$")) or has_long(["--create", "--force-create"]) then item("git switch -c <start point>")
        else item("git switch") end)
     # merge and rebase with no operand use the upstream; --abort and --continue change files too.
     elif $sub == "merge" or $sub == "rebase" then item("git " + $sub)
     elif $sub == "cherry-pick" or $sub == "revert" then
-      (if ($operands | length) > 0 or any($args[]; test("^--(abort|quit|continue|skip)$")) then item("git " + $sub) else [] end)
+      (if ($operands | length) > 0 or has_long(["--abort", "--quit", "--continue", "--skip"]) then item("git " + $sub) else [] end)
     elif $sub == "stash" then
-      ((($operands | first) // "push") as $action
-       | if $action | IN("push", "save", "pop", "apply", "branch") then item("git stash " + $action) else [] end)
+      # P-2: the action is the first operand before `--` (`git stash -- <paths>` is a push). Only the
+      # actions that leave the working tree alone get no item.
+      ((($args[0:($dashes // ($args | length))] | positionals_skipping(git_state_value_flags($sub)) | first) // "push") as $action
+       | if $action | IN("list", "show", "drop", "clear", "create", "store") then []
+         else item("git stash " + (if $action | IN("pop", "apply", "branch", "save") then $action else "push" end)) end)
     elif $sub == "restore" then
-      (if any($args[]; test("^(-s|--source)(=.*)?$|^-s.")) or (any($args[]; test("^(--staged|-S)$")) and (any($args[]; test("^(--worktree|-W)$")) | not)) then []
+      # Only the index (--staged without --worktree) leaves files alone; with or without --source,
+      # paths that can reach a protected path ask.
+      # The exemption needs the exact spelling: prefix matching only ever adds an ask.
+      (if any($args[]; . == "-S" or . == "--staged") and ((any($args[]; . == "-W") or has_long(["--worktree"])) | not) then []
        elif reaches([ ($args | positionals_skipping(["--pathspec-from-file"]))[], git_pathspec_file($args)[] ]) then item("git restore <paths>")
        else [] end)
+    # F5-1: a hard, merge or keep reset replaces tracked files whatever it resets to (`-` included).
     elif $sub == "reset" then
-      (if any($args[]; test("^--(hard|merge|keep)$")) and ($operands | length) == 0 then item("git reset --hard") else [] end)
+      (if has_long(["--hard", "--merge", "--keep"]) then item("git reset --hard") else [] end)
     else [] end;
 
 # Every state-changing Git command in the submission, in order: [{op, why}].
@@ -625,8 +639,8 @@ def git_state_policy($cmds; $context; $root):
   [ $cmds[] | select(.prog == "git") | git_state_items($context; $root)[] ];
 
 # ---------------------------------------------------------------- shell-edit hint
-# "hint" (certain), "check" (redirection targets the wrapper must test against `git ls-files`:
-# a redirection counts only when it overwrites an existing tracked file) or "none".
+# "hint" (certain), "check" (redirection targets the wrapper tests for existence: a redirection
+# counts only when it overwrites an existing regular file; no Git is run) or "none".
 def shell_edit_hint($cmds):
   ([ $cmds[]
      | select((.prog == "sed" and any(.args[]; test(in_place_sed_regex)))

@@ -2325,10 +2325,13 @@ for target in "$nf1_client/src/new.txt" "$nf1_client/x/ai-engineering/tokens/t";
   write_input "" "$target" "$nf1_client" | PATH="$nf1_shim:$PATH" "$scripts/guard-writes.sh" >/dev/null
 done
 expect_equal "Option B NF-1: guard-writes caused no promisor fetch" "" "$(ls "$nf1_markers" | tr '\n' ' ')"
-# The interface is structural: every hook-time Git call was rev-parse or ls-files (no object read).
+# The interface is structural: every hook-time Git call was one of the four rev-parse lookups, which
+# read no object, tree or index (round 6, F5-3: the ls-files index lookup for the hint is gone).
 if [ -s "$nf1_shim/calls" ]; then pass; else fail "Option B NF-1: the Git shim recorded no hook-time call"; fi
-expect_equal "Option B NF-1: hook-time Git is only rev-parse and ls-files" "" \
-  "$(grep -Ev '(^| )(rev-parse --git-common-dir|rev-parse --show-toplevel|rev-parse --show-cdup|rev-parse --abbrev-ref HEAD|--literal-pathspecs ls-files -- .*)$' "$nf1_shim/calls" | head -n 3)"
+expect_equal "Round 6 F5-3: hook-time Git is only the four rev-parse lookups" "" \
+  "$(grep -Ev '(^| )(rev-parse --git-common-dir|rev-parse --show-toplevel|rev-parse --show-cdup|rev-parse --abbrev-ref HEAD)$' "$nf1_shim/calls" | head -n 3)"
+expect_equal "Round 6 F5-3: no hook-time ls-files, cat-file, diff or hash-object" "" \
+  "$(grep -E ' (ls-files|cat-file|diff-tree|diff-index|hash-object|for-each-ref|show|log)( |$)' "$nf1_shim/calls" | head -n 3)"
 
 # NF-2: `-` is the previous branch, an operand: every state-changing form with it asks, and a
 # specialist's is denied.
@@ -2383,6 +2386,89 @@ expect_equal "Option B NF-3 guard-writes: an ordinary write, failing git" none "
 expect_equal "Option B NF-3 guard-writes: token-store-like path, working git" none "$(decision_of "$(write_input "" "$main_repository/x/ai-engineering/tokens/t" "$main_repository" | "$scripts/guard-writes.sh")")"
 expect_equal "Option B NF-3 guard-writes: hard-linked file, working git" none "$(decision_of "$(write_input "" "$main_repository/linked-a" "$main_repository" | "$scripts/guard-writes.sh")")"
 rm -f "$main_repository/linked-a" "$main_repository/linked-b"
+
+# ---------------------------------------------------------------- round 6 (re-review 5: F5-1, F5-2, F5-3, P-1, P-2)
+# F5-2: in guard-writes.sh every deny check runs before the unverified-lookup ask, so a failed lookup
+# (failing-Git shim) or Git variables in the hook environment never lower a deny to ask.
+printf 'x\n' >"$main_repository/linked-c" && ln -f "$main_repository/linked-c" "$main_repository/linked-d"
+ln -f "$main_repository/.git/config" "$main_repository/config-link"
+mkdir -p "$main_repository/.agents/learnings"
+printf 'x\n' >"$main_repository/.agents/learnings/linked.md" && ln -f "$main_repository/.agents/learnings/linked.md" "$main_repository/linked-e"
+f52_writes() { write_input "$1" "$2" "$main_repository" | env PATH="$failing_git_directory:$PATH" "$scripts/guard-writes.sh"; }
+while IFS='|' read -r expected agent target; do
+  [ -n "$expected" ] || continue
+  expect_equal "Round 6 F5-2 failing git ($agent): $target" "$expected" "$(decision_of "$(f52_writes "$agent" "$target")")"
+  expect_equal "Round 6 F5-2 GIT_DIR in the hook environment ($agent): $target" "$expected" \
+    "$(decision_of "$(write_input "$agent" "$target" "$main_repository" | env "GIT_DIR=$main_repository/.git" "$scripts/guard-writes.sh")")"
+done <<CASES
+deny|ai-engineering:learning|$main_repository/x/ai-engineering/tokens/t
+deny|ai-engineering:learning|$main_repository/linked-c
+deny|ai-engineering:backend|$main_repository/.git/config
+deny||$main_repository/x/ai-engineering/tokens/.agents/${long_s}pecs/W.state.json
+ask||$main_repository/x/ai-engineering/tokens/t
+ask||$main_repository/linked-c
+ask|ai-engineering:learning|$main_repository/.agents/learnings/linked.md
+none|ai-engineering:learning|$main_repository/.agents/learnings/new.md
+CASES
+rm -rf "$main_repository/linked-c" "$main_repository/linked-d" "$main_repository/config-link" "$main_repository/linked-e" "$main_repository/.agents/learnings"
+
+# F5-3: the shell-edit hint runs no Git: an existing regular file gets the hint (tracked or not), a
+# new file or a device does not; still never a decision.
+printf 'x\n' >"$agent_repository/untracked-existing.txt"
+while IFS='|' read -r expected command_text; do
+  [ -n "$expected" ] || continue
+  output="$(agent_output "$command_text" "$agent_repository" b)"
+  expect_equal "Round 6 F5-3 hint: $command_text" "$expected" "$(hint_of "$output")"
+  expect_equal "Round 6 F5-3 hint is not a decision: $command_text" none "$(decision_of "$output")"
+done <<'CASES'
+Use Edit/Write for file changes.|echo x > src/app.ts
+Use Edit/Write for file changes.|echo x > untracked-existing.txt
+none|echo x > another-new-file.txt
+none|echo x > /dev/null
+CASES
+rm -f "$agent_repository/untracked-existing.txt"
+
+# F5-1 (`-` with a hard, keep or merge reset; Git 2.46 rejects `reset --hard -`, but the guard asks
+# whatever it resets to), P-1 (abbreviated and =-joined long options, which Git accepts) and P-2
+# (`git stash -- <paths>` is a push). Specialists stay denied.
+fix4_table "round 6" "$state_fixture" <<'CASES'
+m|ask|git reset --hard -
+m|ask|git reset --keep -
+m|ask|git reset --merge -
+m|ask|git reset --hard main
+m|none|git reset -q
+m|none|git reset HEAD~1 -- src
+b|deny|git reset --hard -
+m|ask|git reset --har
+m|ask|git reset --ke
+m|ask|git switch --orph x
+m|ask|git switch --orphan=x
+m|ask|git checkout --orphan=x
+m|ask|git checkout --orph x
+m|ask|git checkout --for
+m|ask|git checkout --force
+m|ask|git cherry-pick --ab
+m|ask|git revert --cont
+m|ask|git switch --cre topic main
+m|ask|git restore --so=HEAD~1 .
+m|ask|git restore --source HEAD~1 .
+m|none|git restore --staged .
+m|ask|git restore --sta .
+m|ask|git restore --sta --work .
+b|deny|git reset --har
+b|deny|git switch --orph x
+m|ask|git stash -- .agents/specs
+m|ask|git stash -- .
+m|ask|git stash push -- src
+m|ask|git stash -m wip -- src
+m|ask|git stash save
+m|ask|git stash apply
+m|none|git stash list
+m|none|git stash show -p
+m|none|git stash drop
+m|none|git stash clear
+b|deny|git stash -- src
+CASES
 
 # ---------------------------------------------------------------- run-gate
 commit_all() { git -C "$1" add -A && git -C "$1" -c user.name=test -c user.email=test@example.com commit -q -m "$2"; }

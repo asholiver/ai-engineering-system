@@ -27,10 +27,14 @@ trap '[ -z "$hook_git_output_file" ] || rm -f "$hook_git_output_file"' EXIT
 # Prints the output of one hardened Git lookup (nothing when it fails).
 git_lookup() { "$@" && printf '%s' "$hook_git_output"; }
 # NF-3: a store check whose Git lookup failed inside a work tree, or that the hook environment
-# redirects (GIT_DIR and similar), asks instead of passing.
-ask_unverified() {
-  jq -n --arg reason "ai-engineering guard: this write could not be checked against the authority store because a Git lookup failed or the hook environment sets Git variables (attempted: $1). It needs explicit human approval." \
-    '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "ask", permissionDecisionReason: $reason}}'
+# redirects (GIT_DIR and similar), is unverified. It asks only after every deny check below has
+# run (F5-2: a deny is never lowered to ask), where the hook would otherwise pass.
+write_unverified=""
+pass_write() {
+  if [ -n "$write_unverified" ]; then
+    jq -n --arg reason "ai-engineering guard: this write could not be checked against the authority store because a Git lookup failed or the hook environment sets Git variables (attempted: $target_path). It needs explicit human approval." \
+      '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "ask", permissionDecisionReason: $reason}}'
+  fi
   exit 0
 }
 agent_type="$(jq -r '.agent_type // empty' <<<"$hook_input")"
@@ -107,7 +111,7 @@ case "$lowered_path" in
       esac
     fi
     if hook_git_environment_overrides || { [ -z "$common_directory" ] && hook_git_in_work_tree "$working_directory"; }; then
-      ask_unverified "$target_path"
+      write_unverified=1
     fi
     ;;
 esac
@@ -123,7 +127,7 @@ fi
 link_count() { stat -c %h "$1" 2>/dev/null || stat -f %l "$1" 2>/dev/null; }
 if [ -f "$resolved_path" ] && [ "$(link_count "$resolved_path")" -gt 1 ] 2>/dev/null; then
   if hook_git_environment_overrides || { { [ -z "$repository_top" ] || [ -z "$store_common_directory" ]; } && hook_git_in_work_tree "$working_directory"; }; then
-    ask_unverified "$target_path"
+    write_unverified=1
   fi
   for store_directory in "${repository_top:+$repository_top/.agents/specs}" "${store_common_directory:+$store_common_directory/ai-engineering/tokens}"; do
     [ -n "$store_directory" ] && [ -d "$store_directory" ] || continue
@@ -187,11 +191,11 @@ case "$agent_type" in
 esac
 
 # ---------------------------------------------------------------- learning agent
-[ "$agent_type" = "$learning_agent_type" ] || exit 0
+[ "$agent_type" = "$learning_agent_type" ] || pass_write
 
 repository_directory="$(git_lookup hook_git_top_level "$working_directory" || echo "$working_directory")"
 repository_directory="$(cd "$repository_directory" 2>/dev/null && pwd -P)"
 case "$resolved_path" in
-  "$repository_directory/.agents/"*) exit 0 ;;
+  "$repository_directory/.agents/"*) pass_write ;;
 esac
 deny "ai-engineering guard: the learning agent may only write inside .agents/ (attempted: $target_path). Shared guardrails change only through a reviewed PR to the ai-engineering system."

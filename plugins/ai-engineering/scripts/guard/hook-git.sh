@@ -24,16 +24,16 @@
 # promisor remote's transport (an ext:: command, for example). protocol.allow=never does not stop
 # that, because a repository's protocol.<name>.allow overrides it; GIT_NO_LAZY_FETCH=1 does, but
 # only on Git releases that know it. So the guard no longer inspects Git state at hook time; the
-# interface is limited to repository discovery, HEAD's name and the index. None of these reads
-# work-tree file contents, runs a filter, diff driver, textconv or external diff, writes the index
-# or refs, or contacts a remote.
+# interface is limited to repository discovery and HEAD's name. The index is not read either
+# (F5-3, re-review 5: expanding a sparse index reads trees). None of these reads work-tree file
+# contents, the index or objects, runs a filter, diff driver, textconv or external diff, writes
+# anything, or contacts a remote.
 #
 # Invocations (the whole interface; add nothing here without the same safety argument):
 #   hook_git_common_directory DIR   rev-parse --git-common-dir     reads .git discovery only
 #   hook_git_top_level DIR          rev-parse --show-toplevel      reads .git discovery only
 #   hook_git_show_cdup DIR          rev-parse --show-cdup          reads .git discovery only
 #   hook_git_current_branch DIR     rev-parse --abbrev-ref HEAD    reads HEAD only (its name, not the commit)
-#   hook_git_is_tracked DIR PATH    --literal-pathspecs ls-files -- PATH   lists index entries; no refresh
 #
 # Residual (documented): the git found on PATH is trusted, as are jq and the other tools this
 # hook runs; a hostile PATH controls every program the hook starts, not only Git.
@@ -76,7 +76,6 @@ hook_git_top_level() { hook_git_run "$1" rev-parse --show-toplevel; }
 hook_git_show_cdup() { hook_git_run "$1" rev-parse --show-cdup; }
 hook_git_current_branch() { hook_git_run "$1" rev-parse --abbrev-ref HEAD; }
 
-hook_git_is_tracked() { hook_git_run "$1" --literal-pathspecs ls-files -- "$2"; }
 
 # True when DIR or an ancestor has a .git entry. Runs no Git: it tells a lookup that failed inside a
 # work tree (which must not count as "no repository") from one outside any repository (NF-3).

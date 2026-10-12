@@ -263,6 +263,42 @@ Detailed evidence for WORK-001 delivery. The spec's "Implementation state" keeps
   - RR3-12 is not independently probed.
   - shellcheck has not run.
 
+## Focused security re-review 5 (Opus, 2d5a295..8a037c5)
+- **Evidence basis: static only.**
+  - The reviewer's one dynamic probe was denied before execution and was not retried, so it counts as not run. The script it would have run was `scratchpad/r5/probe.sh`: it pipes hook JSON to `guard-bash.sh --classify-only` and never runs the supplied Git commands. The denial cause was not verified (dogfood).
+  - The verdicts rest on code reading, existing `tests/run.sh` cases and the coordinator's evidence.
+- Verdict: **not ready to close.** There is no new HIGH general parsing or trust bypass.
+  - NF-1: PARTIAL (F5-3). NF-2: PARTIAL (F5-1). NF-3: PARTIAL (`guard-bash.sh` resolved, `guard-writes.sh` open: F5-2).
+  - Option B requirements: 1, 3, 6 and 7 resolved; 2, 4 and 5 partial.
+  - Test integrity: confirmed.
+- New findings (all bounded, class (b)):
+  - **F5-1 (MEDIUM).** `git reset --hard|--keep|--merge -` gives none. The NF-2 mapping makes `-` an operand, which suppresses the `reset --hard` item, and the tree policy drops `-` as a flag. It produced a state item at 2d5a295. Precondition: Git accepts `reset -`, which is not verified.
+  - **F5-2 (LOW to MEDIUM, regression).** `guard-writes.sh` `ask_unverified` exits before the later deny checks: look-alike, subagent `.git/hooks|info|config` and learning-agent. Under a failed lookup or a `GIT_*` hook environment, those denies become ask. The log's claim that "a deny is never lowered" is wrong for them.
+  - **F5-3 (MEDIUM; HIGH on Git without `GIT_NO_LAZY_FETCH`; not established).** `hook_git_is_tracked` runs plain `ls-files`, which expands a sparse index and so reads trees. In a partial clone with a cone sparse checkout, that can lazy-fetch: the NF-1 mechanism. It is reached only through the shell-edit hint, which never makes a decision.
+  - Existing gaps, not regressions:
+    - **P-1:** `=`-joined or abbreviated long options (`git reset --har`, `git switch --orph x`).
+    - **P-2:** `git stash -- <paths>` gives none.
+
+## Fix round 6 (owner-authorised 2026-10-12; narrowly scoped to F5-1, F5-2, F5-3, P-1, P-2)
+- **F5-2:** `guard-writes.sh` records an unverified lookup and asks only in `pass_write`, after every deny check.
+  - Coordinator reproduction with a failing-Git shim: at `8a037c5`, learning-agent token path and backend `.git/config` gave **ask**; now they give **deny**.
+  - Regression tests: the learning token path, a learning hard link outside `.agents/`, backend `.git/config`, and a look-alike store path under the token arm all deny, under a failing Git and under `GIT_DIR`. Unverified asks are kept for the coordinator and for a learning hard link inside `.agents/`.
+- **F5-3:** `hook_git_is_tracked` (`ls-files`) is removed. The hint is now given for any existing regular file, with no Git call. That is harmless context, never a decision.
+  - The hook-time Git interface is the four `rev-parse` lookups only. The NF-1 hostile-fixture shim test asserts exactly that, plus no `ls-files`, `cat-file`, `diff-*`, `hash-object`, `for-each-ref`, `show` or `log`.
+  - The coordinator's dynamic check (`scratchpad/f53/repro.sh`) **did not reproduce** a lazy fetch from `ls-files`. It used a `tree:0` partial clone with a cone sparse checkout and a sparse index, paths inside and outside the cone, Git 2.46.0, with and without `GIT_NO_LAZY_FETCH`. The finding was mooted by the removal, not confirmed.
+- **F5-1:** a hard, keep or merge `reset` asks whatever its target. Local Git 2.46.0 **rejects** `git reset --hard -` ("option '-' must come before non-option arguments"); the guard does not rely on that.
+- **P-1:** `git_long_option` matches abbreviated and `=`-joined long options, and is used only to add asks.
+  - The coordinator's comparison caught one exemption it had widened: `git restore --sta .` went ask → none. The exemption now needs the exact `--staged`/`-S`.
+  - Git 2.46.0 accepts `reset --har`, `switch --orph x`, `switch --orphan=x`, `checkout --orphan=x`, `checkout --for` and `restore --so=x .`; it rejects `reset --hard=x`.
+- **P-2:** a stash's action is its first operand before `--`. Only list, show, drop, clear, create and store get no item. Git accepts `git stash -- f` and `git stash push -- f`.
+- Verification (coordinator):
+  - `tests/run.sh`: 1884 passed, 0 failed.
+  - `scripts/check.sh`: `CHECK: PASSED`. Executed: plugin and marketplace validation, script syntax (`bash -n`), hook tests, template names, version consistency, context budget, model routing. **ShellCheck: skipped (not installed).**
+  - Marker exploit: 0 failures, no marker.
+  - Test integrity: `tests/run.sh` +89/−3; the 3 removed lines are the NF-1 interface assertion, replaced by a stricter one.
+- **Prompt burden:** 1205 corpus commands run through `8a037c5` and round 6, as coordinator and backend. 14 coordinator commands go none → ask, and nothing else changes. They are all the newly recognised forms: abbreviated or `=`-joined options, `reset … -`, and `stash -- <paths>`.
+- **ShellCheck options (owner approval needed; not done):** `brew install shellcheck` (0.11.0, a Homebrew bottle), or the Docker image `koalaman/shellcheck` against a read-only mount. Docker is present. Until one is approved, ShellCheck has never run on WORK-001.
+
 ## Finding status (verified facts only)
 | Finding | Status |
 | :- | :- |
