@@ -65,6 +65,11 @@ jobs:
           export HTTP_PROXY=http://127.0.0.1:9 HTTPS_PROXY=http://127.0.0.1:9
           export http_proxy=http://127.0.0.1:9 https_proxy=http://127.0.0.1:9
           export NO_PROXY= no_proxy=
+          # The tests put their fixture repositories in ${TMPDIR:-/tmp}. Under /tmp, cases whose literal
+          # destination is /tmp/... (fix round 3 N6(c)) can reach the fixture repository itself, which
+          # the guard rightly asks for; keep fixtures in the runner's temporary directory instead
+          # (outside the checkout and outside /tmp), as on a developer machine.
+          export TMPDIR="$RUNNER_TEMP"
           scripts/check.sh 2>&1 | tee "$RUNNER_TEMP/check.log"
           if grep -q 'shellcheck not installed; skipped' "$RUNNER_TEMP/check.log"; then
             echo "::error::ShellCheck was skipped; it is mandatory in CI"
