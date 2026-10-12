@@ -132,6 +132,79 @@ Detailed evidence for WORK-001 delivery. The spec's "Implementation state" keeps
   
   Reason: the byte-size proxy was invalid. Runtime is driven mainly by command count, and the original "8 KB" fixture was only about 3.5 KB. This is not acceptance of a regression and not a security trade. No size-triggered fallback, and no restructuring of security-sensitive classification for the old criterion unless profiling later finds a simple, maintainable optimisation. The chosen per-command bound and its measurement basis are recorded here once fix round 3 measures them.
 
+## Focused security re-review 3 (Opus, 38bfb88..f1fb238)
+- Verdict: **not ready to merge.**
+  - Resolved: NR-1, NR-2, NR-3a/b, NR-5, N6 Unicode, the H1 remainder.
+  - Partially resolved: NR-3c, NR-4, the H5 remainder, N2, N5, M3, N6(b), N6(c).
+  - Not resolved as implemented: N6(a).
+  - Held: F-T1-1 and F-T3-1 still closed; the guard never allows; Landra cases give none; no check weakened; the performance tests assert their fixtures; the `classify_invocation` skip is sound.
+- New findings:
+  - **RR3-1 (HIGH, confirmed by the coordinator with a marker fixture).** The N6(a) hook-time `git status` runs repository-configured programs before any approval and outside the sandbox (the ADR-0002 class): `core.fsmonitor`, the `post-index-change` hook, and a `*.state.json` clean filter. Markers were created for `git stash`, `git reset --hard`, `git restore .` and `git checkout -- .`; the decision was none. It also applies through `GIT_CONFIG_*` in the hook environment (committed settings `env`). It exists only on the unmerged branch.
+  - **RR3-2 (HIGH).** The fallback, now trivially reachable through NR-1 (`X=<NBSP>`, CR, CRLF), has no rules for the N6(a)/(b), NR-4 and protected-tree classes, which go from ask to none.
+  - **RR3-3 (HIGH).** The restricted-agent fallback treats `stash`, `branch`, `tag`, `worktree`, `remote` and `config` as reads, so a specialist's Git write goes from deny to none. That includes `config core.hooksPath`, which combines with RR3-1.
+  - **RR3-4 (medium).** N6(a) value-flag table: cherry-pick/revert `-x`/`-s` and checkout/switch/rebase `-m` eat the ref.
+  - **RR3-5 (medium).** Tag-versus-branch resolution; control characters in a ref.
+  - **RR3-6 (medium).** Stale checks after non-Git ref writes or unknown programs; checks run in the session cwd, not the command's directory.
+  - **RR3-7 (medium).** State coverage limited to tracked `*.state.json`; untracked or ignored state, `stash -u/-a` and no-path `clean`; whether state files are tracked, untracked or ignored is undocumented.
+  - **RR3-8 (medium).** `~`, `~+`, `cd -`, bare `cd` and `popd` are mis-resolved; N6(c) narrows tilde globs.
+  - **RR3-9 (low-medium).** Patch paths: C-style escapes, context-diff `***` headers, `patch -r`.
+  - **RR3-10 (medium).** Unlisted store writers: `yq -i`, `sort -o`, `uniq`, `xxd -r`, `ed`.
+  - **RR3-11 (low).** Git environment exports through `eval` or a sourced file.
+  - **RR3-12 (low).** Write-then-run keys are case-sensitive, and an overwritten known file is still trusted.
+  - **RR3-13 (low).** The worst-case hook time (about 54 s) approaches Claude Code's 60 s hook timeout, which means no decision.
+- Coordinator confirmation: `rereview3-probes.jsonl` gives 35 of 36 mismatches (the control-character case already asks). None is a v0.2 floor regression, because v0.2 is silent too. RR3-1 is confirmed with `scratchpad/rr3-1/check-hook-exec.sh`.
+
+## Owner rulings (2026-10-07): RR3-1 and RR3-3
+- **RR3-1: hardened plumbing only.** The N6(a) ruling ("ask only if state differs") and its low prompt rate stay.
+  - Hook-time Git is limited to plumbing that never runs filters, hooks, fsmonitor or external diff.
+  - All `GIT_*` variables are cleared, and dangerous configuration is forced off with `-c`.
+  - Every hook-time Git call (`rev-parse` and `ls-files` included) is hardened the same way.
+  - Proven by marker regression tests, including `GIT_CONFIG_*` in the hook environment. Any failure asks.
+  - Lesson (dogfood evidence): any information a guard gathers at hook time must be gathered without executing repository- or environment-controlled code; ADR-0002's boundary applies to the guard itself, not only to gates.
+- RR3-1 constraints (owner's full ruling):
+  - It is an architectural trust-boundary finding, not a blacklist case. A small, explicitly enumerated hardened-plumbing interface, whose safety property is that repository-controlled executable extension points cannot run.
+  - Inherited Git environment cleared, `GIT_CONFIG_*` included; extension points disabled; minimum plumbing; no porcelain.
+  - The same hardening for every hook-time Git invocation.
+  - Failure, ambiguity, unsupported state, or inability to establish non-execution asks, never none.
+  - No general safe-Git abstraction. Adversarial tests for fsmonitor, hooks, filters, textconv/external diff and injected configuration. The marker exploit is rerun independently before RR3-1 counts as fixed.
+  - **Stop condition:** if re-review shows the hardened plumbing can still execute repository-controlled code, do not add exceptions or another layer. Escalate for an architectural decision. The safer fallback is to remove hook-time Git inspection and accept the extra asks.
+- **RR3-3: keep deny in fallback** for a git-restricted specialist when the fallback positively identifies a Git write, including non-read forms of `stash`/`branch`/`tag`/`worktree`/`remote`/`config`. If the fallback cannot positively establish it, ask. Other fallback matches, including authority-store mentions, ask unless an independently valid deny rule applies.
+  - Distinction, documented: "unparseable ⇒ deny" is forbidden; "unparseable + an independently established prohibited operation ⇒ deny" is allowed.
+  - Regression tests cover CR, NBSP and the other fallback entry paths: no degradation from deny, and no false deny on ambiguous input.
+  - **General invariant:** degraded parsing may reduce certainty, but must not erase independently established security facts.
+- **Process rulings for this round:**
+  - Verification sequence: diff and test integrity, governing-install provenance, gates, the full probe corpus, the RR3-1 marker exploit, the performance tests with their preconditions, commit, then focused re-review of the exact head.
+  - **Stop condition:** if the next review finds another HIGH that is a new general bypass mechanism in the parsing or trust architecture, stop before another broad remediation round and escalate for architectural assessment.
+  - These rulings do not authorise a broader scope change or a weakening of existing controls.
+
+## Fix round 4 process notes
+- 2026-10-07/08: round 4 was stopped by a usage limit (HTTP 429) near the end; it was starting its extended RR3-1 exploit tests. Under the bounded recovery policy it was resumed once from the working tree. All partial work is unverified.
+- Gate-script change in round 4: `scripts/check.sh` adds `scripts/guard/*.sh` (the new hardened Git helper) to the `bash -n` and shellcheck globs. It strengthens the check and removes nothing. Flagged for re-review and CodeRabbit under the spec's "Gate scripts" rule.
+- 2026-10-12: the second resumption was also stopped by the weekly usage limit. A new session recovered from the working tree; no agent was relaunched. Round 4's working tree was found complete (tests for RR3-1 to RR3-13 present, gates green) and was verified by the coordinator as below.
+
+## Fix round 4 coordinator verification (2026-10-12, recovery session)
+- **Diff and test integrity:**
+  - changed files are the guard scripts (new: `guard/hook-git.sh`, `guard/fallback.jq`), `scripts/check.sh` (glob extension only), `tests/run.sh`, docs, changelog and log; no hook registration, agent, settings or protected file changed;
+  - `tests/run.sh`: 518 added and 0 removed against f1fb238, and 2195 added and 0 removed against `v0.2.0`, so every v0.2 case and every earlier-round case is kept with its expectation.
+- **Governing install:** the v0.2.0 cache is identical to tag `v0.2.0` (`git archive` and `diff -r`; the only extra is the runtime `.in_use` marker), the install record for this project is `b875f32` (= `v0.2.0`), and there is no `--plugin-dir`.
+- **Gates:** `tests/run.sh` exit 0 with 1756 passed and 0 failed; `scripts/check.sh` gave `CHECK: PASSED` (exit 0).
+- **Performance (corrected spec):** the fixture preconditions are asserted (8159 bytes; 141/281/561 commands). Measured: 148/211/346 ms, a marginal 471 µs per command (bound 1500 µs); the 250 KB heredoc took 150 ms.
+- **RR3-1, independent marker exploit** (coordinator-written; not derived from `tests/run.sh`):
+  - Hostile repository: fsmonitor; 10 hooks in `.git/hooks` and in `core.hooksPath`; clean/smudge, `process` filter, textconv and `diff.<driver>.command` on `.json`/`.txt`; `diff.external`; `core.sshCommand`, `alternateRefsCommand`, `gpg.program`, `core.pager` and `askPass`; an `ext::` promisor remote; the untracked cache; `include.path` re-enabling fsmonitor. Tracked files are stat-dirty, and there is an untracked state file.
+  - Precondition: porcelain `git status`/`git diff` on a copy fired clean, fsmonitor and procfilter.
+  - 18 Git commands (stash, reset, restore, checkout, switch, cherry-pick, revert, merge, rebase, clean …) × coordinator and backend × 6 hook environments (plain, `GIT_CONFIG_COUNT`, `GIT_CONFIG_PARAMETERS`, `GIT_EXTERNAL_DIFF`/`GIT_SSH_COMMAND`/`GIT_PAGER`, `GIT_DIR`, `GIT_CONFIG_GLOBAL`), plus `guard-writes.sh` and a direct call of every `hook_git_*` function.
+  - Result: **no marker in any run**.
+    - With content-identical state, 8 coordinator results were `none`. These are the N6(a) ruling ("ask only if state differs"), not a failure.
+    - With modified state, the same matrix gave 0 `none`/`allow` results for state-changing commands, and still no marker.
+  - Script: `scratchpad/rr3-1/exploit.sh` (session-scoped; not preserved).
+- **v0.2 floor: what the evidence covers.**
+  - Demonstrably preserved: every v0.2.0 test case (0 removed lines, all passing).
+  - Additionally tested: the round-4 cases for RR3-1 to RR3-13.
+  - **Not reconstructable:** the historical probe sets (674 probes and the 36 re-review-3 probes) and `compare.sh` were in a previous session's scratchpad, which has been wiped.
+  - Partial substitute: the 1145 distinct commands from the `tests/run.sh` tables, run through the v0.2.0 cache guard and the working-tree guard in one feature-branch fixture (coordinator and backend). This gave 33 coordinator and 30 backend v0.2 ask → none, all of them commands that the suite exercises and passes. The ones listed are proven-data or out-of-scope shapes (Landra instances, GET release URLs, `echo`/`grep` text, push to a non-default branch). Each one's expected value was not individually re-read (see the dogfood note).
+  - The historical probe coverage is an open evidence gap, not claimed.
+- **Dogfood observation (2026-10-12):** a read-only `grep -nF` over `tests/run.sh`, with literal reserved-keyword phrases as patterns, was rejected before execution. The root cause was not verified (guard hook, classifier or user rejection). Per the owner, it was not retried or rephrased; inspection continued with the Read tool.
+
 ## Finding status (verified facts only)
 | Finding | Status |
 | :- | :- |
@@ -141,7 +214,9 @@ Detailed evidence for WORK-001 delivery. The spec's "Implementation state" keeps
 | N1–N6 (including the owner's N6 ruling), H1/H5/M1/M3 remainders | Open: fix round 2 implemented. Coordinator verification (independent of the agent's report; it was produced while the auto-mode safety classifier was unavailable):<br>- diff limited to the guard scripts, `tests/run.sh`, docs, changelog and log; no protected or system file changed;<br>- the only removed test lines are the 8 KB fixture generator and info line, replaced by a genuine 8159-byte fixture with a size assertion;<br>- the installed v0.2 cache is identical to tag `v0.2.0`, the install record is `b875f32`, and there is no `--plugin-dir`;<br>- `GATE fast: PASSED (exit 0) command: tests/run.sh` (1240 passed);<br>- `compare.sh` gives 0 mismatches and 0 v0.2-ask→none regressions on all four probe sets (552 probes); the probe-file edit changed only the two N6 lines (`any`→`ask`).<br>Focused re-review pending; not resolved until it confirms. |
 | Re-review 2 verdicts at 38bfb88 | **Resolved:** N1 (listed shapes), N4, M1, N6 log rotation. **Open:** N2 (restricted-agent Git environment), N3, N5, N6 Unicode, N6 owner ruling (partial), H1, H5, M3 remainders. |
 | NR-1 to NR-5, H5 environment, N6(a)(b)(c) rulings | Open: fix round 3 implemented. Coordinator verification:<br>- diff limited to the guard scripts and `tests/run.sh` (plus coordinator docs, spec and log); no protected or system file changed, and `guard-writes.sh` is unchanged;<br>- the only removed test lines are an outdated comment about the old 8 KB target;<br>- the v0.2 cache is identical to `v0.2.0`, the install record is `b875f32`, and there is no `--plugin-dir`;<br>- `GATE fast: PASSED (exit 0) command: tests/run.sh` (1409 passed);<br>- `compare.sh` gives 0 mismatches and 0 v0.2-ask→none regressions on all five probe sets (674 probes);<br>- my 27 original re-review-2 expectations are kept or strengthened (three NR-3c write-then-run cases ask→deny; boundary lines set to the owner's rulings).<br>Focused re-review pending. |
-| N6 boundary (a), (b), (c) | Owner ruled 2026-10-07; implemented in fix round 3; verification as above; re-review pending |
+| N6 boundary (a), (b), (c) | Owner ruled 2026-10-07; implemented in fix round 3. Re-review 3: (a) **not resolved** (RR3-1, RR3-4 to RR3-7); (b), (c) partially resolved (RR3-8, RR3-9) |
+| Re-review 3 verdicts at f1fb238 | **Resolved:** NR-1, NR-2, NR-3a/b, NR-5, N6 Unicode, H1 remainder. **Open:** NR-3c, NR-4, H5, N2, N5, M3, N6(a)/(b)/(c), RR3-1 to RR3-13 |
+| RR3-1 to RR3-13 and the re-review-3 remainders | Open: fix round 4 implemented and coordinator-verified (see "Fix round 4 coordinator verification"); RR3-1 independent marker exploit: no repository program ran. Focused re-review of the round-4 commit pending. |
 | Performance (spec: p95 < 150 ms up to 8 KB) | **Not met**; see "Performance analysis". Not accepted; an owner recommendation is pending. |
 
 ## Owner ruling N6 (2026-10-07): ask, narrowly

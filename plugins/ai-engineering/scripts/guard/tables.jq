@@ -60,8 +60,9 @@ def rules: [
 
 # Programs that read SQL (or database shell commands) from arguments and standard input.
 def sql_clients: ["psql", "mysql", "mariadb", "sqlite3", "mongosh", "sqlcmd", "clickhouse-client", "pgcli", "mycli", "usql"];
-# Programs whose inline code or standard input is scanned for destructive SQL only.
-def interpreters_regex: "^(python[0-9.]*|pypy3?|node|nodejs|deno|bun|ruby|perl|php|lua|Rscript|tsx|ts-node)$";
+# Programs whose inline code or standard input is scanned for destructive SQL only. Matched
+# against lower-case program names (classify.jq program_of), so Rscript is spelled rscript.
+def interpreters_regex: "^(python[0-9.]*|pypy3?|node|nodejs|deno|bun|ruby|perl|php|lua|rscript|tsx|ts-node)$";
 # Programs that execute text as shell commands.
 def shells: ["bash", "sh", "zsh", "dash", "ksh", "ash"];
 
@@ -227,6 +228,22 @@ def git_operand_data_subcommands: ["add", "rm", "mv", "diff", "show", "blame", "
 def git_message_subcommands: ["commit", "tag", "notes"];
 # gh release subcommands that only read.
 def gh_release_read_subcommands: ["download", "view", "list"];
+
+# ---------------------------------------------------------------- file writers (authority store)
+# Options whose value is a file the program writes (RR3-10): `-o FILE`, `-oFILE`, `--output=FILE`.
+# policy.jq command_write_targets judges each value like any other write target.
+def output_option_flags: {
+  "sort": ["-o", "--output"], "gsort": ["-o", "--output"],
+  "base64": ["-o", "--output"],
+  "less": ["-o", "-O", "--log-file", "--LOG-FILE"],
+  "iconv": ["-o", "--output"],
+  "patch": ["-o", "--output", "-r", "--reject-file"]
+};
+# Programs that rewrite every file operand in place (or next to it, without the suffix): a store
+# operand is a store write unless the output goes to standard output.
+def in_place_compressors: ["gzip", "gunzip", "bzip2", "bunzip2", "xz", "unxz", "zstd", "unzstd"];
+# Editors that write the files they are given (scripted or with an initial command).
+def file_editors: ["ed", "red", "ex", "vi", "vim", "nvim", "view"];
 
 # ---------------------------------------------------------------- executing constructs
 # An inert-looking program with one of these is never data, and the shell text it runs is parsed.

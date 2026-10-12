@@ -1724,6 +1724,524 @@ expect_equal "fix round 3: a large floor text with a look-alike keyword asks" as
 )
 expect_equal "lib: classify_command_impact sees the fix-round-3 classifications (exit code identifies the failed check)" 0 "$?"
 
+# ---------------------------------------------------------------- WORK-001 fix round 4 (re-review 3 RR3-1 to RR3-13)
+# Table cases are "agent|expected|command" (agents as above); "\n" is a newline and @NAME@ a
+# character expand_characters supplies. First every probe of re-review 3 (rereview3-probes.jsonl),
+# in the agent repository (branch feature, so `git checkout feature` alone is no decision). Two
+# probes drop the `\n` of their printf format, which this table would turn into a newline.
+fix4_table() {
+  local label="$1" directory="$2" agent expected command_text
+  while IFS='|' read -r agent expected command_text; do
+    [ -n "$expected" ] || continue
+    command_text="$(expand_characters "$command_text")"
+    expect_equal "fix round 4 $label ($agent): $command_text" "$expected" "$(decision_of "$(agent_output "$command_text" "$directory" "$agent")")"
+  done
+}
+fix4_table probes "$agent_repository" <<'CASES'
+m|ask|git pull && X=@NBSP@
+m|ask|git pull; X=@CR@
+m|ask|git rm -r . && X=@NBSP@
+m|ask|cp -r src/. . && X=@NBSP@
+m|ask|git apply unknown.patch && X=@NBSP@
+m|ask|git checkout no-such-ref && X=@NBSP@
+b|deny|git config core.hooksPath h && X=@NBSP@
+b|deny|git stash && X=@NBSP@
+b|deny|git remote set-url origin x && X=@NBSP@
+b|deny|git branch -f main HEAD && X=@NBSP@
+m|ask|git cherry-pick -x no-such-ref
+m|ask|git cherry-pick -s no-such-ref
+m|ask|git revert -s no-such-ref
+m|ask|git checkout -m no-such-ref
+m|ask|git switch -m no-such-ref
+m|ask|git checkout ':/init\nx'
+m|ask|printf '%s' 0000000000000000000000000000000000000000 > .git/refs/heads/feature && git checkout feature
+m|ask|make sync && git checkout feature
+m|ask|git clean -f
+m|ask|git clean -f .
+m|ask|git stash -u
+m|ask|git stash --all
+m|ask|tar -xf a.tar -C ~+
+m|ask|cp -r src/. ~+
+m|ask|git -C ~+ checkout HEAD -- .
+m|ask|cd sub && cd - && cp -r src/. .
+m|ask|cp -r x ~/*
+m|deny|cat > p.diff <<'EOF'\n--- "a/.agents/specs/active/W.state\056json"\n+++ "b/.agents/specs/active/W.state\056json"\n@@ -1 +1 @@\n-a\n+b\nEOF\ngit apply p.diff
+m|deny|cat > p.diff <<'EOF'\n*** .agents/specs/active/WORK-9.state.json\n--- other/x\n***************\nEOF\npatch -p0 < p.diff
+m|deny|yq -i '.status="approved"' .agents/specs/active/WORK-9.state.json
+m|deny|sort -o .agents/specs/active/WORK-9.state.json <<'EOF'\n{}\nEOF
+m|deny|uniq in.json .agents/specs/active/WORK-9.state.json
+m|deny|xxd -r in.hex .agents/specs/active/WORK-9.state.json
+m|deny|ed -s .agents/specs/active/WORK-9.state.json <<'EOF'\n1d\nw\nEOF
+b|deny|eval 'export GIT_EXTERNAL_DIFF=./x' && git diff
+b|deny|printf 'export GIT_EXTERNAL_DIFF=./x' > e && . ./e && git diff
+m|none|git checkout feature
+CASES
+
+# RR3-1 (HIGH, owner ruling: hardened plumbing only). The hooks' Git (guard/hook-git.sh) must never
+# run a repository- or environment-controlled program. Fixture: every extension point Git offers is
+# configured to touch a marker: fsmonitor, every hook (in .git/hooks and through core.hooksPath), a
+# clean and smudge filter and a textconv driver on the state files, and an external diff with
+# trustExitCode. The state file is stat-dirty (same content, older modification time), which made
+# the earlier `git status` re-hash it through the filter. Each hook-time check (state checks, the
+# branch, root and common-directory lookups, the shell-edit hint, guard-writes.sh) must leave no
+# marker and reach the ruled decision.
+hostile_repository="$(new_repository hostile-repo main)"
+hostile_markers="$work_directory/hostile-markers" hostile_programs="$work_directory/hostile-programs"
+mkdir -p "$hostile_markers" "$hostile_programs/hooks" "$hostile_repository/.agents/specs/active" "$hostile_repository/src"
+printf '{"status":"draft"}\n' >"$hostile_repository/.agents/specs/active/WORK-1.state.json"
+printf 'a\n' >"$hostile_repository/src/a.txt"
+commit_hostile_fixture() { git -C "$hostile_repository" add -A && git -C "$hostile_repository" -c user.name=test -c user.email=test@example.com commit -q -m "$1"; }
+commit_hostile_fixture state
+git -C "$hostile_repository" branch same && git -C "$hostile_repository" branch differs
+git -C "$hostile_repository" checkout -q same && printf 'b\n' >"$hostile_repository/src/a.txt" && commit_hostile_fixture "same state"
+git -C "$hostile_repository" checkout -q differs && printf '{"status":"approved"}\n' >"$hostile_repository/.agents/specs/active/WORK-1.state.json" && commit_hostile_fixture "state differs"
+git -C "$hostile_repository" checkout -q main
+# Each program only touches its marker; the filters pass content through, fsmonitor and the external diff fail.
+make_marker_program() { printf '#!/bin/sh\ntouch "%s/%s"\n%s\n' "$hostile_markers" "$1" "$2" >"$hostile_programs/$1" && chmod +x "$hostile_programs/$1"; }
+make_marker_program fsmonitor 'exit 1'
+make_marker_program filter 'cat'
+make_marker_program textconv 'cat "$1"'
+make_marker_program external-diff 'exit 1'
+printf '#!/bin/sh\ntouch "%s/hook-$(basename "$0")"\n' "$hostile_markers" >"$hostile_programs/hook" && chmod +x "$hostile_programs/hook"
+for hook_name in post-index-change post-checkout post-merge post-rewrite reference-transaction pre-commit pre-auto-gc fsmonitor-watchman pre-push; do
+  cp "$hostile_programs/hook" "$hostile_repository/.git/hooks/$hook_name"
+  cp "$hostile_programs/hook" "$hostile_programs/hooks/$hook_name"
+done
+git -C "$hostile_repository" config core.fsmonitor "$hostile_programs/fsmonitor"
+git -C "$hostile_repository" config filter.mark.clean "$hostile_programs/filter"
+git -C "$hostile_repository" config filter.mark.smudge "$hostile_programs/filter"
+git -C "$hostile_repository" config diff.conv.textconv "$hostile_programs/textconv"
+git -C "$hostile_repository" config diff.external "$hostile_programs/external-diff"
+git -C "$hostile_repository" config diff.trustExitCode true
+printf '*.json filter=mark diff=conv\n*.txt filter=mark diff=conv\n' >"$hostile_repository/.git/info/attributes"
+touch -t 202001010000 "$hostile_repository/.agents/specs/active/WORK-1.state.json"
+rm -f "$hostile_markers"/*
+# The fixture is genuine: Git's own porcelain does run these programs here (checked through a copy
+# of the repository, so the fixture itself stays untouched by porcelain).
+cp -R "$hostile_repository" "$work_directory/hostile-copy"
+git -C "$work_directory/hostile-copy" status --porcelain >/dev/null 2>&1
+if [ -e "$hostile_markers/fsmonitor" ] || [ -e "$hostile_markers/filter" ]; then pass; else fail "fix round 4 RR3-1: the hostile fixture does not run its programs under git status ($(ls "$hostile_markers" | tr '\n' ' '))"; fi
+rm -rf "$work_directory/hostile-copy"; rm -f "$hostile_markers"/*
+hostile_markers_left() { ls "$hostile_markers" | tr '\n' ' '; }
+# Runs a table against the hostile repository: the decision, then no marker. Extra arguments are
+# NAME=value assignments for the hook's own environment.
+hostile_table() {
+  local label="$1" agent expected command_text output
+  shift
+  while IFS='|' read -r agent expected command_text; do
+    [ -n "$expected" ] || continue
+    command_text="$(expand_characters "$command_text")"
+    output="$(agent_input "$command_text" "$hostile_repository" "$agent" | env "$@" "$scripts/guard-bash.sh")"
+    expect_equal "fix round 4 RR3-1 $label ($agent): $command_text" "$expected" "$(decision_of "$output")"
+    expect_equal "fix round 4 RR3-1 $label: no repository program ran for: $command_text" "" "$(hostile_markers_left)"
+    rm -f "$hostile_markers"/*
+  done
+}
+hostile_table "plain environment" <<'CASES'
+m|none|git stash
+m|none|git reset --hard
+m|none|git restore .
+m|none|git checkout -- .
+m|none|git checkout -f
+m|ask|git switch differs
+m|none|git switch same
+m|ask|git merge differs
+m|none|git merge same
+m|ask|git cherry-pick differs
+m|none|git cherry-pick same
+m|none|git checkout same
+m|ask|git push origin feature
+m|ask|cp -R vendor/. .
+m|deny|echo x > .git/ai-engineering/tokens/t
+b|none|echo hi > src/a.txt
+b|deny|git stash && X=@NBSP@
+CASES
+git -C "$hostile_repository" config core.hooksPath "$hostile_programs/hooks"
+hostile_table "core.hooksPath" <<'CASES'
+m|none|git stash
+m|ask|git switch differs
+m|none|git switch same
+CASES
+# Injected configuration in the hook's own environment (a committed settings env block): the
+# hook's Git runs without it, so it cannot see what the command will see, and asks.
+hostile_table "GIT_CONFIG_COUNT" GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor "GIT_CONFIG_VALUE_0=$hostile_programs/fsmonitor" <<'CASES'
+m|ask|git stash
+m|ask|git reset --hard
+m|ask|git switch same
+m|ask|git cherry-pick same
+m|ask|git push origin feature
+CASES
+hostile_table "GIT_CONFIG_PARAMETERS" "GIT_CONFIG_PARAMETERS='core.fsmonitor=$hostile_programs/fsmonitor' 'diff.external=$hostile_programs/external-diff'" <<'CASES'
+m|ask|git restore .
+m|ask|git switch same
+CASES
+hostile_table "GIT_DIR" "GIT_DIR=$hostile_repository/.git" <<'CASES'
+m|ask|git switch same
+CASES
+# GIT_EXTERNAL_DIFF changes no repository or configuration: the checks run, without it.
+hostile_table "GIT_EXTERNAL_DIFF" "GIT_EXTERNAL_DIFF=$hostile_programs/external-diff" "GIT_PAGER=$hostile_programs/external-diff" <<'CASES'
+m|none|git stash
+m|none|git checkout -- .
+m|none|git switch same
+m|ask|git switch differs
+m|none|git cherry-pick same
+m|ask|git cherry-pick differs
+CASES
+# guard-writes.sh: its common-directory and top-level lookups use the same interface.
+while IFS='|' read -r expected agent target; do
+  [ -n "$expected" ] || continue
+  output="$(write_input "$agent" "$target" "$hostile_repository" | env "GIT_CONFIG_PARAMETERS='core.fsmonitor=$hostile_programs/fsmonitor'" "$scripts/guard-writes.sh")"
+  expect_equal "fix round 4 RR3-1 guard-writes: $agent -> $target" "$expected" "$(decision_of "$output")"
+  expect_equal "fix round 4 RR3-1 guard-writes: no repository program ran for: $target" "" "$(hostile_markers_left)"
+  rm -f "$hostile_markers"/*
+done <<CASES
+none|ai-engineering:backend|$hostile_repository/src/new.txt
+none|ai-engineering:learning|$hostile_repository/.agents/learnings/x.md
+none||$hostile_repository/x/ai-engineering/tokens/t
+deny||$hostile_repository/.git/ai-engineering/tokens/t
+CASES
+expect_equal "fix round 4 RR3-1: the hostile fixture's state file is still stat-dirty and unchanged" '{"status":"draft"}' "$(cat "$hostile_repository/.agents/specs/active/WORK-1.state.json")"
+
+# RR3-2: the fallback (odd spaces, CR, a dynamic program, an oversized command, a parser limit or
+# timeout) keeps the N6(a)/(b), NR-4 and whole-tree classes: their words ask. Main session.
+fix4_table "RR3-2 fallback" "$agent_repository" <<'CASES'
+m|ask|git stash && X=@NBSP@
+m|ask|git reset --hard && X=@NBSP@
+m|ask|git restore . && X=@NBSP@
+m|ask|git checkout -- . && X=@NBSP@
+m|ask|git switch other && X=@CR@
+m|ask|git merge other && X=@EMSP@
+m|ask|git rebase other && X=@IDSP@
+m|ask|git cherry-pick other && X=@FF@
+m|ask|git revert other && X=@VT@
+m|ask|git clean -fd && X=@NBSP@
+m|ask|git mv a b && X=@NBSP@
+m|ask|git am mails.mbox && X=@NBSP@
+m|ask|git read-tree HEAD && X=@NBSP@
+m|ask|git checkout-index -a && X=@NBSP@
+m|ask|git update-index --index-info && X=@NBSP@
+m|ask|git hash-object -w --stdin-paths && X=@NBSP@
+m|ask|patch -p1 < fix.patch && X=@NBSP@
+m|ask|cp -R src/. . && X=@NBSP@
+m|ask|cp -a src/. . && X=@NBSP@
+m|ask|rsync -a src/ . && X=@NBSP@
+m|ask|ditto src . && X=@NBSP@
+m|ask|tar -xf a.tar && X=@NBSP@
+m|ask|unzip a.zip && X=@NBSP@
+m|ask|cpio -i < a.cpio && X=@NBSP@
+m|ask|pax -r < a.pax && X=@NBSP@
+m|ask|7z x a.7z && X=@NBSP@
+m|ask|$(echo ls) x; git stash
+m|none|cp a b && Y=@NBSP@
+m|none|tar -cf a.tar src && Y=@NBSP@
+m|none|git status && X=@NBSP@
+m|none|git commit -m x && X=@NBSP@
+o|none|git commit -m x && X=@NBSP@
+CASES
+
+# RR3-3 owner ruling: "unparseable => deny" is forbidden; "unparseable + an independently established
+# prohibited operation => deny" is allowed. A specialist's Git write that the fallback establishes
+# directly (a literal git in command position, a literal write subcommand or non-read form) is
+# denied on every fallback path; anything it cannot establish asks and is never denied.
+fix4_table "RR3-3 fallback deny" "$agent_repository" <<'CASES'
+b|deny|git stash && X=@CR@
+b|deny|git stash && X=@EMSP@
+b|deny|git stash && X=@IDSP@
+b|deny|git stash && X=@FF@
+b|deny|git stash && X=@VT@
+b|deny|git stash && X=@ZWSP@
+b|deny|git stash\nX=@NBSP@
+b|deny|git stash\necho "unclosed
+b|deny|$(echo ls) x; git stash
+b|deny|git stash push -m wip && X=@NBSP@
+b|deny|git stash pop && X=@NBSP@
+b|deny|git commit -m x && X=@NBSP@
+b|deny|git push origin feature && X=@NBSP@
+b|deny|git checkout other && X=@NBSP@
+b|deny|git -C sub commit -m x && X=@NBSP@
+b|deny|/usr/bin/git commit -m x && X=@NBSP@
+b|deny|GIT_PAGER=cat git commit -m x && X=@NBSP@
+b|deny|if git commit -m x; then :; fi; X=@NBSP@
+b|deny|(git stash) && X=@NBSP@
+b|deny|{ git stash; } && X=@NBSP@
+b|deny|ls && git stash && X=@NBSP@
+b|deny|git branch new-branch && X=@NBSP@
+b|deny|git branch -D old && X=@NBSP@
+b|deny|git tag v1 && X=@NBSP@
+b|deny|git tag -d v1 && X=@NBSP@
+b|deny|git worktree add ../x && X=@NBSP@
+b|deny|git remote add o https://example.com/r.git && X=@NBSP@
+b|deny|git config --unset core.pager && X=@NBSP@
+b|deny|git config set core.pager less && X=@NBSP@
+f|deny|git stash && X=@NBSP@
+p|deny|git stash && X=@NBSP@
+q|deny|git stash && X=@NBSP@
+s|deny|git stash && X=@NBSP@
+l|deny|git stash && X=@NBSP@
+m|ask|git stash && X=@CR@
+o|ask|git stash && X=@NBSP@
+CASES
+fix4_table "RR3-3 fallback not established" "$agent_repository" <<'CASES'
+b|ask|git "$SUB" x && X=@NBSP@
+b|ask|$G stash && X=@NBSP@
+b|ask|echo "git commit -m x" && X=@NBSP@
+b|ask|echo 'git stash' && X=@NBSP@
+b|ask|cat <<'EOF'\ngit commit -m x\nEOF\nX=@NBSP@
+b|ask|bash -c 'git stash' && X=@NBSP@
+b|ask|# git commit -m x\nX=@NBSP@
+b|ask|git config core.pager && X=@NBSP@
+b|ask|git frobnicate && X=@NBSP@
+b|ask|git stash && echo "unclosed
+b|ask|echo a) git commit -m x
+b|ask|git@NBSP@stash
+b|ask|git branch && X=@NBSP@
+b|none|git status && X=@NBSP@
+b|none|git log --oneline && X=@NBSP@
+CASES
+# The fallback deny names the operation and the coordinator, and is logged as a fallback deny.
+reason="$(agent_output "git stash && X=$no_break_space" "$agent_repository" b | jq -r '.hookSpecificOutput.permissionDecisionReason')"
+expect_contains "fix round 4 RR3-3: the fallback deny names the Git write" "git stash is not on the read-only Git list for this agent: the coordinator owns Git" "$reason"
+expect_equal "fix round 4 RR3-3: the fallback deny is logged as a fallback decision" "deny fallback git-write-by-subagent" \
+  "$(tail -n 1 "$agent_repository/.git/ai-engineering/guard-log.jsonl" | jq -r '[.decision, .parseMode, (.classes | index("git-write-by-subagent") | if . == null then "missing" else "git-write-by-subagent" end)] | join(" ")')"
+# Oversized commands (over the 256 KB parser budget) and a parser limit: still denied when established.
+{ printf 'git stash && echo '; i=0; while [ "$i" -lt 27000 ]; do printf 'aaaaaaaaaa'; i=$((i + 1)); done; } >"$work_directory/oversize-word.txt"
+{ printf "cat <<'EOF'\n"; i=0; while [ "$i" -lt 9000 ]; do printf 'line %s of inert padding text\n' "$i"; i=$((i + 1)); done; printf 'EOF\ngit stash\n'; } >"$work_directory/oversize-heredoc.txt"
+{ printf 'git stash\n'; i=0; while [ "$i" -lt 3000 ]; do printf '$(('; i=$((i + 1)); done; printf 'x\n'; } >"$work_directory/parser-limit.txt"
+for fixture in oversize-word oversize-heredoc parser-limit; do
+  fixture_bytes="$(wc -c <"$work_directory/$fixture.txt" | tr -d ' ')"
+  case "$fixture" in oversize-*) if [ "$fixture_bytes" -gt 262144 ]; then pass; else fail "fix round 4 RR3-3: $fixture is only $fixture_bytes bytes"; fi ;; esac
+  for agent in ai-engineering:backend ""; do
+    jq -n --rawfile command "$work_directory/$fixture.txt" --arg cwd "$agent_repository" --arg agent "$agent" \
+      '{tool_input: {command: $command}, cwd: $cwd} + (if $agent == "" then {} else {agent_type: $agent} end)' >"$work_directory/$fixture.json"
+    expect_equal "fix round 4 RR3-3: $fixture ($fixture_bytes bytes, agent ${agent:-main})" "$([ -n "$agent" ] && echo deny || echo ask)" \
+      "$(decision_of "$("$scripts/guard-bash.sh" <"$work_directory/$fixture.json")")"
+  done
+done
+# Soft uncertainty: the parse is sound, so its deny stands.
+fix4_table "RR3-3 soft uncertainty" "$agent_repository" <<'CASES'
+b|deny|echo x > r.sh; ./build.sh; git stash
+b|deny|echo x > r.sh; ./build.sh; git config core.hooksPath h
+CASES
+
+# RR3-4 to RR3-7 against the state fixture (main holds WORK-1 in draft; same: only src changes;
+# differs: the state is approved). Additions: merged, a merge of differs into main (parent 1 holds
+# the draft state, parent 2 the approved one); amb, a branch at same and a tag at differs; tags at
+# same and differs; nostate and symlinked (.agents/specs replaced by a symbolic link); spec-notes
+# (only a spec Markdown file changes); and a second worktree, detached at same.
+git -C "$state_fixture" checkout -q -b merged main
+git -C "$state_fixture" -c user.name=test -c user.email=test@example.com merge -q --no-ff -m merged differs
+git -C "$state_fixture" checkout -q -b nostate main
+printf 'notes\n' >"$state_fixture/.agents/specs/active/notes.md"
+git -C "$state_fixture" rm -q .agents/specs/active/WORK-1.state.json && commit_state_fixture "no state"
+git -C "$state_fixture" checkout -q -b symlinked nostate
+rm -rf "$state_fixture/.agents/specs" && mkdir -p "$state_fixture/elsewhere" && printf 'x\n' >"$state_fixture/elsewhere/keep.txt"
+ln -s ../elsewhere "$state_fixture/.agents/specs" && commit_state_fixture "specs is a link"
+git -C "$state_fixture" checkout -q -b spec-notes main
+printf 'spec\n' >"$state_fixture/.agents/specs/active/WORK-1.md" && commit_state_fixture "spec notes only"
+git -C "$state_fixture" checkout -q main
+git -C "$state_fixture" branch amb same && git -C "$state_fixture" tag amb differs
+git -C "$state_fixture" tag tag-same same && git -C "$state_fixture" tag tag-differs differs
+state_worktree="$work_directory/state-worktree"
+git -C "$state_fixture" worktree add -q --detach "$state_worktree" same
+if [ "$(git -C "$state_fixture" rev-parse --abbrev-ref HEAD)" = main ] && [ -z "$(git -C "$state_fixture" status --porcelain)" ] \
+  && [ "$(git -C "$state_fixture" rev-parse merged^2)" = "$(git -C "$state_fixture" rev-parse differs)" ] \
+  && [ "$(git -C "$state_fixture" ls-tree symlinked .agents/specs | cut -c1-6)" = 120000 ] && [ -d "$state_worktree/src" ]; then pass
+else fail "fix round 4: the state fixture additions are not as intended"; fi
+fix4_table "RR3-4 to RR3-7" "$state_fixture" <<'CASES'
+m|none|git rebase -m same
+m|ask|git rebase -m differs
+m|none|git checkout -m same
+m|ask|git checkout -m differs
+m|none|git switch -m same
+m|none|git cherry-pick -x same
+m|ask|git cherry-pick -x differs
+m|none|git cherry-pick -s same
+m|none|git revert -s same
+m|ask|git revert -s differs
+m|ask|git cherry-pick -m 1 merged
+m|none|git cherry-pick -m 2 merged
+m|none|git cherry-pick --mainline=2 merged
+m|none|git cherry-pick -m2 merged
+m|ask|git revert -m 1 merged
+m|ask|git cherry-pick -m x merged
+m|ask|git checkout amb
+m|ask|git switch amb
+m|ask|git merge amb
+m|none|git merge tag-same
+m|ask|git merge tag-differs
+m|none|git checkout tag-same
+m|ask|git switch symlinked
+m|ask|git cherry-pick symlinked
+m|none|git cherry-pick spec-notes
+m|none|git switch spec-notes
+m|ask|printf '%s' 0 > .git/refs/heads/same && git switch same
+m|ask|make sync && git switch same
+m|ask|npm install && git switch same
+m|ask|X=$(make sync) git switch same
+m|none|echo start && git switch same
+m|none|cd src && git switch same
+m|none|cd src && cd .. && git switch same
+m|ask|cd ~ && git switch same
+m|ask|cd - && git switch same
+m|ask|cd "$D" && git switch same
+m|ask|GIT_DIR=x git switch same
+m|ask|export GIT_INDEX_FILE=x; git switch same
+m|none|GIT_PAGER=cat git switch same
+CASES
+reason="$(agent_output 'git checkout amb' "$state_fixture" m | jq -r '.hookSpecificOutput.permissionDecisionReason')"
+expect_contains "fix round 4 RR3-5: the ask names the ambiguous ref" "amb is ambiguous" "$reason"
+reason="$(agent_output 'git cherry-pick -m 1 merged' "$state_fixture" m | jq -r '.hookSpecificOutput.permissionDecisionReason')"
+expect_contains "fix round 4 RR3-4: the ask names the parent compared" "differ between merged^1 and merged" "$reason"
+# RR3-6: the check runs in the command's directory; another worktree is outside the session repository.
+expect_equal "fix round 4 RR3-6: cd into a second worktree asks" ask "$(decision_of "$(agent_output "cd $state_worktree && git switch same" "$state_fixture" m)")"
+expect_equal "fix round 4 RR3-6: in the second worktree, a merge with identical state is no decision" none "$(decision_of "$(agent_output 'git merge main' "$state_worktree" m)")"
+expect_equal "fix round 4 RR3-6: in the second worktree, its own HEAD is compared" ask "$(decision_of "$(agent_output 'git switch differs' "$state_worktree" m)")"
+expect_equal "fix round 4 RR3-6: from a subdirectory, the check runs there" none "$(decision_of "$(agent_output 'git switch same' "$state_fixture/src" m)")"
+expect_equal "fix round 4 RR3-6: from a subdirectory, cd .. stays in the session repository" none "$(decision_of "$(agent_output 'cd .. && git switch same' "$state_fixture/src" m)")"
+# RR3-7: untracked state (whether state files are tracked is open until WORK-002).
+printf '{"status":"approved"}\n' >"$state_fixture/.agents/specs/active/WORK-2.state.json"
+fix4_table "RR3-7 untracked state" "$state_fixture" <<'CASES'
+m|ask|git checkout -f same
+m|ask|git switch --discard-changes same
+m|ask|git checkout -f
+m|none|git switch same
+m|none|git stash
+m|ask|git stash -u
+m|ask|git stash push --include-untracked
+m|ask|git stash -a
+m|ask|git clean -f
+m|ask|git clean -f .
+m|none|git clean -f src
+CASES
+rm -f "$state_fixture/.agents/specs/active/WORK-2.state.json"
+fix4_table "RR3-7 clean tree" "$state_fixture" <<'CASES'
+m|none|git checkout -f same
+m|none|git checkout -f
+CASES
+
+# RR3-8: ~, ~+, ~-, ~user, cd -, a bare cd, popd and pushd with no directory are unresolved; a tilde
+# is never narrowed (N6(c)); `..` never cancels an unresolved component.
+fix4_table "RR3-8" "$agent_repository" <<'CASES'
+m|ask|cd && cp -R x .
+m|ask|cd ~ && cp -R x .
+m|ask|cd ~/.. && cp -R x repo-copy
+m|ask|pushd /tmp && popd && cp -R x .
+m|ask|pushd +1 && cp -R x .
+m|ask|cd "$D" && cd .. && cp -R x out
+m|ask|cp -R x ~user/out
+m|ask|tar -xf a.tar -C ~-
+m|deny|cd ~ && echo x > .agents/specs/active/WORK-9.state.json
+m|none|cd src && cp -R x out
+m|none|cp -R x build/*/
+CASES
+
+# RR3-9: patch names in C-style quotes are decoded, context-diff headers are read, and patch's
+# reject and output files are write targets.
+fix4_table "RR3-9" "$agent_repository" <<'CASES'
+m|deny|git apply <<'EOF'\ndiff --git "a/.agents/specs/active/W.state\056json" "b/.agents/specs/active/W.state\056json"\nEOF
+m|deny|git apply <<'EOF'\nrename from src/x\nrename to ".agents/specs/active/W\056state.json"\nEOF
+m|deny|patch -p1 <<'EOF'\n--- "a/.agents/specs/active/W.\303\251.json"\n+++ "b/.agents/specs/active/W.\303\251.json"\nEOF
+m|deny|patch -p1 --reject-file=.agents/specs/active/WORK-9.state.json < fix.patch
+m|deny|patch -p1 -o .agents/specs/active/WORK-9.state.json < fix.patch
+m|deny|patch -p1 -o.agents/specs/active/WORK-9.state.json < fix.patch
+m|none|patch -p1 <<'EOF'\n--- "a/src/my file"\n+++ "b/src/my file"\nEOF
+m|none|patch -p0 <<'EOF'\n*** src/x\n--- src/x\n***************\nEOF
+CASES
+
+# RR3-10: more programs that write a named file deny for every caller when it is the store.
+fix4_table "RR3-10" "$agent_repository" <<'CASES'
+m|deny|yq --inplace '.a=1' .agents/specs/active/WORK-9.state.json
+m|deny|sort -o.agents/specs/active/WORK-9.state.json x
+m|deny|sort -uo .agents/specs/active/WORK-9.state.json x
+m|deny|sort --output=.agents/specs/active/WORK-9.state.json x
+m|deny|xxd in.bin .agents/specs/active/WORK-9.state.json
+m|deny|vim -es .agents/specs/active/WORK-9.state.json
+m|deny|vi -e .agents/specs/active/WORK-9.state.json
+m|deny|ex .agents/specs/active/WORK-9.state.json
+m|deny|tar -czf .agents/specs/active/WORK-9.state.json src
+m|deny|tar czf .agents/specs/active/WORK-9.state.json src
+m|deny|tar --create --file=.agents/specs/active/WORK-9.state.json src
+m|deny|zip .agents/specs/active/WORK-9.state.json src/app.ts
+m|deny|base64 -i in.txt -o .agents/specs/active/WORK-9.state.json
+m|deny|less -o .agents/specs/active/WORK-9.state.json notes.txt
+m|deny|split -l 1 in.txt .agents/specs/active/WORK- --additional-suffix=.state.json
+m|deny|csplit -f .agents/specs/active/WORK- -b '%02d.state.json' in.txt 1
+m|deny|iconv -f utf-8 -t ascii -o .agents/specs/active/WORK-9.state.json in.txt
+m|deny|gzip .agents/specs/active/WORK-9.state.json
+m|deny|gunzip .agents/specs/active/WORK-9.state.json.gz
+m|deny|mktemp .agents/specs/active/WORK-XXXXXX.state.json
+b|deny|sort -o .agents/specs/active/WORK-9.state.json x
+m|none|sort -o out.txt in.txt
+m|none|uniq in.txt
+m|none|uniq in.txt out.txt
+m|none|xxd in.bin
+m|none|gzip -c .agents/specs/active/WORK-9.state.json
+m|none|tar -tf a.tar
+m|none|zip out.zip .agents/specs/active/WORK-9.state.json
+m|none|split -l 1 in.txt out/part-
+m|none|mktemp -d
+m|none|less notes.txt
+CASES
+
+# RR3-11: Git variables set through eval text, a sourced file this submission wrote, printf -v or
+# read reach later git commands (restricted agents are denied them).
+fix4_table "RR3-11" "$agent_repository" <<'CASES'
+b|deny|eval "export GIT_SSH_COMMAND='ssh -i k'"; git fetch
+b|deny|printf -v GIT_PAGER '%s' less; git log
+b|deny|read GIT_DIR < dir.txt; git status
+b|deny|read -r GIT_EDITOR <<< vi; git status
+b|deny|cat > env.sh <<'EOF'\nexport GIT_PAGER=less\nEOF\nsource env.sh; git log
+b|deny|set -a; GIT_PAGER=less; git log
+b|none|printf -v NAME '%s' x; git status
+b|none|read -r line < f.txt; git status
+b|none|eval 'export NODE_ENV=test' && git status
+m|none|eval 'export GIT_PAGER=less' && git log
+CASES
+
+# RR3-12: write-then-run keys ignore case (APFS), a different spelling is not exact, and a known file
+# that a writer names again (or any program that can write without naming it) is no longer known.
+fix4_table "RR3-12" "$agent_repository" <<'CASES'
+m|ask|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\ncp other.patch f.patch\ngit apply f.patch
+m|ask|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\nmv other.patch f.patch\ngit apply f.patch
+m|ask|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\nln -sf other.patch f.patch\ngit apply f.patch
+m|ask|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\nsed -i 's/x/y/' f.patch\ngit apply f.patch
+m|ask|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\nsudo cp other.patch F.PATCH\ngit apply f.patch
+m|ask|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\nbash -c 'cp other.patch f.patch'\ngit apply f.patch
+m|ask|cat > F.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\ngit apply f.patch
+m|none|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\nchmod 644 f.patch\ngit apply f.patch
+m|none|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\ncat f.patch\ngit apply f.patch
+m|deny|echo 'terraform apply' > R.sh; sh r.sh
+m|deny|echo 'terraform apply' > r.sh; sh r.sh
+CASES
+
+# Info: Rscript is matched as an interpreter (program names are lower case).
+fix4_table "Rscript" "$agent_repository" <<'CASES'
+m|deny|Rscript -e 'writeLines("x", ".agents/specs/active/WORK-9.state.json")'
+m|ask|Rscript -e 'DBI::dbExecute(con, "DROP TABLE users")'
+CASES
+
+# RR3-13: one deadline for all hook-time Git (5 s), killed with its process group. A git that hangs
+# (a PATH shim standing in for a stuck repository) gives ask within the deadline, and no process it
+# started is left running. The worst case is documented in guard-bash.sh (run_classifier).
+slow_git_directory="$work_directory/slow-git"
+mkdir -p "$slow_git_directory"
+printf '#!/bin/bash\necho $$ >>"%s/pids"\nsleep 30 &\necho $! >>"%s/pids"\nwait\n' "$slow_git_directory" "$slow_git_directory" >"$slow_git_directory/git"
+chmod +x "$slow_git_directory/git"
+slow_started=$SECONDS
+output="$(agent_input 'git switch same' "$state_fixture" m | PATH="$slow_git_directory:$PATH" "$scripts/guard-bash.sh")"
+slow_elapsed=$((SECONDS - slow_started))
+expect_equal "fix round 4 RR3-13: a hanging hook-time git asks" ask "$(decision_of "$output")"
+if [ "$slow_elapsed" -le 9 ]; then pass; else fail "fix round 4 RR3-13: the hook took ${slow_elapsed} s with a hanging git (deadline 5 s)"; fi
+if [ -s "$slow_git_directory/pids" ]; then pass; else fail "fix round 4 RR3-13: the slow git shim never ran"; fi
+slow_left=""
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+  slow_left=""
+  while IFS= read -r slow_pid; do kill -0 "$slow_pid" 2>/dev/null && slow_left="$slow_left $slow_pid"; done <"$slow_git_directory/pids"
+  [ -n "$slow_left" ] || break
+  sleep 0.1
+done
+expect_equal "fix round 4 RR3-13: no process of the hanging git is left" "" "$slow_left"
+
 # ---------------------------------------------------------------- run-gate
 commit_all() { git -C "$1" add -A && git -C "$1" -c user.name=test -c user.email=test@example.com commit -q -m "$2"; }
 gate_repository="$(new_repository gate-repo main)"

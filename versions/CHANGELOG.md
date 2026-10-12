@@ -9,7 +9,8 @@ Guard v2: structured action classification (WORK-001, ADR-0003).
 - **Behaviour change:** specialist and reviewer subagents can no longer run Git write operations; the coordinator owns Git.
 - **Behaviour change:** writes to work-item state files (`.agents/specs/**/*.state.json`) and the authority-token store are denied through Bash and Write/Edit/NotebookEdit. No such files exist in v0.2 projects.
 - Deploys are labelled `production-deploy`, `ephemeral-deploy` or `unclassified-deploy` (all still ask); destructive Neon and Vercel CLI operations now ask; HTTP clients are classified by method.
-- Unparseable or oversized commands fall back to keyword rules and ask; the guard never returns `allow`.
+- Unparseable or oversized commands fall back to keyword rules and ask; the guard never returns `allow`. The keyword rules are also a floor over all parsed text except proven data, so nothing v0.2 asked about gets less than `ask`.
+- **Behaviour change:** whole-tree restores, recursive copies and syncs, and archive extractions that can overwrite `.git`, `.agents` or the authority store (for example `git checkout <ref> -- .`, `cp -R src/. .`, `tar -xf a.tar` in the repository root) now ask, from every caller. Specialist subagents may run only Git read forms.
 - `lib.sh` `classify_command_impact` is the single classification interface; gate and external-review commands classified `ask` or `deny` are refused (v0.2 refused only `ask`).
 - Local guard log of decisions (classes, parse mode, command hash, never command text) for measuring false positives.
 - Implementation-agent instructions: Git is the coordinator's job; edit files with Edit/Write, not the shell. Shell edits get a non-blocking hint.

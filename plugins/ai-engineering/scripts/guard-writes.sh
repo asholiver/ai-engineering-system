@@ -19,6 +19,13 @@ if ! command -v jq >/dev/null 2>&1; then
 fi
 
 hook_input="$(cat)"
+# The only Git this hook runs (RR3-1): the hardened plumbing in guard/hook-git.sh.
+# shellcheck source=guard/hook-git.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/guard/hook-git.sh"
+hook_git_output_file="$(mktemp "${TMPDIR:-/tmp}/ai-engineering-guard-writes.XXXXXX" 2>/dev/null)" || hook_git_output_file=""
+trap '[ -z "$hook_git_output_file" ] || rm -f "$hook_git_output_file"' EXIT
+# Prints the output of one hardened Git lookup (nothing when it fails).
+git_lookup() { "$@" && printf '%s' "$hook_git_output"; }
 agent_type="$(jq -r '.agent_type // empty' <<<"$hook_input")"
 working_directory="$(jq -r '.cwd // empty' <<<"$hook_input")"
 working_directory="${working_directory:-$PWD}"
@@ -84,7 +91,7 @@ case "$lowered_path" in
   */.git/ai-engineering/tokens | */.git/ai-engineering/tokens/*) deny "$authority_store_reason" ;;
   */ai-engineering/tokens | */ai-engineering/tokens/*)
     # A common directory not named .git (separate git dir, bare repository): ask Git for it.
-    common_directory="$(git -C "$working_directory" rev-parse --git-common-dir 2>/dev/null)"
+    common_directory="$(git_lookup hook_git_common_directory "$working_directory")"
     if [ -n "$common_directory" ]; then
       case "$common_directory" in /*) ;; *) common_directory="$working_directory/$common_directory" ;; esac
       common_directory="$(cd -P "$common_directory" 2>/dev/null && pwd -P | tr '[:upper:]' '[:lower:]')"
@@ -98,8 +105,8 @@ esac
 # ---------------------------------------------------------------- hard links (N5)
 # A hard link to a store file is that file under another name. Deny a write to an existing file
 # with more than one link when a file in this repository's store is the same file.
-repository_top="$(git -C "$working_directory" rev-parse --show-toplevel 2>/dev/null)"
-store_common_directory="$(git -C "$working_directory" rev-parse --git-common-dir 2>/dev/null)"
+repository_top="$(git_lookup hook_git_top_level "$working_directory")"
+store_common_directory="$(git_lookup hook_git_common_directory "$working_directory")"
 if [ -n "$store_common_directory" ]; then
   case "$store_common_directory" in /*) ;; *) store_common_directory="$working_directory/$store_common_directory" ;; esac
 fi
@@ -169,7 +176,7 @@ esac
 # ---------------------------------------------------------------- learning agent
 [ "$agent_type" = "$learning_agent_type" ] || exit 0
 
-repository_directory="$(git -C "$working_directory" rev-parse --show-toplevel 2>/dev/null || echo "$working_directory")"
+repository_directory="$(git_lookup hook_git_top_level "$working_directory" || echo "$working_directory")"
 repository_directory="$(cd "$repository_directory" 2>/dev/null && pwd -P)"
 case "$resolved_path" in
   "$repository_directory/.agents/"*) exit 0 ;;

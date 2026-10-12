@@ -19,11 +19,11 @@ claude plugin validate --strict "$plugin_directory" || check_failed "plugin vali
 claude plugin validate --strict "$repository_directory" || check_failed "marketplace validation"
 
 step "Script syntax"
-for script in "$plugin_directory"/scripts/*.sh tests/run.sh scripts/check.sh; do
+for script in "$plugin_directory"/scripts/*.sh "$plugin_directory"/scripts/guard/*.sh tests/run.sh scripts/check.sh; do
   bash -n "$script" || check_failed "syntax: $script"
 done
 if command -v shellcheck >/dev/null 2>&1; then
-  shellcheck -x "$plugin_directory"/scripts/*.sh tests/run.sh scripts/check.sh || check_failed "shellcheck"
+  shellcheck -x "$plugin_directory"/scripts/*.sh "$plugin_directory"/scripts/guard/*.sh tests/run.sh scripts/check.sh || check_failed "shellcheck"
 else
   echo "shellcheck not installed; skipped"
 fi

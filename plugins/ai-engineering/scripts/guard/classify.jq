@@ -665,11 +665,15 @@ def lexical_path:
        else . + [$segment] end) | join("/"))
   | if $absolute then "/" + . else . end;
 
-# The key of $path used in directory $dir, or null when it cannot be known.
-def path_key($dir; $path):
+# The lexical spelling of $path used in directory $dir, or null when it cannot be known.
+def path_spelling($dir; $path):
   if $dir == null or $path == null or $path == "" or ($path | test("[$`*?\\[{]|^~")) then null
   elif ($path | startswith("/")) or $dir == "" then $path | lexical_path
   else ($dir + "/" + $path) | lexical_path end;
+# RR3-12: the key is the spelling in lower case (APFS opens R.sh for r.sh). An entry remembers the
+# spellings it was written with; a read under another spelling is not exact (on a case-sensitive
+# file system it is another file), see file_entry.
+def path_key($dir; $path): path_spelling($dir; $path) | if . == null then null else ascii_downcase end;
 
 # Each top-level command gets dir: the directory it runs in. A cd inside a subshell is treated as
 # lasting; when that guesses wrong, the exposure rule in collect_context keeps the written text
@@ -681,7 +685,8 @@ def annotate_directories($start):
        | ($command.w[0].l // "") as $head
        | if $head == "cd" or $head == "pushd" then
            ([ $command.w[1:][] | select(.l | startswith("-") | not) ] | first) as $target
-           | .dir = (if $target == null or $target.d then null else path_key(.dir; $target.l) end)
+           # RR3-8: cd -, a bare cd, pushd with no directory or a stack index (+N) are unknown.
+           | .dir = (if $target == null or $target.d or ($target.l | test("^\\+[0-9]+$")) then null else path_key(.dir; $target.l) end)
          elif $head == "popd" then .dir = null
          else . end)) as $result
     | .dir = $result.dir | .out += [$result.cmds]) | .out);
@@ -737,6 +742,7 @@ def file_writer_programs:
   ["cp", "mv", "install", "ln", "curl", "wget", "tar", "gtar", "bsdtar", "unzip", "dd", "rsync", "ditto", "patch", "cpio", "pax",
    "7z", "7za", "7zz", "sponge", "split", "csplit", "openssl", "gzip", "gunzip", "bzip2", "bunzip2", "xz", "unxz", "zstd",
    "uudecode", "sed", "perl", "awk", "gawk", "mawk", "nawk", "eval", "find", "make", "gmake",
+   "yq", "uniq", "xxd", "ed", "red", "ex", "vi", "vim", "nvim", "zip", "iconv", "mktemp", "unzstd",
    "sudo", "doas", "env", "time", "nice", "ionice", "nohup", "setsid", "exec", "builtin", "command", "stdbuf", "timeout", "xargs",
    "caffeinate", "chronic", "unbuffer", "chrt", "taskset", "flock", "script", "su", "nix-shell", "watch", "parallel", "coproc"]
   + shells;
@@ -753,6 +759,46 @@ def task_runner_programs: task_runners_packages + task_runners_other;
 # runner runs), exports (Git-relevant NAME=value words set for the rest of the submission), dir.
 def all_raw_commands_of($raw): [ $raw.units[][] | recurse(.n[]?) ];
 
+# H5, RR3-11: the Git-relevant names a raw command sets for the rest of the submission: plain
+# assignments (they update an exported name, and with set -a they export it), export and friends,
+# printf -v and read (the value comes from elsewhere: the name alone, which is never a safe value),
+# and what an eval text sets (parsed here, bounded depth).
+def assigned_names($depth):
+  ([ .w[].l ]) as $words
+  | raw_head(.) as $head
+  | if ($words | length) == 0 then .a[].l
+    elif $head | IN("export", "declare", "typeset", "readonly", "local") then ($words[1:][] | select(startswith("-") | not))
+    elif $head == "printf" then option_texts($words[1:]; ["-v"])[]
+    elif $head == "read" then ($words[1:] | positionals_skipping(["-d", "-n", "-N", "-p", "-t", "-u", "-i", "-a"]))[], option_texts($words[1:]; ["-a"])[]
+    elif $head == "eval" and $depth < 3 then
+      (try parse_raw(($words[1:] | join(" ")); 1) catch {units: []}) | [ .units[][] | recurse(.n[]?) ][] | assigned_names($depth + 1)
+    else empty end;
+
+# RR3-12: what a command may overwrite among the files this submission wrote, wrappers seen through:
+# "all" for a program that can write any file without naming it (shell text, eval, inline
+# interpreter code, find -exec or -delete, xargs, make), else the keys of the literal words a file
+# writer names (file_writer_programs; Git checkout, restore, mv, rm and checkout-index; a script's
+# own arguments, which the script may write). Reads (cat, grep, git apply's patch, ...), metadata
+# (chmod) and the script a shell runs are not writes.
+def overwrite_targets($command; $dir):
+  unwrap($command.w) as $unwrapped
+  | $unwrapped.ws as $ws
+  | (($ws[0].l // "") | split("/") | last | ascii_downcase) as $head
+  | ([ $ws[1:][].l ]) as $args
+  | ([ $ws[1:][] | select(.l | startswith("-") | not) ]) as $operands
+  | def keys_of($words): [ $words[] | select(.d | not) | path_key($dir; .l) | select(. != null) ];
+    if ($unwrapped.texts | length) > 0 or $head == "eval" or $head == "xargs" or ($head | IN("make", "gmake"))
+       or ($head == "find" and any($args[]; IN("-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprintf", "-fls")))
+       or (has_word(shells; $head) and any($args[]; test("^-[A-Za-z]*c[A-Za-z]*$")))
+       or (($head | test(interpreters_regex)) and any($args[]; test("^(-[A-Za-z]*[ce]|--eval|--command)$")))
+    then "all"
+    elif has_word(shells; $head) or ($head | IN("source", ".")) or ($head | test(interpreters_regex)) then keys_of($operands[1:])
+    elif $head == "git" then
+      ((($args | positionals_skipping(git_value_flags)) | first) // "") as $sub
+      | if $sub | IN("checkout", "restore", "mv", "rm", "checkout-index") then keys_of($ws[1:]) else [] end
+    elif has_word(file_writer_programs; $head) then keys_of($ws[1:])
+    else [] end;
+
 def collect_context($raw; $outer):
   reduce ($raw.units[] | . as $unit | range(0; length) as $i
           | ({c: $unit[$i], b: $unit[0:$i]}, ($unit[$i].dir as $dir | $unit[$i].n[]? | recurse(.n[]?) | {c: (. + {dir: $dir}), b: []}))) as $item ($outer;
@@ -760,6 +806,14 @@ def collect_context($raw; $outer):
     | $command.dir as $dir
     | ([ $command.w[].l ]) as $words
     | raw_head($command) as $head
+    # RR3-12: a written file named again by a program that may write it, or any write by a program
+    # that can write without naming, is no longer known exactly (judged before this command's own writes).
+    | (if (.files | length) == 0 then .
+       else
+         overwrite_targets($command; $dir) as $overwritten
+         | if $overwritten == "all" then .files |= map_values(.k = false)
+           else reduce $overwritten[] as $key (.; if .files[$key] != null then .files[$key].k = false else . end) end
+       end)
     | ([ $command.r[] | select(.op | IN(">", ">>", ">|", "&>", "&>>")) | {l: .t, d: (.d // false)} ]
        + (if $words[0] == "tee" then [ $command.w[1:][] | select(.l | startswith("-") | not) ] else [] end)) as $targets
     | (if ($targets | length) > 0 then written_content($command; $item.b) else null end) as $content
@@ -767,16 +821,22 @@ def collect_context($raw; $outer):
         (if $target.d then null else path_key($dir; $target.l) end) as $key
         | if $key == null then .opaque = true
           else .files[$key] = {t: ((.files[$key].t // "") + ($content.texts | join("\n")) + "\n"),
-                               k: ((.files[$key].k // true) and $content.known)} end)
+                               k: ((.files[$key].k // true) and $content.known),
+                               n: ((.files[$key].n // []) + [path_spelling($dir; $target.l)] | unique)} end)
     # runs: the submission may run a script (sh f, source f, . f, ./f, /abs/f, also through a
     # wrapper), so the writers below are counted.
     | (if ($head | IN("source", ".")) or has_word(shells; $head) or (($words[0] // "") | contains("/")) or wrappers[$head] != null
        then .runs = true else . end)
-    # H5: exported (or plainly assigned, which updates an exported name) Git-relevant variables.
-    | .exports += [ (if ($words | length) == 0 then $command.a[].l
-                     elif $head | IN("export", "declare", "typeset", "readonly", "local") then ($words[1:][] | select(startswith("-") | not))
-                     else empty end)
-                    | select(sub("=.*$"; "") | test(git_env_tracked_regex)) ])
+    # H5, RR3-11: Git-relevant names set for later commands, including those a sourced file that
+    # this submission wrote sets.
+    | (if ($head | IN("source", ".")) then
+         (([ $words[1:][] | select(startswith("-") | not) ] | first) // null) as $script
+         | (if $script == null then null else path_key($dir; $script) end) as $key
+         | (if $key != null and .files[$key] != null then
+              [ (try parse_raw(.files[$key].t; 1) catch {units: []}) | .units[][] | recurse(.n[]?) | assigned_names(1) ]
+            else [] end)
+       else [] end) as $sourced
+    | .exports += [ ($command | assigned_names(0)), $sourced[] | select(sub("=.*$"; "") | test(git_env_tracked_regex)) ])
   # Counted only when a script may run: the count matters only for a script's unknown text.
   | (if .runs then .writers += ([ all_raw_commands_of($raw)[] | select(is_file_writer(.)) ] | length) else . end)
   | if (.files | length) == 0 then .
@@ -786,7 +846,7 @@ def collect_context($raw; $outer):
           raw_head(.) as $head
           | has_word(task_runner_programs; $head)
             or (($head != "tee") and (has_word(readonly_programs; $head) | not)
-                and any(.w[]; (.l | split("/") | last) as $base | has_word($names; $base)))))
+                and any(.w[]; (.l | split("/") | last | ascii_downcase) as $base | has_word($names; $base)))))
     end;
 
 # A redirection that writes a file (not /dev/null, a terminal or a file descriptor duplicate).
@@ -828,6 +888,147 @@ def git_read_form:
     elif $sub == "stash" then (($positional | first) // "") | IN("list", "show")
     elif $sub == "worktree" then (($positional | first) // "") == "list"
     else false end;
+
+# ---------------------------------------------------------------- keyword fallback: restricted agents (RR3-3)
+# Owner ruling: "unparseable => deny" is forbidden; "unparseable + an independently established
+# prohibited operation => deny" is allowed. When the parse is not confident, a Git write is
+# established only where that is certain:
+#   - the text is read with Bash's own word splitting (the lexer: quotes, substitutions and
+#     heredoc bodies stay inside their words, comments are dropped), and reading stops at the
+#     first construct that does not close (nothing after it is known to be outside quotes);
+#   - a simple command (after control operators, leading assignments and reserved words) whose
+#     program is a literal `git` and whose subcommand is a literal Git write: any known Git
+#     command off the read list, or a non-read form of stash, branch, tag, worktree, remote or
+#     config.
+# Everything else asks, never denies: a dynamic Git program or subcommand, an unknown subcommand
+# (it may be an alias), git as data (quoted, in a heredoc, an argument of echo, bash -c text) and a
+# Git-relevant assignment. Result: {verdict: deny | ask | ok, label}.
+def fallback_git_reads: ["status", "diff", "log", "show", "blame", "grep", "ls-files", "ls-tree", "cat-file", "rev-parse", "rev-list",
+                         "merge-base", "describe", "shortlog", "fetch", "version", "help"];
+# Token roles, looked up once per token (an object lookup; IN over a list costs far more per call).
+def fallback_token_roles:
+  {"\n": "op", ";": "op", "&": "op", "&&": "op", "||": "op", "|": "op", "|&": "op", "(": "op", ")": "op", ";;": "op", ";&": "op", ";;&": "op",
+   "'": "stop", "\"": "stop", "`": "stop", "\\": "stop"};
+
+# Stops at an unmatched quote, backquote or escape, a `$` before ( or { that does not close, or an
+# unmatched `)`. Bash does not run a line with a syntax error, so the commands of that line are
+# dropped too; earlier lines stand. Appends use `.x[.x | length] = v` (in place; `+=` copies), so
+# the cost stays linear in the number of words.
+def fallback_simple_commands($text):
+  lex($text) as $lexed
+  | fallback_token_roles as $roles
+  | (reduce $lexed.toks[] as $token ({commands: [], current: [], stop: false, target: false, parens: 0, line_start: 0};
+       ($roles[$token] // "") as $role
+       | if .stop then .
+       elif .target then .target = false
+       elif $role == "stop" or ($token | endswith("$")) or ($token == ")" and .parens == 0) then
+         .stop = true | .commands = .commands[0:.line_start] | .current = []
+       elif $role == "op" then
+         .commands[.commands | length] = .current | .current = []
+         | (if $token == "(" then .parens += 1 elif $token == ")" then .parens -= 1 else . end)
+         | (if $token == "\n" then .line_start = (.commands | length) else . end)
+       elif ($token | startswith("#")) then .
+       elif ($token | is_redirect_token) then .target = true
+       else .current[.current | length] = ({raw: $token} + ($token | word_info)) end)
+     | .commands + [.current]);
+
+def fallback_flag_words: map(select(.l | startswith("-")) | .l);
+# The first two operands (flag values skipped; the rules need no more) and whether any operand is dynamic.
+def fallback_operands($value_flags):
+  . as $words
+  | ({i: 0, out: []}
+     | until(.i >= ($words | length) or (.out | length) >= 2;
+         $words[.i] as $word
+         | if $word.l == "--" then .i += 1
+           elif ($word.l | startswith("-")) then (if consumes_value($word.l; $value_flags) then .i += 2 else .i += 1 end)
+           else .out[.out | length] = $word | .i += 1 end)
+     | .out) as $operands
+  | {words: [ $operands[].l ], dynamic: any($operands[]; .d)};
+# The first operand (flag values skipped): {none}, {dynamic} or {word}.
+def fallback_first_operand($value_flags):
+  . as $words
+  | ({i: 0, found: null}
+     | until(.found != null or .i >= ($words | length);
+         $words[.i] as $word
+         | if ($word.l | startswith("-")) then (if consumes_value($word.l; $value_flags) then .i += 2 else .i += 1 end)
+           else .found = $word end)
+     | .found) as $first
+  | if $first == null then {none: true} elif $first.d then {dynamic: true} else {word: $first.l} end;
+
+# One simple command: {verdict: deny | ask | read | none, sub}.
+def fallback_git_command:
+  . as $words
+  | (first(range(0; $words | length) as $i
+       | select((($words[$i].raw | test("^[A-Za-z_][A-Za-z0-9_]*\\+?=")) or ($words[$i].raw | IN(reserved_heads[])) or $words[$i].raw == "\\\n") | not)
+       | $i) // null) as $start
+  | if $start == null or $words[$start].d or (($words[$start].l | ascii_downcase | test("(^|/)git$")) | not) then {verdict: "none"}
+    else
+      ($words[$start + 1:] | map(select(.raw != "\\\n"))) as $rest
+      | ({i: 0, done: false, dynamic: false}
+         | until(.done or .i >= ($rest | length);
+             $rest[.i] as $word
+             | if $word.d then .dynamic = true | .done = true
+               elif ($word.l | startswith("-")) then (if ($word.l | IN(git_value_flags[])) then .i += 2 else .i += 1 end)
+               else .done = true end)) as $scan
+      | ($rest[$scan.i] // null) as $sub_word
+      | if $scan.dynamic or $sub_word == null then {verdict: (if $scan.dynamic then "ask" else "read" end)}
+        elif $sub_word.d or (($sub_word.l | test("^[A-Za-z][A-Za-z0-9-]*$")) | not) then {verdict: "ask"}
+        else
+          ($sub_word.l | ascii_downcase) as $sub
+          | $rest[$scan.i + 1:] as $args
+          | ($args | fallback_flag_words) as $flags
+          | if any($flags[]; IN("-h", "--help")) or ($sub | IN(fallback_git_reads[])) then {verdict: "read", sub: $sub}
+            elif $sub == "stash" then
+              ($args | fallback_first_operand(["-m", "--message", "--pathspec-from-file"])) as $action
+              | if $action.dynamic then {verdict: "ask", sub: $sub}
+                elif ($action.word // "push") | IN("list", "show") then {verdict: "read", sub: $sub}
+                else {verdict: "deny", sub: $sub} end
+            elif $sub == "worktree" or $sub == "remote" then
+              ($args | fallback_first_operand([])) as $action
+              | if $action.none then {verdict: "read", sub: $sub}
+                elif $action.dynamic then {verdict: "ask", sub: $sub}
+                elif $action.word | IN(if $sub == "worktree" then "list" else ("show", "get-url") end) then {verdict: "read", sub: $sub}
+                else {verdict: "deny", sub: $sub} end
+            elif $sub == "config" then
+              ($args | fallback_operands(["-f", "--file", "--blob", "--type", "--default", "--comment", "--value"])) as $operands
+              | if any($flags[]; test("^(--(add|unset|unset-all|replace-all|edit|rename-section|remove-section)|-e)$")) then {verdict: "deny", sub: $sub}
+                elif $operands.dynamic then {verdict: "ask", sub: $sub}
+                elif (($operands.words[0] // "") | IN("set", "unset", "rename-section", "remove-section", "edit")) then {verdict: "deny", sub: $sub}
+                elif any($flags[]; test("^(--(get|get-all|get-regexp|get-urlmatch|get-color|get-colorbool|list)|-l)$"))
+                     or (($operands.words[0] // "") | IN("get", "list")) then {verdict: "read", sub: $sub}
+                elif ($operands.words | length) >= 2 then {verdict: "deny", sub: $sub}
+                # `git config <name>` reads one value; with no operand it prints usage: not established.
+                else {verdict: "ask", sub: $sub} end
+            elif $sub == "branch" or $sub == "tag" then
+              ($args | map(.l) | flags_skipping(git_listing_value_flags)) as $option_words
+              | ($args | fallback_operands(git_listing_value_flags)) as $operands
+              | if any($option_words[]; test(if $sub == "branch" then git_branch_write_flags else git_tag_write_flags end)) then {verdict: "deny", sub: $sub}
+                elif any($option_words[]; test(if $sub == "branch" then git_list_flag
+                                               else "^(-l|--list|-v|--verify|--contains|--no-contains|--points-at|--merged|--no-merged|-n[0-9]*)$" end)) then {verdict: "read", sub: $sub}
+                elif ($operands.words | length) > 0 or $operands.dynamic then {verdict: "deny", sub: $sub}
+                else {verdict: "read", sub: $sub} end
+            elif $sub | IN(git_commands[]) then {verdict: "deny", sub: $sub}
+            else {verdict: "ask", sub: $sub} end
+        end
+    end;
+
+# The earlier keyword criteria (they never deny): a git word whose subcommand is not a read one or
+# cannot be read, a dynamic program name, or a Git-relevant variable assigned in a command that runs
+# git. branch, tag, stash, worktree, remote and config are not reads here: unestablished, they ask.
+def fallback_git_unsafe($command):
+  ([ $command | keyword_text_variants[] | gsub("[\\n\\t]"; " ") ] | join("\n")) as $text
+  | ([ $text | scan("(?i)(?:^|[^A-Za-z0-9_-])git(?:[^A-Za-z0-9_-]|$)") ] | length) as $git_words
+  | [ $text | scan("(?i)(?:^|[^A-Za-z0-9_-])git(?:\\s+(?:-[Cc]\\s+\\S+|--[A-Za-z-]+(?:=\\S+)?|-[A-Za-z]))*\\s+([A-Za-z][A-Za-z0-9-]*)") | .[0] | ascii_downcase ] as $subcommands
+  | ($subcommands | map(select(IN(fallback_git_reads[]) | not)) | length) > 0 or $git_words > ($subcommands | length)
+    or ([ $text | scan("(?:^|[;&|(]\\s*)[$`]") ] | length) > 0
+    or ($git_words > 0 and ($text | test("(?:^|[^A-Za-z0-9_])(?:GIT_[A-Za-z0-9_]*|PAGER|EDITOR|VISUAL|SSH_ASKPASS|LESSOPEN|LESSCLOSE|PATH|HOME|XDG_CONFIG_HOME)=")));
+
+def fallback_git_check($command):
+  ([ fallback_simple_commands($command)[] | fallback_git_command ]) as $results
+  | ([ $results[] | select(.verdict == "deny") ] | first) as $deny
+  | if $deny != null then {verdict: "deny", label: ("git " + $deny.sub)}
+    elif any($results[]; .verdict == "ask") or fallback_git_unsafe($command) then {verdict: "ask"}
+    else {verdict: "ok"} end;
 
 # ---------------------------------------------------------------- executing constructs
 # -c / --config-env settings before the Git subcommand: {key (lower case), value, env}.
@@ -1047,9 +1248,16 @@ def command_floor($command; $words; $data; $stdin_data; $fed):
     $fed[] ]
   | map(select(length > 0));
 
-# A file this submission wrote: {t: text, k: known exactly}, or null.
+# A file this submission wrote: {t: text, k: known exactly}, or null. Read under a spelling it was
+# not written with (another case), it is not exact (RR3-12).
 def file_entry($ctx; $dir; $path):
-  path_key($dir; $path) as $key | if $key == null then null else ($ctx.files[$key] // null) end;
+  path_key($dir; $path) as $key
+  | if $key == null then null
+    else ($ctx.files[$key] // null) as $entry
+      | if $entry == null then null
+        elif (path_spelling($dir; $path) | IN(($entry.n // [])[])) then $entry
+        else $entry + {k: false} end
+    end;
 
 # Analyses one parsed command. Substitution commands it contains are analysed too and
 # their operations belong to it. Shell text it runs is parsed into extra units.
@@ -1250,7 +1458,8 @@ def parse_script_in($text; $depth; $branch; $outer):
          | .effectful_inner = (.effectful_inner or $effectful))) as $nested
     | {kind: (if $own.kind == "ctx" and $nested.effectful_inner then "eff" else $own.kind end),
        ops: ($own.ops + $nested.ops), extra: ($own.extra + $nested.extra),
-       cmds: ($own.cmds + $nested.cmds), unc: ($own.unc or $nested.unc), soft: ($own.soft or $nested.soft),
+       # Substitutions run before the command that holds them (RR3-6 reads this order).
+       cmds: ($nested.cmds + $own.cmds), unc: ($own.unc or $nested.unc), soft: ($own.soft or $nested.soft),
        # A read-only command that only hosts a substitution holding the operation (`echo $(op)`) is not another command.
        own_op: ($own.own_op or ($own.readonly and ($nested.ops | length) > 0)), consumer: $own.consumer,
        readonly: $own.readonly, floor: ($own.floor + $nested.floor), nested_others: $nested.nested_others, defines: $own.defines};

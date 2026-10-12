@@ -46,9 +46,11 @@ def floor_budget_bytes: 16384;
                  or (if $floor_deferred then guard_push_mentioned($floor_text)
                      else floor_mentions_push($floor_text) end))) as $needBranch
          # Soft uncertainty (classify.jq): the parse is sound, so a decision it reaches stands; with no
-         # decision, something it would run is unknown and the fallback reads the whole command.
+         # decision, something it would run is unknown and the fallback reads the whole command. Its
+         # hook-time state checks are kept: the wrapper runs them when the fallback finds nothing (RR3-2).
          | if ($parsed.soft // false) and $verdict.decision == "none" then
-             {decision: "fallback", parseMode: "fallback", classes: [], output: "", hint: "none", targets: [], needBranch: $needBranch}
+             {decision: "fallback", parseMode: "fallback", classes: [], output: "", hint: "none", targets: [], needBranch: $needBranch,
+              stateChecks: ($verdict.stateChecks // [])}
            else
              {decision: (if $floor_deferred and $verdict.decision == "none" then "floor" else $verdict.decision end),
               parseMode: "parsed", classes: $verdict.classes,

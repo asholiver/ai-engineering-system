@@ -17,6 +17,8 @@ include "classify";
 def guard_parse($text; $branch): parse_script($text; 0; $branch);
 def guard_floor_text($parsed): floor_text($parsed);
 def guard_push_mentioned($text): any($text | keyword_text_variants[]; test("push"; "i"));
+# The restricted-agent keyword fallback (fallback.jq, RR3-3).
+def guard_fallback_git($command): fallback_git_check($command);
 
 # The keyword floor over a floor text (main.jq calls these, so it needs no extra include).
 def floor_classes($text; $branch): keyword_net($text; $branch);
@@ -67,7 +69,8 @@ def git_restricted_agents: ["ai-engineering:frontend", "ai-engineering:backend",
 def implementation_agents: ["ai-engineering:frontend", "ai-engineering:backend", "ai-engineering:platform"];
 
 # Programs that can write a file given its path as an argument.
-def store_interpreters_regex: "^(python[0-9.]*|pypy3?|node|nodejs|deno|bun|ruby|perl|php|lua|Rscript|tsx|ts-node|awk|gawk|mawk|osascript|patch)$";
+# Program names are lower case here (classify.jq program_of), so Rscript is spelled rscript.
+def store_interpreters_regex: "^(python[0-9.]*|pypy3?|node|nodejs|deno|bun|ruby|perl|php|lua|rscript|tsx|ts-node|awk|gawk|mawk|osascript|patch)$";
 # Hint heuristic, deliberately simple: inline code or a heredoc given to an interpreter that
 # contains a file-writing call. Script files are not read, and stdout writes are excluded.
 def code_writes_file_regex:
@@ -105,11 +108,25 @@ def git_write_policy($cmds):
 
 # ---------------------------------------------------------------- authority store
 # Lexical normalisation: relative paths are taken from the working directory; ., .. and // collapse.
+# A `..` never cancels a component that is not literal (a variable, substitution, glob, tilde or
+# masked character could be several directories), so the path stays unresolved (RR3-8).
+def unresolved_segment_regex: "[$`*?\\[{\u0001]|^~";
 def normalize_path($cwd):
   (if startswith("/") then . else (($cwd // "") + "/" + .) end)
   | split("/")
-  | reduce .[] as $segment ([]; if $segment == "" or $segment == "." then . elif $segment == ".." then .[0:-1] else . + [$segment] end)
+  | reduce .[] as $segment ([];
+      if $segment == "" or $segment == "." then .
+      elif $segment == ".." then (if length > 0 and (.[-1] | test(unresolved_segment_regex) or . == "..") then . + [$segment] else .[0:-1] end)
+      else . + [$segment] end)
   | "/" + join("/");
+
+# RR3-8: a directory the shell resolves at run time that this guard cannot (a leading ~, ~+, ~-,
+# ~user, cd -, a bare cd, popd, pushd with no directory or a stack index). It is absolute and
+# unresolved, so every path rule treats what is under it as a pattern.
+def unresolved_directory: "/${UNRESOLVED_DIRECTORY}";
+def resolve_directory($base):
+  if startswith("~") then unresolved_directory + (if contains("/") then "/" + sub("^[^/]*/"; "") else "" end) | normalize_path("/")
+  else normalize_path($base) end;
 
 # The store is matched by its tail, not only by its repository-relative path, and without regard
 # to case (a case-insensitive file system resolves .STATE.JSON and .Agents/Specs). Paths here are lower case.
@@ -140,9 +157,10 @@ def literal_store_hit($path; $common; $level):
 # Non-ASCII characters are wildcards because APFS folds look-alikes (U+017F long s opens "s",
 # U+212A Kelvin sign opens "k", ligatures open "st" and "fi").
 # A Git magic pathspec (`:/`, `:(top)x`, `:!x`, ...) is a pattern too (NR-4): it can name any path.
-def is_pattern_target: test("[*?\\[{$`]|[^\\x01-\\x7f]|^:");
+# So is a leading tilde (RR3-8): ~, ~+, ~- and ~user are directories this guard does not resolve.
+def is_pattern_target: test("[*?\\[{$`]|[^\\x01-\\x7f]|^[:~]");
 def masked_expansions:
-  gsub("\\$\\{[^}]*\\}|\\$\\([^)]*\\)|\\$[A-Za-z_][A-Za-z0-9_]*|\\$[0-9@*#?$!-]|`[^`]*`|[$`]|[^\\x01-\\x7f]"; "\u0001")
+  gsub("^~[^/]*|\\$\\{[^}]*\\}|\\$\\([^)]*\\)|\\$[A-Za-z_][A-Za-z0-9_]*|\\$[0-9@*#?$!-]|`[^`]*`|[$`]|[^\\x01-\\x7f]"; "\u0001")
   | gsub("\\{[^{}]*\\.\\.[^{}]*\\}"; "*");
 # Brace alternatives, innermost first, at most 64; braces left over become wildcards.
 def brace_alternatives:
@@ -222,21 +240,47 @@ def option_values($args; $short; $long):
       elif ($args[$i] | startswith($long + "=")) then ($args[$i] | sub("^[^=]*="; ""))
       else empty end ];
 
+# Values of a program's output options (tables.jq output_option_flags): `-o V`, `--output=V`, `-oV`,
+# and a short cluster ending in the option (`-uo V`).
+def output_option_values($prog; $args):
+  (output_option_flags[$prog // ""] // []) as $flags
+  | [ range(0; $args | length) as $i
+      | $args[$i] as $arg
+      | if ($arg | IN($flags[])) then ($args[$i + 1] // empty)
+        elif ($arg | test("^--[A-Za-z-]+=")) and (($arg | sub("=.*$"; "")) | IN($flags[])) then ($arg | sub("^[^=]*="; ""))
+        elif ($arg | test("^-[A-Za-z]{2,}$")) and (("-" + $arg[-1:]) | IN($flags[])) then ($args[$i + 1] // empty)
+        elif ($arg | test("^-[A-Za-z].")) and (($arg[0:2]) | IN($flags[])) then $arg[2:]
+        else empty end ];
+
+# The archive a tar in create, append or update mode writes: -f V, -cfV, --file[=]V, or the word
+# after an old-style first argument holding f (`tar czf out.tgz src`). "-" is standard output.
+def tar_archive_values($args):
+  [ range(0; $args | length) as $i
+    | $args[$i] as $arg
+    | if $arg == "--file" then ($args[$i + 1] // empty)
+      elif ($arg | startswith("--file=")) then $arg[7:]
+      elif ($arg | test("^-[A-Za-z]*f$")) or ($i == 0 and ($arg | test("^[A-Za-z]*f[A-Za-z]*$"))) then ($args[$i + 1] // empty)
+      elif ($arg | test("^-[A-Za-z]*f.")) then ($arg | sub("^-[A-Za-z]*?f"; ""))
+      else empty end
+    | select(. != "-") ];
+
 def url_basename: sub("[?#].*$"; "") | split("/") | last;
 def under_directory($directory): if $directory == "" then . else $directory + "/" + . end;
 
 # Working directory of each command: cd and pushd with a literal target move it for the rest (a cd
 # inside a subshell is treated as moving it for the rest, which only over-matches), and a
-# command's own chdir (env -C, sudo -D, git -C) applies to it alone.
+# command's own chdir (env -C, sudo -D, git -C) applies to it alone. RR3-8: cd -, a bare cd, popd,
+# pushd with no directory or a stack index (+N, -N) and any tilde make it unresolved.
 def with_directories($commands; $cwd):
   (reduce $commands[] as $command ({dir: $cwd, out: []};
      .dir as $current
-     | (reduce (($command.chdir // [])[]) as $directory ($current; . as $base | $directory | normalize_path($base))) as $here
+     | (reduce (($command.chdir // [])[]) as $directory ($current; . as $base | $directory | resolve_directory($base))) as $here
      | .out += [$command + {dir: $here}]
      | if ($command.prog | IN("cd", "pushd")) then
-         (($command.args | policy_positionals | first) // null) as $target
-         | (if $target == null or $target == "-" then . else .dir = ($target | normalize_path($here)) end)
-       elif $command.prog == "popd" then .dir = $cwd
+         (($command.args | map(select(test("^-[A-Za-z@]+$") | not)) | first) // null) as $target
+         | (if $target == null or $target == "-" or ($target | test("^[+-][0-9]+$")) then .dir = unresolved_directory
+            else .dir = ($target | resolve_directory($here)) end)
+       elif $command.prog == "popd" then .dir = unresolved_directory
        else . end)).out;
 
 # Paths a command writes: {t: path text, level: none | git | all}. Reads (cat, jq, grep, less,
@@ -257,7 +301,33 @@ def command_write_targets:
        elif $prog == "tar" and any($args[]; test("^(-[A-Za-z]*x[A-Za-z]*|x[A-Za-z]*|--extract|--get)$")) then
          option_values($args; "-C"; "--directory")[] | {t: ., level: "all"}
        elif $prog == "unzip" then option_values($args; "-d"; "--directory")[] | {t: ., level: "all"}
-       elif $prog == "patch" then ($positional[], option_values($args; "-d"; "--directory")[], option_values($args; "-o"; "--output")[]) | {t: ., level: "all"}
+       elif $prog == "patch" then ($positional[], option_values($args; "-d"; "--directory")[], output_option_values($prog; $args)[]) | {t: ., level: "all"}
+       # RR3-10: more programs that write a named file.
+       elif output_option_flags[$prog // ""] != null then output_option_values($prog; $args)[] | {t: ., level: "git"}
+       elif $prog == "yq" and any($args[]; test("^(-[A-Za-z]*i[A-Za-z]*|--inplace)$")) then $positional[] | {t: ., level: "git"}
+       elif $prog == "uniq" then ($args | positionals_skipping(["-f", "-s", "--skip-fields", "--skip-chars", "-w", "--check-chars"]))[1:2][] | {t: ., level: "git"}
+       elif $prog == "xxd" then
+         ($args | positionals_skipping(["-c", "-cols", "-g", "-groupsize", "-l", "-len", "-o", "-offset", "-s", "-seek", "-n", "-name"]))[1:2][] | {t: ., level: "git"}
+       elif $prog | IN(file_editors[]) then $positional[] | {t: ., level: "git"}
+       elif ($prog | IN("tar", "gtar", "bsdtar"))
+            and (any($args[]; test("^(-[A-Za-z]*[cruA][A-Za-z]*|--(create|append|update|concatenate|catenate))$"))
+                 or (($args[0] // "") | test("^[A-Za-z]*[cruA][A-Za-z]*$"))) then
+         tar_archive_values($args)[] | {t: ., level: "git"}
+       # zip writes its archive (the first operand) or, with -O, a new archive at that path.
+       elif $prog == "zip" then
+         ((($args | positionals_skipping(["-b", "-n", "-t", "-tt", "-O", "--output-file", "-TT", "-P"]) | first) // empty),
+          option_values($args; "-O"; "--output-file")[]) | {t: ., level: "git"}
+       elif $prog | IN(in_place_compressors[]) then
+         (if any($args[]; test("^(-[A-Za-z0-9]*[clt][A-Za-z0-9]*|--(stdout|to-stdout|list|test))$")) then empty
+          else ($positional[] | ., sub("(\\.(gz|z|bz2|xz|zst|tgz)|-gz)$"; "")) end) | {t: ., level: "git"}
+       elif $prog == "split" then
+         (($args | positionals_skipping(["-a", "-b", "-l", "-n", "-p", "-C", "--suffix-length", "--bytes", "--line-bytes", "--lines", "--number", "--additional-suffix", "--filter"]))[1] // "x") as $prefix
+         | ($prefix + "*" + ((option_values($args; "--additional-suffix"; "--additional-suffix") | last) // "")) | {t: ., level: "git"}
+       elif $prog == "csplit" then
+         (((option_values($args; "-f"; "--prefix") | last) // "xx") + "*" + ((option_values($args; "-b"; "--suffix-format") | last) // "")) | {t: ., level: "git"}
+       elif $prog == "mktemp" then
+         ((option_values($args; "--suffix"; "--suffix") | last) // "") as $suffix
+         | ($args | positionals_skipping(["-p", "--tmpdir", "-t", "--suffix"]))[] | (sub("X+$"; "*") + $suffix) | {t: ., level: "git"}
        elif $prog == "curl" then
          (option_values($args; "--output-dir"; "--output-dir")[0] // "") as $directory
          | (option_values($args; "-o"; "--output")[] | select(. != "-") | under_directory($directory)),
@@ -363,10 +433,13 @@ def git_tree_ref_restore:
             + (if any($args[]; test("^(-r|-[A-Za-z]*r[A-Za-z]*)$")) then [ $operands[] | {op: "git rm -r", dest: .} ] else [] end) end)
     elif .sub == "clean" then
       # -x/-X remove ignored files (the authority store is ignored state), -d whole directories.
+      # RR3-7: any clean removes untracked files inside tracked directories, so with no path it
+      # reaches everything under its directory (the root asks), and so does `.`.
       ($args | positionals_skipping(["-e", "--exclude"])) as $paths
+      | (if any($args[]; test("^-[A-Za-z]*[xXd][A-Za-z]*$")) then "git clean -x/-X/-d" else "git clean" end) as $label
       | if any($args[]; test(git_dry_run_regex)) then []
         else [ $paths[] | select(startswith(":")) | {op: "git clean <pathspec>", dest: .} ]
-             + (if any($args[]; test("^-[A-Za-z]*[xXd][A-Za-z]*$")) then [ (if ($paths | length) > 0 then $paths[] else "." end) | {op: "git clean -x/-X/-d", dest: .} ] else [] end) end
+             + [ (if ($paths | length) > 0 then $paths[] else "." end) | {op: $label, dest: .} ] end
     elif .sub == "checkout-index" then
       (if any($args[]; test("^(-a|--all|--stdin|-[A-Za-z]*a[A-Za-z]*)$")) then
          [{op: "git checkout-index (all or from standard input)", dest: ((option_values($args; "--prefix"; "--prefix") | last) // ".")}]
@@ -407,7 +480,8 @@ def glob_under_literal_subdirectory($dest; $context; $root):
   | ([ range(0; $parts | length) as $i | select($parts[$i] | test("[*?\\[]")) | $i ] | first) as $at
   | ((if ($dest | startswith("/")) then "/" else "" end) + ($parts[0:($at // 0)] | join("/"))) as $prefix
   | ($prefix | normalize_path($context.cwd) | ascii_downcase) as $prefix_path
-  | (($dest | test("[$`{]|[^\\x01-\\x7f]|^:")) | not)
+  # RR3-8: a tilde is never narrowed.
+  | (($dest | test("[$`{]|[^\\x01-\\x7f]|^[:~]")) | not)
     and ((directory_suffix($context) | is_pattern_target) | not)
     and (any($parts[]; . == "..") | not)
     and $at != null and $at > 0
@@ -444,13 +518,30 @@ def protected_tree_policy($cmds; $context):
 # as a heredoc or pipeline). With known text, the paths it touches are judged like any write: a
 # store path denies (for every caller), Git's own files deny for restricted agents, anything else
 # is no decision. --directory and --include values are judged as paths too (--exclude only narrows).
+# RR3-9: Git and GNU patch quote unusual names C-style ("a/x\056y", \", \\, \t, \n). Escapes are
+# decoded; an escaped byte outside ASCII becomes U+FFFD, which every path rule treats as a pattern
+# character (it could be any look-alike), so the name is judged as unknown rather than skipped.
+def c_unquote:
+  if startswith("\"") and endswith("\"") and length >= 2 then
+    .[1:-1]
+    | gsub("\\\\(?<e>[0-7]{1,3}|.)";
+        .e as $e
+        | if ($e | test("^[0-7]+$")) then
+            ($e | explode | reduce .[] as $digit (0; . * 8 + $digit - 48)) as $code
+            | if $code > 0 and $code < 128 then ([$code] | implode) else "�" end
+          elif $e == "t" then "\t" elif $e == "n" then "\n" elif $e == "r" then "\r"
+          elif $e == "a" then "\u0007" elif $e == "b" then "\b" elif $e == "f" then "\f" elif $e == "v" then "\u000b"
+          else $e end)
+  else . end;
+# A header name: a quoted C string, or text up to a tab (timestamps follow a tab).
+def patch_header_name: if startswith("\"") then (capture("^(?<q>\"(?:[^\"\\\\]|\\\\.)*\")") | .q | c_unquote) else sub("\t.*$"; "") end;
 def patch_paths:
   [ split("\n")[]
-    | ((capture("^(?:\\+\\+\\+|---) \"?(?<p>[^\\t\"]+)") | .p),
-       (capture("^diff --git \"?(?<a>[^ \"]+)\"? \"?(?<b>[^ \"]+)") | .a, .b),
-       (capture("^(?:rename|copy) (?:from|to) (?<p>.+)$") | .p),
+    | ((capture("^(?:\\+\\+\\+|---|\\*\\*\\*) (?<p>.+)$") | .p | patch_header_name),
+       (capture("^diff --git (?<a>\"(?:[^\"\\\\]|\\\\.)*\"|[^ ]+) (?<b>\"(?:[^\"\\\\]|\\\\.)*\"|[^ ]+)") | (.a, .b) | c_unquote),
+       (capture("^(?:rename|copy) (?:from|to) (?<p>.+)$") | .p | c_unquote),
        (capture("^Index: (?<p>.+)$") | .p))
-    | select(. != "/dev/null") | ., sub("^[ab]/"; "") ] | unique;
+    | select(. != "/dev/null" and length > 0) | ., sub("^[ab]/"; "") ] | unique;
 def patch_dry_run:
   if .prog == "patch" then any(.args[]; test("^(--dry-run|-C|--check)$"))
   elif .sub == "apply" then any(.args[]; test("^--(check|stat|numstat|summary)$")) and (any(.args[]; . == "--apply") | not)
@@ -477,13 +568,26 @@ def patch_findings($cmds; $context; $restricted):
 # the submission, another repository (git -C, --git-dir, --work-tree) or an operation in progress
 # (--continue, --skip, a range) ask now; otherwise the wrapper checks at hook time whether the state
 # files differ between HEAD and the ref (or base and ref) and whether uncommitted state changes
-# would be discarded, and asks only if so. Each item: {op, ref, base, discard, path, now}.
-def git_state_value_flags: ["-b", "-B", "--orphan", "-c", "-C", "--create", "--force-create", "-m", "-F", "--file", "-s", "--strategy",
-                            "-X", "--strategy-option", "--onto", "-x", "--exec", "--into-name", "--conflict", "--pathspec-from-file"];
-def literal_ref: test("[$`*?\\[]") | not;
+# would be discarded, and asks only if so. Each item: {op, ref, parent, discard, path, branch,
+# untracked, ignored, dir, now} (the wrapper reads them, guard-bash.sh state_can_change).
+# RR3-4: options that take a value, per subcommand (-x and -s are flags of cherry-pick and revert,
+# -m a flag of checkout, switch and rebase, and the mainline number of cherry-pick and revert).
+def git_state_value_flags($sub):
+  {"checkout": ["-b", "-B", "--orphan", "--conflict", "--pathspec-from-file"],
+   "switch": ["-c", "-C", "--create", "--force-create", "--orphan", "--conflict"],
+   "merge": ["-m", "-F", "--file", "-s", "--strategy", "-X", "--strategy-option", "--into-name"],
+   "rebase": ["--onto", "-s", "--strategy", "-X", "--strategy-option", "-x", "--exec"],
+   "cherry-pick": ["-m", "--mainline", "-X", "--strategy-option", "--strategy"],
+   "revert": ["-m", "--mainline", "-X", "--strategy-option", "--strategy"],
+   "stash": ["-m", "--message", "--pathspec-from-file"],
+   "restore": ["-s", "--source", "--pathspec-from-file", "--conflict"],
+   "reset": ["--pathspec-from-file"]}[$sub // ""] // [];
+# RR3-5: a control character in a ref asks (it could split or truncate what the wrapper reads).
+def literal_ref: test("[$`*?\\[[:cntrl:]]") | not;
 def git_state_items($context; $root):
   .sub as $sub | .args as $args
-  | ($args | positionals_skipping(git_state_value_flags)) as $operands
+  | git_state_value_flags($sub) as $value_flags
+  | ($args | positionals_skipping($value_flags)) as $operands
   | any($args[]; test("^(-f|--force|--discard-changes)$")) as $force
   | any($args[]; test("^--(abort|quit)$")) as $abort
   | any($args[]; test("^--(continue|skip)$")) as $resume
@@ -494,32 +598,43 @@ def git_state_items($context; $root):
     if $sub == "pull" then [{op: "git pull", now: "it fetches and merges commits whose state is not known here"}]
     elif $sub == "checkout" then
       (if $dashes != null then
-         (if ($args[0:$dashes] | positionals_skipping(git_state_value_flags) | length) == 0 and reaches($args[$dashes + 1:])
+         (if ($args[0:$dashes] | positionals_skipping($value_flags) | length) == 0 and reaches($args[$dashes + 1:])
           then [{op: "git checkout -- <paths>", discard: true}] else [] end)
        elif any($args[]; test("^(-b|-B|--orphan)$")) then
          (if any($args[]; . == "--orphan") then [{op: "git checkout --orphan", now: "it starts a branch with no files"}]
-          elif ($operands | length) > 0 then [{op: "git checkout -b", ref: ($operands[0] | switch_ref), discard: $force}] else [] end)
-       elif ($operands | length) == 1 then [{op: "git checkout <branch>", ref: ($operands[0] | switch_ref), path: true, discard: $force}]
+          elif ($operands | length) > 0 then [{op: "git checkout -b", ref: ($operands[0] | switch_ref), discard: $force, untracked: $force}] else [] end)
+       elif ($operands | length) == 1 then
+         [{op: "git checkout <branch>", ref: ($operands[0] | switch_ref), path: true, branch: true, discard: $force, untracked: $force}]
+       # RR3-7: checkout -f with no ref discards every local change.
+       elif ($operands | length) == 0 and $force then [{op: "git checkout -f", discard: true, untracked: true}]
        else [] end)
     elif $sub == "switch" then
       (if any($args[]; . == "--orphan") then [{op: "git switch --orphan", now: "it starts a branch with no files"}]
        elif any($args[]; test("^(-c|-C|--create|--force-create)$")) then
-         (if ($operands | length) > 0 then [{op: "git switch -c", ref: ($operands[0] | switch_ref), discard: $force}] else [] end)
-       elif ($operands | length) > 0 then [{op: "git switch", ref: ($operands[0] | switch_ref), discard: $force}]
+         (if ($operands | length) > 0 then [{op: "git switch -c", ref: ($operands[0] | switch_ref), discard: $force, untracked: $force}] else [] end)
+       elif ($operands | length) > 0 then [{op: "git switch", ref: ($operands[0] | switch_ref), branch: true, discard: $force, untracked: $force}]
        else [] end)
     elif $sub == "merge" or $sub == "rebase" or $sub == "cherry-pick" or $sub == "revert" then
       (if $abort then [{op: ("git " + $sub + " --abort"), discard: true}]
        elif $resume then [{op: ("git " + $sub + " --continue"), now: "it continues an operation in progress"}]
        elif $sub == "rebase" and any($args[]; test("^(--root|-i|--interactive)$")) then [{op: "git rebase", now: "it rewrites history interactively or from the root"}]
        elif $sub == "cherry-pick" or $sub == "revert" then
-         (if ($operands | length) == 0 then []
-          elif any($operands[]; contains("..")) then [{op: ("git " + $sub), now: "it applies a range of commits"}]
-          else [ $operands[] | {op: ("git " + $sub), ref: ., base: (. + "^")} ] end)
+         # -m N: the change is taken against parent N (RR3-4).
+         ((option_values($args; "-m"; "--mainline") + [ $args[] | select(test("^-m.")) | .[2:] ]) | last) as $mainline
+         | (if ($operands | length) == 0 then []
+            elif $mainline != null and ($mainline | test("^[1-9][0-9]{0,2}$") | not) then [{op: ("git " + $sub), now: "its parent number is not a number"}]
+            elif any($operands[]; contains("..")) then [{op: ("git " + $sub), now: "it applies a range of commits"}]
+            else [ $operands[] | {op: ("git " + $sub), ref: ., parent: (($mainline // "1") | tonumber)} ] end)
        else [ (if ($operands | length) > 0 then $operands[] else "@{upstream}" end), option_values($args; "--onto"; "--onto")[]
               | {op: ("git " + $sub), ref: .} ] end)
     elif $sub == "stash" then
       ((($operands | first) // "push") as $action
-       | if $action | IN("push", "save") then [{op: "git stash", discard: true}]
+       | if $action | IN("push", "save") then
+           # RR3-7: untracked (-u) and ignored (-a) files are stashed and removed too. Bounded and
+           # simple: these always ask, whatever is untracked or ignored now.
+           (if any($args[]; test("^(--include-untracked|--all|-[A-Za-z]*[ua][A-Za-z]*)$"))
+            then [{op: "git stash (untracked or ignored files)", now: "it also removes untracked or ignored files, which can include state files"}]
+            else [{op: "git stash", discard: true}] end)
          elif $action | IN("pop", "apply") then [{op: ("git stash " + $action), ref: ($operands[1] // "stash@{0}")}]
          elif $action == "branch" then [{op: "git stash branch", now: "it checks out a branch from a stash"}]
          else [] end)
@@ -531,22 +646,41 @@ def git_state_items($context; $root):
       (if any($args[]; test("^--(hard|merge|keep)$")) and ($operands | length) == 0 then [{op: "git reset --hard", discard: true}] else [] end)
     else [] end;
 
-# {now: [{op, why}], checks: [{op, ref, base, discard, path}]} over the commands in order.
+# RR3-6: a command that cannot change refs, the index or files: a read-only program, a context
+# command (cd, export, test, ...; exported Git variables are judged on the Git command itself) or a
+# Git read form with no executing construct (fetch excluded: it moves remote-tracking refs), that
+# writes no file (redirections, sort -o, uniq IN OUT, ...: command_write_targets).
+def provably_read_only:
+  ([ command_write_targets[].t | select(test("^(/dev/(null|stdout|stderr|tty)|-|[0-9]+-?)$") | not) ] | length) == 0
+  and .prog != null
+  and ((.prog | IN(readonly_programs[])) or (.prog | IN(context_programs[]))
+       or (.prog == "git" and .sub != "fetch" and ({sub: .sub, args: .args} | git_read_form)
+           and (git_exec_construct({sub: .sub, rest: .args, globals: .globals}) | not)));
+
+# {now: [{op, why}], checks: [items]} over the commands in order (substitutions before the command
+# that holds them, as they run).
 def git_state_policy($cmds; $context; $root):
-  reduce range(0; $cmds | length) as $i ({now: [], checks: [], changed: false};
+  (($context.cwd // "") | normalize_path("/")) as $session_directory
+  | reduce range(0; $cmds | length) as $i ({now: [], checks: [], changed: false};
     $cmds[$i] as $command
-    | if $command.prog != "git" then .
+    | if $command.prog != "git" then .changed = (.changed or ($command | provably_read_only | not))
       else
         ($command | git_state_items($context; $root)) as $items
         | (([ $command.globals[] | select(test("^--(git-dir|work-tree)")) ] | length) > 0 or (($command.chdir // []) | length) > 0) as $elsewhere
+        | ([ ($command.env // [])[] | select(git_env_safe | not) | sub("=.*$"; "") ] | first) as $variable
         | reduce $items[] as $item (.;
             if $item.now != null then .now += [{op: $item.op, why: $item.now}]
             elif $elsewhere then .now += [{op: $item.op, why: "it runs in another directory or repository"}]
-            elif .changed then .now += [{op: $item.op, why: "an earlier command in this submission changes refs or the index"}]
+            elif $variable != null then .now += [{op: $item.op, why: ("it runs with " + $variable + " set")}]
+            elif .changed then .now += [{op: $item.op, why: "an earlier command in this submission can change refs, the index or files"}]
             elif $item.ref != null and ($item.ref | literal_ref | not) then .now += [{op: $item.op, why: "its ref is not literal"}]
-            else .checks += [$item] end)
-        # Anything but a read (fetch included: it moves remote-tracking refs) makes later checks stale.
-        | .changed = (.changed or ($items | length) > 0 or ({sub: $command.sub, args: $command.args} | git_read_form | not) or $command.sub == "fetch")
+            # RR3-6: the check runs in the command's directory; one this submission cannot resolve asks.
+            elif $command.dir == $session_directory or $command.dir == ($context.cwd // "") then .checks += [$item]
+            elif (directory_suffix({cwd: $command.dir, base: $session_directory}) | is_pattern_target) or ($command.dir | test("[[:cntrl:]]")) then
+              .now += [{op: $item.op, why: "its directory cannot be resolved"}]
+            else .checks += [$item + {dir: $command.dir}] end)
+        # Anything but a read makes later checks stale.
+        | .changed = (.changed or ($items | length) > 0 or ($command | provably_read_only | not))
       end)
   | {now: .now, checks: .checks[0:8], over: ((.checks | length) > 8)};
 
