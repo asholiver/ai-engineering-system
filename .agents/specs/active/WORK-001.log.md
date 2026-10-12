@@ -675,6 +675,35 @@ Detailed evidence for WORK-001 delivery. The spec's "Implementation state" keeps
   6. ShellCheck is skipped, not failed, when it is not installed (pre-existing gate behaviour).
 - **Still required by the spec before merge:** push and PR (owner permission), CodeRabbit external review on the PR head, and owner acceptance, including review of the changed and added test expectations.
 
+## PR #5 and CodeRabbit external review (2026-10-12)
+- Pushed `feature/work-001-guard-v2` only (owner-approved, refspec push). PR #5: https://github.com/asholiver/ai-engineering-system/pull/5, base `main`, head `da5b45d287d4b8562c0a4296ea593c4f0160bd04`. Remote `main` unchanged at `1faa02e`.
+- **Release-gate gaps (unresolved):** the repository had no CI workflows, so PR #5 had no status checks, and ShellCheck was not mandatory in CI. `main` has no branch protection.
+- CodeRabbit reviewed head `da5b45d` (profile CHILL, 23 files): 2 actionable comments and 1 pre-merge warning.
+  - **Major (Security, CWE-184, `policy.jq` ~331-341):** clustered or joined `curl`/`wget` output options are not recognised as write targets. Coordinator test (inert runner, `scratchpad/cr1/probes.jsonl`, at `da5b45d`); all four give **none** where deny is expected:
+    - **c2** `curl -sSLo .agents/specs/active/WORK-9.state.json URL`;
+    - **c3** `curl -o.agents/specs/active/WORK-9.state.json URL`;
+    - **c7** `wget -O.agents/specs/active/WORK-9.state.json URL`;
+    - **c8** (backend) `curl -sSLo .git/hooks/pre-commit URL`.
+
+    c1, c4, c5 and c6 (`curl -o F`, `curl --output=F`, `wget -O F`, `wget -qO F`) deny. v0.2.0 gives none for all of c1-c8.
+    - **Status: OPEN security findings.** Their presence in v0.2.0 is not acceptance (owner, 2026-10-12). Not remediated; that needs explicit owner authorisation.
+  - **Minor (`WORK-001.md:199`):** the performance tests enforce CI tolerances (typical p95 under 500 ms, large input under 2500 ms), not the stated targets (150 ms, 1 s). Line 199 overstates what they establish. Open (spec wording).
+  - **Pre-merge warning:** docstring coverage 50% against an 80% threshold. Not dispositioned.
+
+## Minimal CI (owner-authorised 2026-10-12; separate commit, not pushed until approved)
+- `.github/workflows/check.yml`, check name **`check / check (ubuntu, ShellCheck 0.11.0)`**:
+  - triggered on `pull_request` to `main`, with `permissions: contents: read`;
+  - runner `ubuntu-24.04`, 30-minute timeout;
+  - `actions/checkout` pinned to v4.2.2 commit `11bd719…`, with `persist-credentials: false`;
+  - ShellCheck 0.11.0 from the official release, SHA-256 checked;
+  - Claude Code CLI `2.1.296` pinned on npm;
+  - runs `scripts/check.sh`, which includes `tests/run.sh` and ShellCheck. The job fails if ShellCheck is missing, if check.sh reports it skipped, or if `CHECK: PASSED` is absent.
+- **No model inference and no credentials, verified locally** (Claude Code 2.1.296, macOS): both `claude plugin validate --strict` commands pass with an empty HOME, no `ANTHROPIC_*` variables and all HTTP(S) sent to a dead proxy (127.0.0.1:9), and a broken manifest exits 1 under the same isolation. The CI check step uses the same dead-proxy environment and an empty `ANTHROPIC_API_KEY`.
+- **Not yet verified on Ubuntu (first CI run will show):**
+  - Linux behaviour of the hook tests (macOS bash 3.2 versus Ubuntu bash 5; `stat -c` is tried first; the APFS test is Darwin-only);
+  - timing tolerances on a shared runner;
+  - the npm postinstall of the CLI's Linux binary.
+
 ## Finding status (verified facts only)
 | Finding | Status |
 | :- | :- |
