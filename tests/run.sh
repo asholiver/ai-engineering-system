@@ -2519,6 +2519,32 @@ b|deny|git stash -m list && X=@NBSP@
 b|ask|git stash list && X=@NBSP@
 CASES
 
+# Closure pass (re-review 7, N7-1): the stash action is the first argument when it is a stash
+# subcommand, as Git parses it; otherwise a push. Git 2.46.0 and Apple Git 2.39.5 reject
+# `stash <option> list <path>` ("'push' can't be assumed"), so these ask only to stay conservative;
+# `stash <option> -- <path>` is the accepted implicit push.
+fix4_table "closure N7-1" "$state_fixture" <<'CASES'
+m|ask|git stash -u list .agents/specs/active/WORK-1.state.json
+m|ask|git stash -q list x
+m|ask|git stash -k show x
+m|ask|git stash -u drop
+m|ask|git stash -q -- .agents/specs/active/WORK-1.state.json
+m|none|git stash list
+m|none|git stash list --oneline
+m|none|git stash show -p stash@{1}
+m|none|git stash drop
+m|none|git stash clear
+b|deny|git stash -u list x
+b|none|git stash list --oneline
+b|none|git stash show -p stash@{1}
+CASES
+
+# Closure pass: the WORK-001 replacement probe set (tests/guard-probes.txt; not the lost historical
+# corpus), one risk-focused line per security boundary, in the agent repository (branch feature).
+probe_lines="$(grep -c '^[mb]|' "$repository_directory/tests/guard-probes.txt")"
+if [ "$probe_lines" -ge 45 ]; then pass; else fail "closure: the replacement probe set has $probe_lines probes (expected at least 45)"; fi
+fix4_table "replacement probes" "$agent_repository" <"$repository_directory/tests/guard-probes.txt"
+
 # ---------------------------------------------------------------- run-gate
 commit_all() { git -C "$1" add -A && git -C "$1" -c user.name=test -c user.email=test@example.com commit -q -m "$2"; }
 gate_repository="$(new_repository gate-repo main)"

@@ -368,6 +368,58 @@ Detailed evidence for WORK-001 delivery. The spec's "Implementation state" keeps
   - RR3-12 has not been independently probed.
   - The historical probe corpus is lost and not reconstructed.
 
+## Focused security re-review 7 (Opus, 51ed302..fd52596)
+- Static review: `git diff`, `git show`, `grep`, Read. No probes were run and none was denied.
+- **N6-1: RESOLVED.**
+  - The union only adds asks: the original pass is always included, and expansion can only produce names from the subcommand's value-option list, never `--staged`.
+  - Exemptions keep their exact spelling.
+  - `git_pathspec_file`, the checkout pathspec-file item and the `--source` abbreviations are covered.
+  - The stash read-form narrowing causes no false deny (`stash list --oneline` and `stash show -p stash@{1}` stay reads).
+- **ShellCheck changes: acceptable.** The directives are single-line, each has a reason, there is no `.shellcheckrc` and no global disable, and the gate still fails on any finding. The `*cpio*` removal, `names_in` and the loop-variable rename do not change behaviour.
+- **Test integrity: confirmed.** Correction to "Fix round 7": the "round 7 N6-1" table has **30** cases, not 31.
+- **N7-1 (MEDIUM as reported; bounded).** The `git_state_items_one` stash branch takes the action as the first positional after a leading option, so `git stash -u list <path>` would read as `list` (none). The precondition was inferred from Git's parse-options.
+  - **Coordinator check** (`scratchpad/syntax/n71.sh` and a bash re-check, Git 2.46.0 and Apple Git 2.39.5): Git **rejects** these forms: "fatal: subcommand wasn't specified; 'push' can't be assumed due to unexpected token 'list'", exit 128, no stash, state file unchanged.
+    - The same happens for `stash -q <path>`, `-k show <path>` and `-u drop`.
+    - An implicit push with paths is accepted only after `--` (`git stash -q -- <path>`: stashed and reverted), and P-2 already asks for it.
+    - `git stash push -q list <path>` treats `list` as a pathspec and errors when it matches nothing. `push` is not in the no-item list, so it asks either way.
+  - So the guard's reading differs from Git only for commands Git refuses, on both supported versions. It is not exploitable on them. It is a robustness gap, not fixed; aligning the stash action with "first argument only" would need owner authorisation.
+- Verdict: N6-1 resolved; ShellCheck sound; nothing lowered; no new HIGH.
+
+## Closure pass (owner-authorised 2026-10-12: RR3-12, the lost probe evidence, N7-1)
+- **N7-1 fix:** the `git_state_items_one` stash action is now the first argument when that is a stash subcommand, and otherwise a push (as Git parses it, and as `git_read_form` does since round 7).
+  - Git behaviour (scratch, 2.46.0 and Apple 2.39.5): `stash <option> list|show|drop <path>` is rejected; `stash -q -- <path>` is the accepted implicit push.
+  - Regression table "closure N7-1": 13 cases. The read forms `list`, `list --oneline`, `show -p stash@{1}`, `drop` and `clear` stay none, and the specialist reads too.
+  - Coordinator comparison against `fd52596` (1241 commands, coordinator and backend): 5 coordinator none → ask, all N7-1 forms; nothing else changed.
+- **Replacement probe set (`tests/guard-probes.txt`; not the lost corpus).**
+  - 45 risk-focused probes, run by `tests/run.sh`, one line per boundary:
+    - 15 for the v0.2 floor;
+    - compound deny;
+    - 6 Landra false-positive categories;
+    - 6 evasion, including NBSP fallback and a newline context prefix;
+    - 6 specialist Git;
+    - 3 authority store;
+    - 7 protected trees and state-changing Git.
+  - The test asserts the set has at least 45 probes.
+  - **One-off comparison with the v0.2.0 install** (cache identical to the tag), in a feature-branch scratch repository. After a coordinator harness error was corrected, it gave:
+    - ask → ask: 17;
+    - ask → deny: 2 (the compound denies);
+    - none → ask or deny: 15 (new coverage: vercel/neon, evasion, specialist Git, the store, protected trees, Option B);
+    - ask → none: 4 (the Landra false-positive categories, by design: AC1);
+    - none → none: 7.
+    - The harness error: one comparison line kept a literal `$'\n'`. Rerun with a real newline: v0.2 ask, now ask.
+  - **Not available:** comparability with the historical 674 + 36 probes and their earlier `compare.sh` results. The lost corpus is not recovered or reproduced; this set replaces it as forward regression evidence only.
+- **RR3-12: independent verification, step 1 (design; security-reviewer, static).**
+  - The reviewer confirmed from code that the hook never executes the submitted command text. Evidence:
+    - jq parsing only: `main.jq:26,32`, `fallback.jq:7`;
+    - hashing and `grep` only: `guard-bash.sh:82,84,212`;
+    - the only filesystem touch derived from the command: `[ -f ]` at `guard-bash.sh:347`;
+    - no `eval`, `bash -c` or `sh -c` in the hook scripts.
+  - It designed 20 probes: 12 for case variants and overwrites, 4 specialist, 4 harmless. It predicts 4 gaps (probes 9-12: `dd of=`, `sort -o`, `1<>`, a first-write `>>`, each letting a staged patch reach `git apply` with no decision).
+  - Step 2 (execution) pending: inert fixtures are in `scratchpad/rr312/probes.jsonl`, written by the coordinator verbatim from the design, with the fixed runner `scratchpad/rr312/run.sh`.
+- Verification:
+  - `tests/run.sh`: 1973 passed, 0 failed.
+  - `scripts/check.sh` with ShellCheck 0.11.0 executing: `CHECK: PASSED`.
+
 ## Finding status (verified facts only)
 | Finding | Status |
 | :- | :- |

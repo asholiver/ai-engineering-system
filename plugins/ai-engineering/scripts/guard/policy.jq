@@ -634,9 +634,10 @@ def git_state_items_one($context; $root):
     elif $sub == "cherry-pick" or $sub == "revert" then
       (if ($operands | length) > 0 or has_long(["--abort", "--quit", "--continue", "--skip"]) then item("git " + $sub) else [] end)
     elif $sub == "stash" then
-      # P-2: the action is the first operand before `--` (`git stash -- <paths>` is a push). Only the
-      # actions that leave the working tree alone get no item.
-      ((($args[0:($dashes // ($args | length))] | positionals_skipping(git_state_value_flags($sub)) | first) // "push") as $action
+      # P-2 and N7-1: as Git parses it, the action is the first argument when that is a stash
+      # subcommand; anything else (an option, `--`, a path) is a push. Only the actions that leave
+      # the working tree alone get no item.
+      (((($args | first) // "push") | if IN("list", "show", "drop", "clear", "create", "store", "push", "save", "pop", "apply", "branch") then . else "push" end) as $action
        | if $action | IN("list", "show", "drop", "clear", "create", "store") then []
          else item("git stash " + (if $action | IN("pop", "apply", "branch", "save") then $action else "push" end)) end)
     elif $sub == "restore" then
