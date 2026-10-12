@@ -535,6 +535,26 @@ Detailed evidence for WORK-001 delivery. The spec's "Implementation state" keeps
   - Nothing lowered, and nothing else changed.
 - **Prompt measure (corpus only, no real-world extrapolation):** 13 of 1284 corpus commands newly ask for the coordinator. The 5 direct-heredoc patch applies in the corpus stay no decision.
 
+## Independent re-review of option 1 (security-reviewer, d49598e..891e82b)
+- Static verdict:
+  - Option 1 is implemented correctly for the documented forms.
+  - Rules 2, 6 and 7 hold; rule 3 holds except through G2.
+  - r6's ask → deny is justified; the limitation is accurate but narrower than it reads: other producers (`head f |`, `< <(cat f)`, xargs) ask, not deny.
+  - Test integrity confirmed: exactly the 9 authorised none → ask expectation changes and 25 additions.
+- **Tested by the coordinator** (inert runner, `scratchpad/opt1-r/probes.jsonl`, the reviewer's 14 probes verbatim, at `891e82b`): **p1-p9 give none.** p10-p14 as expected (`git apply - < f`, `<(cat f)`, `echo "$(cat f)" |` and `env git apply < f` ask; the real dry run `--check --exclude=x` stays none).
+- Gaps confirmed, all in option parsing for the patch tools:
+  - **G1 (HIGH as reported):** `xargs git apply <<'EOF'\nfix.patch\nEOF` and `<<< fix.patch`. The xargs heredoc is taken as patch content, though it supplies the file name.
+  - **G2 (HIGH as reported):** `git apply --exclude --check fix.patch` is treated as a dry run because `--check` is taken as a flag. Git takes it as the value of `--exclude` and applies. With a store patch the submission wrote (p4), the result is none instead of deny. `patch -p1 -i --dry-run` is the same shape.
+  - **G3 (MEDIUM):** `cat -- -fix.patch <<'EOF' | git apply`. A file after `--` is read as an option.
+  - **G4 (MEDIUM):** `patch -p1 -fi F`, `--inp=F` and `--inp F`. Bundled or abbreviated input options are missed, so a decoy heredoc decides.
+- **Real behaviour (scratch; Git 2.46.0 and Apple 2.39.5, Apple patch 2.0):**
+  - `git apply --exclude --check fix.patch` applies (both Gits); `--check --exclude=x` does not.
+  - `xargs git apply <<< fix.patch` applies.
+  - `patch -fi fix.patch`, `--inp=fix.patch` and `--inp fix.patch`, with a decoy on stdin, apply `fix.patch`.
+  - `patch -p1 -i --dry-run` errors (exit 2) and writes nothing.
+- **Not regressions:** p1-p9 also give none at `38465e0`, at `cc63324` and at v0.2.0.
+- Not fixed: outside the option-1 authorisation, so an owner decision is requested. Coordinator assessment: like N6-1 and P-1, these come from emulating each tool's option grammar (values, bundles, abbreviations, `--`, xargs argument injection), which is open-ended.
+
 ## Finding status (verified facts only)
 | Finding | Status |
 | :- | :- |
