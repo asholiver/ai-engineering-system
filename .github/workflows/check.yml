@@ -55,16 +55,16 @@ jobs:
       - name: Run scripts/check.sh (includes tests/run.sh and ShellCheck)
         env:
           ANTHROPIC_API_KEY: ""
-          HTTP_PROXY: http://127.0.0.1:9
-          HTTPS_PROXY: http://127.0.0.1:9
-          http_proxy: http://127.0.0.1:9
-          https_proxy: http://127.0.0.1:9
-          NO_PROXY: ""
           DISABLE_AUTOUPDATER: "1"
           DISABLE_TELEMETRY: "1"
           CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
         run: |
           set -euo pipefail
+          # Every HTTP(S) request goes to a dead local proxy. Both spellings are set here, not in
+          # `env:` above, because GitHub treats `env:` keys case-insensitively (a duplicate key error).
+          export HTTP_PROXY=http://127.0.0.1:9 HTTPS_PROXY=http://127.0.0.1:9
+          export http_proxy=http://127.0.0.1:9 https_proxy=http://127.0.0.1:9
+          export NO_PROXY= no_proxy=
           scripts/check.sh 2>&1 | tee "$RUNNER_TEMP/check.log"
           if grep -q 'shellcheck not installed; skipped' "$RUNNER_TEMP/check.log"; then
             echo "::error::ShellCheck was skipped; it is mandatory in CI"
