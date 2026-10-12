@@ -1425,11 +1425,16 @@ def parse_script_in($text; $depth; $branch; $outer):
                        (if $program.name == "patch" then option_texts($args; ["-i", "--input"]) + (($args | positionals_skipping(patch_value_flags))[1:2])
                         else ($git_parts.rest | positionals_skipping(git_patch_value_flags)) end) as $patch_files
                        | ($patch_files + [ $command.r[] | select(.op == "<") | .t ]) as $sources
-                       | if ($sources | length) > 0 then
-                           [ $sources[] | file_entry($ctx; $run_dir; .) ] as $entries
-                           | {texts: [ $entries[] | select(. != null) | .t ],
-                              known: (all($entries[]; . != null and .k) and (($ctx.opaque // false) | not))}
-                         else stdin_content($command; $before) end
+                       # Owner decision (closure, option 1): patch content read from a file is never
+                       # known, whoever wrote the file: its provenance (other writers, links, downloads,
+                       # concurrent changes) is not tracked, so a file-backed apply asks. Only content
+                       # given directly on standard input (a heredoc or here-string, or echo, printf or
+                       # cat of one) is known. The hunks this submission wrote into a file it applies,
+                       # directly or through `cat FILE |`, still count for the store and Git-file deny.
+                       | ([ $sources[], ($before[] | select(raw_head(.) == "cat") | .w[1:][] | select((.d | not) and (.l | startswith("-") | not)) | .l) ]
+                          | map(file_entry($ctx; $run_dir; .) | select(. != null) | .t)) as $written
+                       | if ($sources | length) > 0 then {texts: $written, known: false}
+                         else stdin_content($command; $before) as $stdin | $stdin + {texts: ($stdin.texts + $written)} end
                      else null end) as $patch
                   | {kind: (if ($inner_texts | length) > 0 then "none"
                             elif is_context($program.name; $args) and $op == null then "ctx" else "eff" end),

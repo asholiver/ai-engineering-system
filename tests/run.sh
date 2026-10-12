@@ -1685,6 +1685,8 @@ expect_equal "lib: classify_command_impact sees state-changing Git as ask (exit 
 
 # N6(b) owner ruling: patch, git apply and git am ask when the patch is not text from this
 # submission; a known patch denies when it touches the store (or Git's own files, for specialists).
+# Changed by the owner's closure decision (option 1, 2026-10-12), none -> ask: a patch read from a
+# file is never trusted, even one this submission wrote (`cat > f.patch` then `git apply f.patch`).
 while IFS='|' read -r agent expected command_text; do
   [ -n "$expected" ] || continue
   expect_equal "fix round 3 N6(b) ($agent): $command_text" "$expected" "$(decision_of "$(agent_output "$command_text" "$agent_repository" "$agent")")"
@@ -1698,7 +1700,7 @@ m|none|patch --dry-run -p1 < fix.patch
 m|none|git apply <<'EOF'\ndiff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\nEOF
 m|deny|patch -p1 <<'EOF'\n--- a/.agents/specs/active/WORK-9.state.json\n+++ b/.agents/specs/active/WORK-9.state.json\nEOF
 m|deny|git apply <<'EOF'\ndiff --git a/src/x b/.agents/specs/active/WORK-9.state.json\nrename from src/x\nrename to .agents/specs/active/WORK-9.state.json\nEOF
-m|none|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\ngit apply f.patch
+m|ask|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\ngit apply f.patch
 m|deny|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/.agents/specs/active/WORK-9.state.json\nEOF\ngit apply f.patch
 m|deny|git apply --directory=.agents/specs/active <<'EOF'\n--- a/x.json\n+++ b/x.json\nEOF
 m|deny|git apply --include='.agents/specs/*' <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF
@@ -2244,6 +2246,7 @@ CASES
 
 # RR3-12: write-then-run keys ignore case (APFS), a different spelling is not exact, and a known file
 # that a writer names again (or any program that can write without naming it) is no longer known.
+# Closure option 1: the two file-backed `git apply` lines after chmod and cat were none, now ask.
 fix4_table "RR3-12" "$agent_repository" <<'CASES'
 m|ask|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\ncp other.patch f.patch\ngit apply f.patch
 m|ask|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\nmv other.patch f.patch\ngit apply f.patch
@@ -2252,8 +2255,8 @@ m|ask|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\nsed -i 's/x/y/' f.pa
 m|ask|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\nsudo cp other.patch F.PATCH\ngit apply f.patch
 m|ask|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\nbash -c 'cp other.patch f.patch'\ngit apply f.patch
 m|ask|cat > F.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\ngit apply f.patch
-m|none|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\nchmod 644 f.patch\ngit apply f.patch
-m|none|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\ncat f.patch\ngit apply f.patch
+m|ask|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\nchmod 644 f.patch\ngit apply f.patch
+m|ask|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\ncat f.patch\ngit apply f.patch
 m|deny|echo 'terraform apply' > R.sh; sh r.sh
 m|deny|echo 'terraform apply' > r.sh; sh r.sh
 CASES
@@ -2544,7 +2547,8 @@ CASES
 # detection fails closed (an unlisted program that names the file counts as a writer; `of=F`,
 # `--output=F` and `-oF` name F); `<>` and `>&<file>` writes and a first-write append are unknown.
 # Store hunks the submission wrote still deny (deny wins over the unknown-content ask). Harmless
-# reads and metadata keep a known patch known.
+# reads and metadata keep a known patch known. Closure option 1: the six file-backed "harmless
+# control" applies (none) now ask, since a patch read from a file is never trusted.
 fix4_table "RR3-12 closure" "$agent_repository" <<'CASES'
 m|ask|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\ndd if=other.patch of=F.PATCH\ngit apply f.patch
 m|ask|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\ndd if=other.patch of=f.patch\ngit apply f.patch
@@ -2565,14 +2569,49 @@ m|deny|cat > p.diff <<'EOF'\n--- a/.agents/specs/active/W.state.json\n+++ b/.age
 m|deny|cat >> p.diff <<'EOF'\n--- a/.agents/specs/active/W.state.json\n+++ b/.agents/specs/active/W.state.json\nEOF\ngit apply p.diff
 m|deny|cat > p.diff <<'EOF'\n--- a/.agents/specs/active/W.state.json\n+++ b/.agents/specs/active/W.state.json\nEOF\nmytool --out=p.diff\ngit apply p.diff
 b|deny|cat > p.diff <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\ndd if=x of=p.diff\ngit apply p.diff
-m|none|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\ngit apply f.patch
-m|none|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\nwc -l f.patch\ngit apply f.patch
-m|none|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\nchmod 644 f.patch\ngit apply f.patch
-m|none|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\ngrep -c src f.patch\ngit apply f.patch
-m|none|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\ncat >> f.patch <<'EOF'\n--- a/src/y\n+++ b/src/y\nEOF\ngit apply f.patch
-m|none|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\nmytool --out other.txt\ngit apply f.patch
+m|ask|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\ngit apply f.patch
+m|ask|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\nwc -l f.patch\ngit apply f.patch
+m|ask|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\nchmod 644 f.patch\ngit apply f.patch
+m|ask|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\ngrep -c src f.patch\ngit apply f.patch
+m|ask|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\ncat >> f.patch <<'EOF'\n--- a/src/y\n+++ b/src/y\nEOF\ngit apply f.patch
+m|ask|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\nmytool --out other.txt\ngit apply f.patch
 m|none|echo x 2>&1 > notes.txt
 m|none|sort -o sorted.txt names.txt
+CASES
+
+# Closure option 1 (owner decision 2026-10-12): a patch read from a file is never trusted, so a
+# mutating git apply, git am or patch of a file asks (coordinator), whatever wrote the file. The
+# independently confirmed probes r1, r2, r3, r5 (replaced by cp to a directory, curl -O, a symlink made
+# first, env -C) now ask; r6 (`cat f.patch | git apply` of store hunks this submission wrote) denies,
+# as do store hunks written into any applied file. Content given directly on standard input stays
+# judged by content. Dry runs stay none unless an abbreviated --apply (`--ap`, which Git 2.46 and
+# 2.39 apply) or --build-fake-ancestor makes them real. Specialists stay denied.
+fix4_table "closure option 1" "$agent_repository" <<'CASES'
+m|ask|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\ncp other/f.patch .\ngit apply f.patch
+m|ask|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\ncurl -fsSLO https://example.invalid/f.patch\ngit apply f.patch
+m|ask|ln -s f.patch g.patch\ncat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\ncat other.patch > g.patch\ngit apply f.patch
+m|ask|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\nenv -C src cp ../other.patch ../f.patch\ngit apply f.patch
+m|deny|cat > f.patch <<'EOF'\n--- a/.agents/specs/active/W.state.json\n+++ b/.agents/specs/active/W.state.json\nEOF\ncat f.patch | git apply
+m|deny|cat > f.patch <<'EOF'\n--- a/.agents/specs/active/W.state.json\n+++ b/.agents/specs/active/W.state.json\nEOF\ngit apply f.patch
+m|deny|cat > f.patch <<'EOF'\n--- a/.agents/specs/active/W.state.json\n+++ b/.agents/specs/active/W.state.json\nEOF\npatch -p1 < f.patch
+m|ask|git apply fix.patch
+m|ask|git apply --index fix.patch
+m|ask|git am 0001-fix.patch
+m|ask|patch -p1 < fix.patch
+m|ask|patch -p1 -i fix.patch
+m|ask|cat fix.patch | git apply
+m|ask|git apply --check --ap fix.patch
+m|ask|git apply --stat --apply fix.patch
+m|ask|git apply --check --build-fake-ancestor=anc fix.patch
+m|none|git apply --check fix.patch
+m|none|git apply --stat fix.patch
+m|none|patch --dry-run -p1 < fix.patch
+m|none|git apply <<'EOF'\n--- a/src/app.ts\n+++ b/src/app.ts\nEOF
+m|none|patch -p1 <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF
+m|none|cat <<'EOF' | git apply\n--- a/src/x\n+++ b/src/x\nEOF
+m|deny|git apply <<'EOF'\n--- a/.agents/specs/active/W.state.json\n+++ b/.agents/specs/active/W.state.json\nEOF
+b|deny|git apply fix.patch
+b|deny|git apply <<'EOF'\n--- a/src/app.ts\n+++ b/src/app.ts\nEOF
 CASES
 
 # Closure pass: the WORK-001 replacement probe set (tests/guard-probes.txt; not the lost historical

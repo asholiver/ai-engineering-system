@@ -502,6 +502,39 @@ Detailed evidence for WORK-001 delivery. The spec's "Implementation state" keeps
   - 5 pipe a heredoc straight into `git apply` or `patch`, with no file and so no window to replace it.
   - 2 are `--check`/`--dry-run`.
 
+## Owner decision (2026-10-12): option 1, stop trusting file-backed patches
+- An explicit architectural decision. It **replaces the N6(b) exception** that let a proven-safe file-backed patch through without approval, and removes the open-ended patch-file provenance problem instead of adding writer detection.
+- **Implementation** (classify.jq patch content; policy.jq `patch_dry_run`):
+  - Patch content read from a file (an operand, `-i`, or `<` redirection) is never known, whoever wrote the file. A mutating `git apply`/`git am`/`patch` of a file therefore asks for the coordinator.
+  - Content given directly on standard input (a heredoc or here-string, or echo/printf/bare-`cat` of one, through a pipeline) is still judged by content. It is inline in the command and cannot be replaced through a file.
+  - The decision does not depend on writer tracking, provenance, links, downloads, concurrency or earlier commands. No parser, tracker or Git inspection was added.
+  - Deny precedence: the hunks this submission wrote into a file it applies, directly or through `cat FILE |`, are still checked. A store hunk, or a Git-file hunk for specialists, denies.
+- **Probe r6 (`cat f.patch | git apply`):** the guard cannot establish the applied content from trustworthy data, because it comes from a file.
+  - It can establish that the submission itself wrote store hunks into that file and pipes the file into `git apply`. That is a positively identified attempt to apply store hunks, so it **denies** (ask → deny).
+  - A file this submission did not write cannot be read, so its target is unknown and it asks. **Documented limitation:** a store-targeting patch staged outside the submission is an ask (coordinator approval), not a deny.
+- **Dry runs (verified, scratch repositories, Git 2.46.0 and Apple 2.39.5; Apple patch 2.0):**
+  - `git apply --check` writes nothing; `git apply --check --ap` **applies the patch** (abbreviated `--apply`); `--stat --apply` applies; `--build-fake-ancestor` errors in these runs.
+  - `patch --dry-run`/`-C`/`--dry`, even with `-o`, wrote nothing.
+  - **Fix:** `patch_dry_run` for `git apply` now excludes any `git_long_option(["--apply", "--build-fake-ancestor"])`. Before, `--check --ap` gave none.
+- Tests:
+  - 9 expectations changed none → ask: file-backed applies of patches this submission wrote, each commented with this decision.
+  - New table "closure option 1", 25 cases:
+    - r1, r2, r3 and r5 ask; r6 denies;
+    - store hunks in an applied file deny (`git apply`, `patch <`);
+    - the file-backed forms ask (`git apply`, `--index`, `git am`, `patch <`/`-i`, `cat | git apply`);
+    - fake dry runs ask; real dry runs stay none;
+    - direct-heredoc controls stay none, and store heredocs deny;
+    - specialists deny.
+  - The independent fixture sets: rr312-fix d1-d8 all deny; rr312-r2 r1-r11 as expected, r12 now ask (file-backed, as decided); rr312 probe 19 now ask (file-backed); probe 1 is the deploy-path artefact.
+- Verification:
+  - `tests/run.sh`: 2025 passed, 0 failed.
+  - `scripts/check.sh` with ShellCheck 0.11.0 executing: `CHECK: PASSED`.
+- **Comparison with `38465e0`** (1284 corpus commands, coordinator and backend):
+  - 13 coordinator none → ask: 11 file-backed applies and 2 fake dry runs.
+  - 1 coordinator ask → deny (r6).
+  - Nothing lowered, and nothing else changed.
+- **Prompt measure (corpus only, no real-world extrapolation):** 13 of 1284 corpus commands newly ask for the coordinator. The 5 direct-heredoc patch applies in the corpus stay no decision.
+
 ## Finding status (verified facts only)
 | Finding | Status |
 | :- | :- |

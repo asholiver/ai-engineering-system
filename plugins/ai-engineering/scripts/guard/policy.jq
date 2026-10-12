@@ -565,7 +565,10 @@ def patch_paths:
     | select(. != "/dev/null" and length > 0) | ., sub("^[ab]/"; "") ] | unique;
 def patch_dry_run:
   if .prog == "patch" then any(.args[]; test("^(--dry-run|-C|--check)$"))
-  elif .sub == "apply" then any(.args[]; test("^--(check|stat|numstat|summary)$")) and (any(.args[]; . == "--apply") | not)
+  # Closure (option 1): an abbreviated `--apply` (`--ap`, accepted by Git 2.46 and 2.39) applies
+  # even with --check, and --build-fake-ancestor writes a file; either makes it a real apply.
+  elif .sub == "apply" then any(.args[]; test("^--(check|stat|numstat|summary)$"))
+    and (any(.args[]; git_long_option(["--apply", "--build-fake-ancestor"])) | not)
   else false end;
 def patch_label: if .prog == "patch" then "patch" else "git " + .sub end;
 # {ask: [labels], deny: [paths]} over the commands that apply a patch.
