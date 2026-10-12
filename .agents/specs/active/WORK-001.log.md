@@ -477,6 +477,31 @@ Detailed evidence for WORK-001 delivery. The spec's "Implementation state" keeps
 - **Dogfood (2026-10-12):** an inline `bash -c` comparison script was blocked by a Claude Code built-in safety check ("passes a shell -c script that runs rm"). The script contained no removal; the trigger was not verified. It was not re-issued through another shell; the cases ran through the inert fixture runner instead.
 - Evidence gaps: RR3-12's "probably similar" writers that were not run individually (`yq`, `xxd`, `iconv`, `less -o`) fall under the fail-closed rule, or are listed writers. The historical probe corpus is still not reproduced.
 
+## Independent review of the RR3-12 closure fix (security-reviewer, 63e8c7d..38465e0)
+- Static verdict:
+  - G12-1..G12-4 are fixed. Nothing is lowered: the changes only set k=false or add deny.
+  - NR-3c (the parse of a run script) is unaffected.
+  - Test integrity: confirmed, add-only.
+- **Tested by the coordinator** with the inert runner (`scratchpad/rr312-r2/probes.jsonl`, the reviewer's 12 probes verbatim, at `38465e0`):
+  - **r1-r3 and r5 give none (expected ask)** for a patch the submission wrote and then replaced:
+    - r1: `cp other/f.patch .` (the destination is a directory);
+    - r2: `curl -fsSLO https://…/f.patch` (the name comes from the URL; the content arrives from the network inside the submission, nothing staged);
+    - r3: `ln -s f.patch g.patch` before the write, then `> g.patch` (aliasing inside the submission);
+    - r5: `env -C src cp ../other.patch ../f.patch` (the wrapper chdir is not followed).
+  - **r6:** `cat f.patch | git apply` of a store-hunk patch the submission wrote gives ask, not deny (the pipeline producer's text is unknown).
+  - r4, r7-r12 as expected. That includes the subshell `cd`, the case variant, the echo-built store patch denying, `--include='*'` with no false deny, and no raise for `shellcheck r.sh`.
+  - All five mismatches give the same result at `cc63324`. At v0.2.0, r1-r3 and r5 also give none, and r6 none (v0.2 had no patch rules). **Not regressions.**
+- Reviewer, on the trust boundary: concurrent external writers are genuinely unobservable. An already existing symlink could be detected at hook time (a `realpath` stat), so not doing so is a trade-off, not a hard limit. Aliasing set up inside the submission and network or archive content are within the model and not handled.
+- **Coordinator assessment: the "known patch ⇒ no decision" model is incomplete by enumeration.**
+  - Two independent rounds have each found new in-submission ways to replace a written patch: G12-1..4, then r1-r3 and r5.
+  - The space of writers (directory destinations, URL- or archive-derived names, aliasing, wrapper chdirs, …) is open-ended.
+  - Per the owner's stop condition, no further remediation was started; an architectural decision is requested.
+- Prompt cost of removing that trust:
+  - 14 coordinator commands in the test corpus apply a patch with no decision today.
+  - 7 are file patches the submission wrote.
+  - 5 pipe a heredoc straight into `git apply` or `patch`, with no file and so no window to replace it.
+  - 2 are `--check`/`--dry-run`.
+
 ## Finding status (verified facts only)
 | Finding | Status |
 | :- | :- |
