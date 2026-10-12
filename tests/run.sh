@@ -2539,6 +2539,42 @@ b|none|git stash list --oneline
 b|none|git stash show -p stash@{1}
 CASES
 
+# RR3-12 closure fix (independent probes 9-12, G12-1 to G12-4): a patch written in the submission
+# and then changed in a way the guard cannot read is unknown, so `git apply` asks. Overwrite
+# detection fails closed (an unlisted program that names the file counts as a writer; `of=F`,
+# `--output=F` and `-oF` name F); `<>` and `>&<file>` writes and a first-write append are unknown.
+# Store hunks the submission wrote still deny (deny wins over the unknown-content ask). Harmless
+# reads and metadata keep a known patch known.
+fix4_table "RR3-12 closure" "$agent_repository" <<'CASES'
+m|ask|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\ndd if=other.patch of=F.PATCH\ngit apply f.patch
+m|ask|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\ndd if=other.patch of=f.patch\ngit apply f.patch
+m|ask|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\nsort -o F.PATCH other.patch\ngit apply f.patch
+m|ask|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\nsort --output=f.patch other.patch\ngit apply f.patch
+m|ask|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\nsort -of.patch other.patch\ngit apply f.patch
+m|ask|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\nbase64 -d -o f.patch other.b64\ngit apply f.patch
+m|ask|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\nuniq other.patch f.patch\ngit apply f.patch
+m|ask|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\nmytool --out f.patch\ngit apply f.patch
+m|ask|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\ncat other.patch 1<>F.PATCH\ngit apply f.patch
+m|ask|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\necho x >&f.patch\ngit apply f.patch
+m|ask|cat >> f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\ngit apply f.patch
+m|ask|echo '--- a/src/x' &>> f.patch\ngit apply f.patch
+m|ask|cat <<'EOF' | tee -a f.patch\n--- a/src/x\n+++ b/src/x\nEOF\ngit apply f.patch
+m|deny|cat > p.diff <<'EOF'\n--- a/.agents/specs/active/W.state.json\n+++ b/.agents/specs/active/W.state.json\nEOF\ndd if=x of=p.diff\ngit apply p.diff
+m|deny|cat > p.diff <<'EOF'\n--- a/.agents/specs/active/W.state.json\n+++ b/.agents/specs/active/W.state.json\nEOF\nsort -o p.diff x\ngit apply p.diff
+m|deny|cat > p.diff <<'EOF'\n--- a/.agents/specs/active/W.state.json\n+++ b/.agents/specs/active/W.state.json\nEOF\ncat x 1<>p.diff\ngit apply p.diff
+m|deny|cat >> p.diff <<'EOF'\n--- a/.agents/specs/active/W.state.json\n+++ b/.agents/specs/active/W.state.json\nEOF\ngit apply p.diff
+m|deny|cat > p.diff <<'EOF'\n--- a/.agents/specs/active/W.state.json\n+++ b/.agents/specs/active/W.state.json\nEOF\nmytool --out=p.diff\ngit apply p.diff
+b|deny|cat > p.diff <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\ndd if=x of=p.diff\ngit apply p.diff
+m|none|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\ngit apply f.patch
+m|none|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\nwc -l f.patch\ngit apply f.patch
+m|none|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\nchmod 644 f.patch\ngit apply f.patch
+m|none|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\ngrep -c src f.patch\ngit apply f.patch
+m|none|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\ncat >> f.patch <<'EOF'\n--- a/src/y\n+++ b/src/y\nEOF\ngit apply f.patch
+m|none|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\nmytool --out other.txt\ngit apply f.patch
+m|none|echo x 2>&1 > notes.txt
+m|none|sort -o sorted.txt names.txt
+CASES
+
 # Closure pass: the WORK-001 replacement probe set (tests/guard-probes.txt; not the lost historical
 # corpus), one risk-focused line per security boundary, in the agent repository (branch feature).
 probe_lines="$(grep -c '^[mb]|' "$repository_directory/tests/guard-probes.txt")"

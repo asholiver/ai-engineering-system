@@ -575,12 +575,13 @@ def patch_findings($cmds; $context; $restricted):
     | ([ ($command.args | option_values(.; "--directory"; "--directory")[]),
          (if $command.prog == "patch" then option_values($command.args; "-d"; "--directory")[] else empty end) ] | last) as $directory
     | ([ option_values($command.args; "--include"; "--include")[] ] + (if $directory != null then [$directory] else [] end)) as $path_options
-    | if ($command.patch.known | not) then .ask += [($command | patch_label)]
-      else
-        ([ ($command.patch.texts | join("\n") | patch_paths)[] | if $directory != null then $directory + "/" + . else . end ] + $path_options) as $paths
-        | .store += [ $paths[] | select(store_path_hit(.; $where; "all") != null) ]
-        | .git += [ $paths[] | select($restricted and git_protected_hit(.; $where) != null) ]
-      end);
+    # The hunks this submission wrote into the patch count even when a later write makes its content
+    # unknown (RR3-12 closure fix): a store or Git-file hunk it wrote still denies, and deny wins
+    # over the ask that unknown content adds. Degraded certainty does not erase that fact.
+    | ([ ($command.patch.texts | join("\n") | patch_paths)[] | if $directory != null then $directory + "/" + . else . end ] + $path_options) as $paths
+    | .store += [ $paths[] | select(store_path_hit(.; $where; "all") != null) ]
+    | .git += [ $paths[] | select($restricted and git_protected_hit(.; $where) != null) ]
+    | if ($command.patch.known | not) then .ask += [($command | patch_label)] else . end);
 
 # ---------------------------------------------------------------- state-changing Git (N6(a), Option B)
 # Branch switches, merge, pull, rebase, cherry-pick, revert, stash and no-ref whole-tree restores

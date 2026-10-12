@@ -776,10 +776,13 @@ def assigned_names($depth):
 
 # RR3-12: what a command may overwrite among the files this submission wrote, wrappers seen through:
 # "all" for a program that can write any file without naming it (shell text, eval, inline
-# interpreter code, find -exec or -delete, xargs, make), else the keys of the literal words a file
-# writer names (file_writer_programs; Git checkout, restore, mv, rm and checkout-index; a script's
-# own arguments, which the script may write). Reads (cat, grep, git apply's patch, ...), metadata
-# (chmod) and the script a shell runs are not writes.
+# interpreter code, find -exec or -delete, xargs, make), else the keys of the literal words a
+# possible writer names: Git checkout, restore, mv, rm and checkout-index; a script's own arguments,
+# which the script may write; and (G12-1, G12-2, closure fix) every other program that is not a
+# known reader. The rule fails closed: an unlisted program counts as a writer. Readers (readonly_programs,
+# context commands, git apply's patch, ...) and metadata (chmod, chown, chgrp, touch) are not
+# writes, except readers with an output option (tables.jq output_option_flags: sort -o, base64 -o).
+# A word's value counts too: `of=F`, `--output=F`, `-oF` name F.
 def overwrite_targets($command; $dir):
   unwrap($command.w) as $unwrapped
   | $unwrapped.ws as $ws
@@ -787,6 +790,10 @@ def overwrite_targets($command; $dir):
   | ([ $ws[1:][].l ]) as $args
   | ([ $ws[1:][] | select(.l | startswith("-") | not) ]) as $operands
   | def keys_of($words): [ $words[] | select(.d | not) | path_key($dir; .l) | select(. != null) ];
+    def keys_of_values($words):
+      [ $words[] | select(.d | not) | .l
+        | ., (select(contains("=")) | sub("^[^=]*="; "")), (select(test("^-[A-Za-z][^-]")) | .[2:])
+        | path_key($dir; .) | select(. != null) ];
     if ($unwrapped.texts | length) > 0 or $head == "eval" or $head == "xargs" or ($head | IN("make", "gmake"))
        or ($head == "find" and any($args[]; IN("-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprintf", "-fls")))
        or (has_word(shells; $head) and any($args[]; test("^-[A-Za-z]*c[A-Za-z]*$")))
@@ -796,8 +803,9 @@ def overwrite_targets($command; $dir):
     elif $head == "git" then
       ((($args | positionals_skipping(git_value_flags)) | first) // "") as $sub
       | if $sub | IN("checkout", "restore", "mv", "rm", "checkout-index") then keys_of($ws[1:]) else [] end
-    elif has_word(file_writer_programs; $head) then keys_of($ws[1:])
-    else [] end;
+    elif has_word(file_writer_programs; $head) or output_option_flags[$head] != null then keys_of_values($ws[1:])
+    elif has_word(readonly_programs; $head) or has_word(context_programs; $head) or ($head | IN("chmod", "chown", "chgrp", "touch")) then []
+    else keys_of_values($ws[1:]) end;
 
 def collect_context($raw; $outer):
   reduce ($raw.units[] | . as $unit | range(0; length) as $i
@@ -814,14 +822,25 @@ def collect_context($raw; $outer):
          | if $overwritten == "all" then .files |= map_values(.k = false)
            else reduce $overwritten[] as $key (.; if .files[$key] != null then .files[$key].k = false else . end) end
        end)
-    | ([ $command.r[] | select(.op | IN(">", ">>", ">|", "&>", "&>>")) | {l: .t, d: (.d // false)} ]
-       + (if $words[0] == "tee" then [ $command.w[1:][] | select(.l | startswith("-") | not) ] else [] end)) as $targets
+    # G12-3: `<>` (read-write, no truncation) and `>&` with a file name write too; G12-4: tee -a
+    # appends. Each target keeps its operator.
+    | ([ $command.r[] | select((.op | IN(">", ">>", ">|", "&>", "&>>", "<>")) or (.op == ">&" and (.t | test("^([0-9]+-?|-)$") | not)))
+         | {l: .t, d: (.d // false), op: .op} ]
+       + (if $words[0] == "tee" then
+            (if any($words[1:][]; test("^(-[A-Za-z]*a[A-Za-z]*|--append)$")) then ">>" else ">" end) as $tee_op
+            | [ $command.w[1:][] | select(.l | startswith("-") | not) | . + {op: $tee_op} ]
+          else [] end)) as $targets
     | (if ($targets | length) > 0 then written_content($command; $item.b) else null end) as $content
     | reduce $targets[] as $target (.;
         (if $target.d then null else path_key($dir; $target.l) end) as $key
         | if $key == null then .opaque = true
+          # Known only when every write is an exact one: not `<>` or `>&` (the earlier bytes or the
+          # error output stay unknown, G12-3), and not an append as the first write in this
+          # submission (whatever the file held before is unknown, G12-4).
           else .files[$key] = {t: ((.files[$key].t // "") + ($content.texts | join("\n")) + "\n"),
-                               k: ((.files[$key].k // true) and $content.known),
+                               k: ((.files[$key].k // true) and $content.known
+                                   and ($target.op | IN("<>", ">&") | not)
+                                   and ((.files[$key] == null and ($target.op | IN(">>", "&>>"))) | not)),
                                n: ((.files[$key].n // []) + [path_spelling($dir; $target.l)] | unique)} end)
     # runs: the submission may run a script (sh f, source f, . f, ./f, /abs/f, also through a
     # wrapper), so the writers below are counted.

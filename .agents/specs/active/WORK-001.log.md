@@ -438,6 +438,45 @@ Detailed evidence for WORK-001 delivery. The spec's "Implementation state" keeps
   - N7-1 is sound: nothing lowered, and no read form misread.
   - The probe set and its loader are sound and add-only. A future comment containing `|` would be read as a probe, and most likely fail loudly.
 
+## RR3-12 closure fix (owner-authorised 2026-10-12, option 1: G12-1 to G12-4)
+- **Security-design assessment (before implementing).**
+  - Observable: only the text of each Bash submission (PreToolUse), and Write/Edit/NotebookEdit target paths.
+  - Not observable:
+    - file contents on disk;
+    - writes made by earlier calls, the Write tool, editors or processes running alongside;
+    - filesystem aliasing set up outside the submission (a symlink or hard link `g` → `f.patch` made in an earlier call).
+  - Known content is per submission: a patch or script is known only if the submission wrote it with exact-content writers (echo, printf, heredoc, here-string) and nothing else in the submission can be seen to change it.
+  - The decision classes are separate:
+    - unknown patch content asks (N6(b));
+    - a protected path reached by a recognised operation asks (protected-tree policy);
+    - a positively identified store or Git-file write denies, and deny precedes ask in `decide`.
+  - G12-1 to G12-4 were false "known" claims after a change inside the submission that the guard failed to recognise. They are within the model, so the architecture is adequate for the spec's guardrail property.
+  - **Structural limit (not fixable within the hook boundary):** aliasing created outside the submission, and concurrent external writers, can change a "known" patch or script unseen. This falls under the documented residual ("not a defence against a deliberately adversarial process with shell access"). The fix does not claim to cover it.
+  - The stricter alternative, for an owner decision, not implemented: never trust patch content, so every coordinator `git apply`/`patch`/`am` asks. That changes the N6(b) ruling for known safe patches.
+- **Fix** (classify.jq `overwrite_targets` and `collect_context`; policy.jq `patch_findings`):
+  - Overwrite detection fails closed instead of extending the list of writers:
+    - an unlisted program that names a written file counts as a writer;
+    - known readers and metadata do not (readonly_programs, context commands, chmod/chown/chgrp/touch);
+    - readers with an output option (`output_option_flags`: sort, base64, less, iconv) do;
+    - word values count (`of=F`, `--output=F`, `-oF`).
+  - `<>` and `>&<file>` are writes with unknown content (`>&<fd>` stays a duplicate).
+  - A first write that appends (`>>`, `&>>`, `tee -a`) is unknown content.
+- **Deny precedence (found during the fix):**
+  - The first version turned these from **deny** (at `cc63324`, which trusted the written text) into **ask**: a store-targeting patch written in the submission and then overwritten (`dd`, `sort -o`, `1<>`, `>&`, an unknown program) or first-written by append.
+  - `patch_findings` now checks the hunks the submission wrote for store and Git-file paths whether or not the content stays known. Unknown content additionally asks, and deny wins. All these cases deny again (fixtures `scratchpad/rr312-fix/probes.jsonl`, d1-d8: 0 mismatches).
+- Evidence:
+  - The independent RR3-12 probes (`scratchpad/rr312/run.sh`), rerun on the fix: probes 2-20 as designed, including 9-12, which now ask. Probe 1 still denies (deploy-path artefact).
+  - Regression table "RR3-12 closure", 28 cases:
+    - probes 9-12 and variants (`dd of=` with either case, `sort -o`/`--output=`/`-oF`, `base64 -o`, `uniq`, an unknown program, `1<>`, `>&<file>`, first-write `>>`/`&>>`/`tee -a`);
+    - 5 store or specialist denies;
+    - 8 harmless controls (`wc`, `chmod`, `grep`, an exact-then-append patch, an unrelated unknown-program output, `2>&1`, `sort -o` of an unrelated file).
+  - `tests/run.sh`: 2000 passed, 0 failed. No existing expectation changed; the only `tests/run.sh` change is additions.
+  - `scripts/check.sh` with ShellCheck 0.11.0 executing: `CHECK: PASSED`.
+  - Comparison with `cc63324` (1266 commands, coordinator and backend): 12 coordinator none → ask, all of them gap forms. Nothing was lowered.
+- **Prompt burden:** asks are added only where a patch the submission wrote is then changed by an unrecognised or non-exact write before `git apply`. Harmless reads and metadata between write and apply add none (tested).
+- **Dogfood (2026-10-12):** an inline `bash -c` comparison script was blocked by a Claude Code built-in safety check ("passes a shell -c script that runs rm"). The script contained no removal; the trigger was not verified. It was not re-issued through another shell; the cases ran through the inert fixture runner instead.
+- Evidence gaps: RR3-12's "probably similar" writers that were not run individually (`yq`, `xxd`, `iconv`, `less -o`) fall under the fail-closed rule, or are listed writers. The historical probe corpus is still not reproduced.
+
 ## Finding status (verified facts only)
 | Finding | Status |
 | :- | :- |
