@@ -67,6 +67,7 @@ hook_git_run() {
   wait "$watchdog" 2>/dev/null
   # Anything Git left behind in its process group goes too.
   kill -KILL -- "-$pid" 2>/dev/null
+  # shellcheck disable=SC2034 # the interface's output, read by guard-bash.sh and guard-writes.sh
   hook_git_output="$(cat "$hook_git_output_file" 2>/dev/null)"
   return "$status"
 }

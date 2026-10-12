@@ -45,6 +45,7 @@ source "$guard_directory/hook-git.sh"
 
 hook_input="$(cat)"
 classifier_output_file="$(mktemp "${TMPDIR:-/tmp}/ai-engineering-guard.XXXXXX" 2>/dev/null)" || classifier_output_file=""
+# shellcheck disable=SC2329 # invoked by the EXIT trap on the next line
 cleanup() { [ -z "$classifier_output_file" ] || rm -f "$classifier_output_file" "$classifier_output_file.git" "$classifier_output_file.fallback"; }
 trap cleanup EXIT
 [ -z "$classifier_output_file" ] || hook_git_output_file="$classifier_output_file.git"
@@ -387,7 +388,7 @@ esac
 # otherwise the classifier uses the working directory in its place, which only over-asks.
 root_cdup="" root_known="0"
 case "$hook_input" in
-  *cp* | *rsync* | *ditto* | *tar* | *zip* | *cpio* | *pax* | *7z* | *checkout* | *restore* | *reset* | *read-tree* | *rm* | *clean* | *index* | *hash-object*)
+  *cp* | *rsync* | *ditto* | *tar* | *zip* | *pax* | *7z* | *checkout* | *restore* | *reset* | *read-tree* | *rm* | *clean* | *index* | *hash-object*)
     hook_git_show_cdup "$(directory_for_git)"
     root_status=$?
     if [ "$root_status" -eq 0 ]; then root_cdup="$hook_git_output" root_known="1"; fi

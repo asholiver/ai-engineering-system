@@ -397,14 +397,32 @@ def recursive_copy_flag($prog):
   else "^(--recursive|--archive|-[A-Za-z]*[ra][A-Za-z]*)$" end;
 def last_positional_or_target:
   ((option_values(.args; "-t"; "--target-directory") | last) // ((.args | policy_positionals | last) // null));
+# P-1: Git accepts a long option abbreviated to any unambiguous prefix (`--har`), and a value joined
+# with `=` (`--orphan=x`). An argument matches one of $names (full long options) when, without its
+# `=value`, it is `--` plus at least one letter and a prefix of the name. Used only where a match adds
+# an ask, never for an exemption; matching a prefix that Git would reject as ambiguous can only add an ask.
+def git_long_option($names):
+  sub("=.*$"; "") as $given | ($given | test("^--[a-z]")) and any($names[]; startswith($given));
+# N6-1: git_expand_value_options($names) spells out an abbreviation that is a prefix of exactly one
+# of $names, the subcommand's long options that take a value (keeping any `=value`), so value
+# skipping and option tests see the full name. Callers judge both the original and the expanded
+# arguments and keep the union, so a wrong expansion can only add an ask.
+def git_expand_value_options($names):
+  map(if test("^--[a-z][a-z-]*(=|$)") then
+        capture("^(?<name>--[^=]*)(?<value>=.*)?$") as $parts
+        | [ $names[] | select(startswith($parts.name)) ] as $hits
+        | if ($hits | length) == 1 then $hits[0] + ($parts.value // "") else . end
+      else . end);
 # NR-4: --pathspec-from-file names paths this guard cannot read; as a destination it is a pattern.
+# N6-1: abbreviated (`--pathspec-fr`) and `=`-joined spellings count too.
 def git_pathspec_file($args):
-  if any($args[]; test("^--pathspec-from-file(=|$)")) then [":(pathspec-from-file)"] else [] end;
+  if any($args[]; git_long_option(["--pathspec-from-file"])) then [":(pathspec-from-file)"] else [] end;
 # Seam (owner decision pending, WORK-001 fix round 3): branch switches (checkout <branch>, switch),
 # merge, pull, rebase, cherry-pick, stash, no-ref whole-tree index restores (checkout -- ., restore .,
 # reset --hard with no ref) and patch / git apply / git am from a file of unknown content keep their
 # earlier behaviour: nothing below adds a decision for them. Add their rule here once decided.
-def git_tree_ref_restore:
+# N6-1: judged on the original and the expanded arguments (git_expand_value_options); union.
+def git_tree_ref_restore_one:
   .args as $args | ($args | policy_positionals) as $positional
   | ([ range(0; $args | length) as $i | select($args[$i] == "--") | $i ] | first) as $dashes
   | ($args | positionals_skipping(["--pathspec-from-file"])) as $operands
@@ -449,6 +467,9 @@ def git_tree_ref_restore:
     elif .sub == "hash-object" then
       (if any($args[]; test("^-[A-Za-z]*w[A-Za-z]*$")) and any($args[]; . == "--stdin-paths") then [{op: "git hash-object -w --stdin-paths", dest: "."}] else [] end)
     else [] end;
+def git_tree_ref_restore:
+  [ ., (.args |= git_expand_value_options(["--source", "--pathspec-from-file", "--conflict", "--orphan"])) ]
+  | map(git_tree_ref_restore_one) | add | unique;
 def tree_writes:
   .prog as $prog | .args as $args
   | if $prog == null then []
@@ -581,13 +602,7 @@ def git_state_value_flags($sub):
    "stash": ["-m", "--message", "--pathspec-from-file"],
    "restore": ["-s", "--source", "--pathspec-from-file", "--conflict"],
    "reset": ["--pathspec-from-file"]}[$sub // ""] // [];
-# P-1: Git accepts a long option abbreviated to any unambiguous prefix (`--har`), and a value joined
-# with `=` (`--orphan=x`). An argument matches one of $names (full long options) when, without its
-# `=value`, it is `--` plus at least one letter and a prefix of the name. Used only where a match adds
-# an ask, never for an exemption; matching a prefix that Git would reject as ambiguous can only add an ask.
-def git_long_option($names):
-  sub("=.*$"; "") as $given | ($given | test("^--[a-z]")) and any($names[]; startswith($given));
-def git_state_items($context; $root):
+def git_state_items_one($context; $root):
   .sub as $sub | .args as $args
   # NF-2: a bare `-` is the previous branch (@{-1}), an operand, not an option.
   | ($args | map(if . == "-" then "@{-1}" else . end) | positionals_skipping(git_state_value_flags($sub))) as $operands
@@ -600,6 +615,8 @@ def git_state_items($context; $root):
     elif $sub == "checkout" then
       # With `--`, the paths decide, whatever ref comes before them.
       (if $dashes != null then (if reaches($args[$dashes + 1:]) then item("git checkout -- <paths>") else [] end)
+       # N6-1: a pathspec file names paths the guard cannot read (with or without a ref).
+       elif (git_pathspec_file($args) | length) > 0 then item("git checkout --pathspec-from-file")
        elif has_long(["--orphan"]) then item("git checkout --orphan")
        elif any($args[]; test("^(-b|-B)$")) then (if ($operands | length) > 0 then item("git checkout -b <start point>") else [] end)
        # One operand is a branch or a path; the guard cannot tell which, so it asks.
@@ -633,6 +650,10 @@ def git_state_items($context; $root):
     elif $sub == "reset" then
       (if has_long(["--hard", "--merge", "--keep"]) then item("git reset --hard") else [] end)
     else [] end;
+# N6-1: judged on the original and the expanded arguments (git_expand_value_options); union.
+def git_state_items($context; $root):
+  ([ git_state_value_flags(.sub)[] | select(startswith("--")) ] + ["--source"]) as $names
+  | [ ., (.args |= git_expand_value_options($names)) ] | map(git_state_items_one($context; $root)) | add | unique_by(.op);
 
 # Every state-changing Git command in the submission, in order: [{op, why}].
 def git_state_policy($cmds; $context; $root):

@@ -142,6 +142,7 @@ fi
 # sign) opens "k" and ligatures open "st" or "fi". A target with any non-ASCII character is
 # checked with each such character as a wildcard: denied when its components could be
 # .agents/specs/.../*.state.json or ai-engineering/tokens (and, for subagents, Git's own files).
+# shellcheck disable=SC2053 # $2 is deliberately a glob pattern (non-ASCII bytes turned into *)
 component_matches() { [[ "$1" == $2 ]]; }
 could_end_with() {
   local pattern="$1" suffix="$2" tail

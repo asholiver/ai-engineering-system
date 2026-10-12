@@ -406,6 +406,7 @@ if [ "$high_marginal_us" -le $((low_marginal_us * 2 + 200)) ]; then pass; else f
 # (CI tolerance 2500 ms, above), whatever its line count.
 # A pathological command is cut off by the time budget or the fallback and still decides safely.
 pathological_file="$work_directory/pathological.txt"
+# shellcheck disable=SC2016 # the literal text `$((` is the pathological command under test
 { i=0; while [ "$i" -lt 3000 ]; do printf '$(('; i=$((i + 1)); done; printf 'terraform apply'; } >"$pathological_file"
 jq -n --rawfile command "$pathological_file" --arg cwd "$feature_repository" '{tool_input: {command: $command}, cwd: $cwd}' >"$work_directory/pathological.json"
 expect_equal "guard-bash fail-safe: pathological nesting asks" ask "$(decision_of "$("$scripts/guard-bash.sh" <"$work_directory/pathological.json")")"
@@ -1084,6 +1085,7 @@ if [ -e "$rotate_directory/guard-log.jsonl.1" ] && [ ! -d "$rotate_directory/.ro
 # (risky_repository is created again, as a fresh repository, in the run-gate section below.)
 risky_repository="$feature_repository"
 (
+  # shellcheck source=../plugins/ai-engineering/scripts/lib.sh
   source "$scripts/lib.sh"
   classify_command_impact "watch terraform apply" "$risky_repository"; [ "$impact_decision" = "ask" ] && [ "$impact_classes" = "infrastructure-apply" ] || exit 1
   classify_command_impact "TERRAFORM apply" "$risky_repository"; [ "$impact_decision" = "ask" ] || exit 2
@@ -1319,6 +1321,7 @@ expect_contains "fix round 2 N6: the ask names the operation" "cp (recursive) in
 expect_contains "fix round 2 N6: the ask names the protected path it can reach" "the repository root" "$reason"
 expect_contains "fix round 2 N6: the ask keeps the guardrail note" "Hooks are guardrails, not a sandbox." "$reason"
 (
+  # shellcheck source=../plugins/ai-engineering/scripts/lib.sh
   source "$scripts/lib.sh"
   classify_command_impact "git checkout main -- ." "$agent_repository"; [ "$impact_decision" = "ask" ] && [ "$impact_classes" = "protected-tree-overwrite" ] || exit 1
   classify_command_impact "tar -xf a.tar -C vendor/" "$agent_repository"; [ "$impact_decision" = "none" ] || exit 2
@@ -1399,6 +1402,7 @@ if [ "$floor_large_ms" -lt 2500 ]; then pass; else fail "performance: large floo
 
 # lib.sh sees the fix-round-2 classifications.
 (
+  # shellcheck source=../plugins/ai-engineering/scripts/lib.sh
   source "$scripts/lib.sh"
   classify_command_impact "awk 'BEGIN{system(\"terraform apply\")}'" "$agent_repository"; [ "$impact_decision" = "ask" ] || exit 1
   classify_command_impact "git -c core.pager='terraform apply' -p log" "$agent_repository"; [ "$impact_decision" = "ask" ] || exit 2
@@ -1672,6 +1676,7 @@ log_lines_before="$(wc -l <"$state_fixture/.git/ai-engineering/guard-log.jsonl" 
 agent_output 'git switch same' "$state_fixture" m >/dev/null
 expect_equal "Option B: an identical-state switch is logged" "$((${log_lines_before:-0} + 1))" "$(wc -l <"$state_fixture/.git/ai-engineering/guard-log.jsonl" 2>/dev/null | tr -d ' ')"
 (
+  # shellcheck source=../plugins/ai-engineering/scripts/lib.sh
   source "$scripts/lib.sh"
   classify_command_impact "git switch differs" "$state_fixture"; [ "$impact_decision" = "ask" ] && [ "$impact_classes" = "protected-tree-overwrite" ] || exit 1
   classify_command_impact "git switch same" "$state_fixture"; [ "$impact_decision" = "ask" ] && [ "$impact_classes" = "protected-tree-overwrite" ] || exit 2
@@ -1734,6 +1739,7 @@ jq -n --rawfile command "$work_directory/floor-large-look-alike.txt" --arg cwd "
 expect_equal "fix round 3: a large floor text with a look-alike keyword asks" ask "$(decision_of "$("$scripts/guard-bash.sh" <"$work_directory/floor-large-look-alike.json")")"
 # lib.sh sees the fix-round-3 classifications.
 (
+  # shellcheck source=../plugins/ai-engineering/scripts/lib.sh
   source "$scripts/lib.sh"
   classify_command_impact "git clean -fdx" "$agent_repository"; [ "$impact_decision" = "ask" ] && [ "$impact_classes" = "protected-tree-overwrite" ] || exit 1
   classify_command_impact "git rm .agents/specs/active/WORK-9.state.json" "$agent_repository"; [ "$impact_decision" = "deny" ] && [ "$impact_classes" = "authority-store-write" ] || exit 2
@@ -1819,8 +1825,10 @@ git -C "$hostile_repository" checkout -q main
 make_marker_program() { printf '#!/bin/sh\ntouch "%s/%s"\n%s\n' "$hostile_markers" "$1" "$2" >"$hostile_programs/$1" && chmod +x "$hostile_programs/$1"; }
 make_marker_program fsmonitor 'exit 1'
 make_marker_program filter 'cat'
+# shellcheck disable=SC2016 # `$1` belongs to the generated program, not to this script
 make_marker_program textconv 'cat "$1"'
 make_marker_program external-diff 'exit 1'
+# shellcheck disable=SC2016 # `$(basename "$0")` belongs to the generated hook, not to this script
 printf '#!/bin/sh\ntouch "%s/hook-$(basename "$0")"\n' "$hostile_markers" >"$hostile_programs/hook" && chmod +x "$hostile_programs/hook"
 for hook_name in post-index-change post-checkout post-merge post-rewrite reference-transaction pre-commit pre-auto-gc fsmonitor-watchman pre-push; do
   cp "$hostile_programs/hook" "$hostile_repository/.git/hooks/$hook_name"
@@ -1835,13 +1843,15 @@ git -C "$hostile_repository" config diff.trustExitCode true
 printf '*.json filter=mark diff=conv\n*.txt filter=mark diff=conv\n' >"$hostile_repository/.git/info/attributes"
 touch -t 202001010000 "$hostile_repository/.agents/specs/active/WORK-1.state.json"
 rm -f "$hostile_markers"/*
+# The names of the files in a directory, space-separated (empty when none).
+names_in() { local entry names=""; for entry in "$1"/*; do [ -e "$entry" ] && names="$names${entry##*/} "; done; printf '%s' "$names"; }
 # The fixture is genuine: Git's own porcelain does run these programs here (checked through a copy
 # of the repository, so the fixture itself stays untouched by porcelain).
 cp -R "$hostile_repository" "$work_directory/hostile-copy"
 git -C "$work_directory/hostile-copy" status --porcelain >/dev/null 2>&1
-if [ -e "$hostile_markers/fsmonitor" ] || [ -e "$hostile_markers/filter" ]; then pass; else fail "fix round 4 RR3-1: the hostile fixture does not run its programs under git status ($(ls "$hostile_markers" | tr '\n' ' '))"; fi
+if [ -e "$hostile_markers/fsmonitor" ] || [ -e "$hostile_markers/filter" ]; then pass; else fail "fix round 4 RR3-1: the hostile fixture does not run its programs under git status ($(names_in "$hostile_markers"))"; fi
 rm -rf "$work_directory/hostile-copy"; rm -f "$hostile_markers"/*
-hostile_markers_left() { ls "$hostile_markers" | tr '\n' ' '; }
+hostile_markers_left() { names_in "$hostile_markers"; }
 # Runs a table against the hostile repository: the decision, then no marker. Extra arguments are
 # NAME=value assignments for the hook's own environment.
 hostile_table() {
@@ -2034,6 +2044,7 @@ expect_equal "fix round 4 RR3-3: the fallback deny is logged as a fallback decis
 # Oversized commands (over the 256 KB parser budget) and a parser limit: still denied when established.
 { printf 'git stash && echo '; i=0; while [ "$i" -lt 27000 ]; do printf 'aaaaaaaaaa'; i=$((i + 1)); done; } >"$work_directory/oversize-word.txt"
 { printf "cat <<'EOF'\n"; i=0; while [ "$i" -lt 9000 ]; do printf 'line %s of inert padding text\n' "$i"; i=$((i + 1)); done; printf 'EOF\ngit stash\n'; } >"$work_directory/oversize-heredoc.txt"
+# shellcheck disable=SC2016 # the literal text `$((` is the parser-limit command under test
 { printf 'git stash\n'; i=0; while [ "$i" -lt 3000 ]; do printf '$(('; i=$((i + 1)); done; printf 'x\n'; } >"$work_directory/parser-limit.txt"
 for fixture in oversize-word oversize-heredoc parser-limit; do
   fixture_bytes="$(wc -c <"$work_directory/$fixture.txt" | tr -d ' ')"
@@ -2269,7 +2280,7 @@ expect_equal "fix round 4 RR3-13: a hanging hook-time git asks" ask "$(decision_
 if [ "$slow_elapsed" -le 9 ]; then pass; else fail "fix round 4 RR3-13: the hook took ${slow_elapsed} s with a hanging git (deadline 5 s)"; fi
 if [ -s "$slow_git_directory/pids" ]; then pass; else fail "fix round 4 RR3-13: the slow git shim never ran"; fi
 slow_left=""
-for attempt in 1 2 3 4 5 6 7 8 9 10; do
+for _ in 1 2 3 4 5 6 7 8 9 10; do
   slow_left=""
   while IFS= read -r slow_pid; do kill -0 "$slow_pid" 2>/dev/null && slow_left="$slow_left $slow_pid"; done <"$slow_git_directory/pids"
   [ -n "$slow_left" ] || break
@@ -2306,7 +2317,7 @@ while IFS='|' read -r agent expected command_text; do
   [ -n "$expected" ] || continue
   output="$(agent_input "$command_text" "$nf1_client" "$agent" | PATH="$nf1_shim:$PATH" "$scripts/guard-bash.sh")"
   expect_equal "Option B NF-1 ($agent): $command_text" "$expected" "$(decision_of "$output")"
-  expect_equal "Option B NF-1: no promisor fetch for: $command_text" "" "$(ls "$nf1_markers" | tr '\n' ' ')"
+  expect_equal "Option B NF-1: no promisor fetch for: $command_text" "" "$(names_in "$nf1_markers")"
   rm -f "$nf1_markers"/*
 done <<'CASES'
 m|ask|git switch main
@@ -2324,7 +2335,7 @@ CASES
 for target in "$nf1_client/src/new.txt" "$nf1_client/x/ai-engineering/tokens/t"; do
   write_input "" "$target" "$nf1_client" | PATH="$nf1_shim:$PATH" "$scripts/guard-writes.sh" >/dev/null
 done
-expect_equal "Option B NF-1: guard-writes caused no promisor fetch" "" "$(ls "$nf1_markers" | tr '\n' ' ')"
+expect_equal "Option B NF-1: guard-writes caused no promisor fetch" "" "$(names_in "$nf1_markers")"
 # The interface is structural: every hook-time Git call was one of the four rev-parse lookups, which
 # read no object, tree or index (round 6, F5-3: the ls-files index lookup for the hint is gone).
 if [ -s "$nf1_shim/calls" ]; then pass; else fail "Option B NF-1: the Git shim recorded no hook-time call"; fi
@@ -2470,6 +2481,44 @@ m|none|git stash clear
 b|deny|git stash -- src
 CASES
 
+# Round 7 (re-review 6, N6-1): abbreviated and =-joined value-taking options. Git 2.46.0 and Apple
+# Git 2.39.5 both accept every "accepted" form below (scratch-repository check): the pathspec-file
+# forms restore the listed files (a state file among them) from the index or an older commit, and
+# `stash --m/--mess <word>` takes the word as the message and stashes. Ambiguous forms that Git
+# rejects (`restore --s`) still ask. Exemptions keep their exact spelling; specialists stay denied.
+fix4_table "round 7 N6-1" "$state_fixture" <<'CASES'
+m|ask|git restore --pathspec-fr list.txt
+m|ask|git restore --pathspec-from=list.txt
+m|ask|git restore --so=HEAD~3 --pathspec-fr list.txt
+m|ask|git restore --sou HEAD~3 --pathspec-from list.txt
+m|ask|git checkout HEAD~3 --pathspec-fr list.txt
+m|ask|git checkout --pathspec-fr=list.txt
+m|ask|git checkout --pathspec-from-file=list.txt
+m|ask|git checkout --pathspec-from-file list.txt
+m|ask|git stash --m list
+m|ask|git stash --mess list
+m|ask|git stash --mess show
+m|ask|git stash --message=list
+m|ask|git stash -m list
+m|ask|git stash push --pathspec-fr list.txt
+m|ask|git reset --pathspec-fr list.txt
+m|ask|git restore --s HEAD~1 .
+m|none|git restore --staged --pathspec-from-file list.txt
+m|none|git restore --sou HEAD~1 src
+m|none|git stash list
+m|none|git stash show
+b|deny|git restore --pathspec-fr list.txt
+b|deny|git checkout HEAD~3 --pathspec-fr list.txt
+b|deny|git stash --mess list
+b|deny|git stash -m list
+b|deny|git stash --m show
+b|none|git stash list
+b|none|git stash show -p
+b|deny|git stash --mess list && X=@NBSP@
+b|deny|git stash -m list && X=@NBSP@
+b|ask|git stash list && X=@NBSP@
+CASES
+
 # ---------------------------------------------------------------- run-gate
 commit_all() { git -C "$1" add -A && git -C "$1" -c user.name=test -c user.email=test@example.com commit -q -m "$2"; }
 gate_repository="$(new_repository gate-repo main)"
@@ -2514,6 +2563,7 @@ expect_contains "run-gate: refusal verdict" "GATE fast: REFUSED" "$output"
 # WORK-001 T3: lib.sh classification interface. Both ask and deny are high-impact; classes are
 # exposed; classification never writes a guard-log entry that could pass for a hook decision.
 (
+  # shellcheck source=../plugins/ai-engineering/scripts/lib.sh
   source "$scripts/lib.sh"
   classify_command_impact "terraform apply" "$risky_repository"; status=$?
   [ "$status" -eq 0 ] && [ "$impact_decision" = "ask" ] && [ "$impact_classes" = "infrastructure-apply" ] || exit 1

@@ -33,7 +33,9 @@ load_gates() {
   for candidate in "$root" "${CLAUDE_PROJECT_DIR:-}"; do
     if [ -n "$candidate" ] && [ -f "$candidate/.agents/gates.json" ]; then
       gates_json="$(cat "$candidate/.agents/gates.json")"
+      # shellcheck disable=SC2034 # an output of this function, read by the scripts that source lib.sh
       gates_source="uncommitted working-tree file"
+      # shellcheck disable=SC2034 # an output, read by run-gate.sh
       gates_note="using uncommitted .agents/gates.json; commit it so agents cannot alter their own gates"
       return 0
     fi
@@ -71,6 +73,7 @@ classify_command_impact() {
     ask) impact_decision="ask" ;;
     deny) impact_decision="deny" ;;
   esac
+  # shellcheck disable=SC2034 # an output, read by run-gate.sh, external-review.sh and the tests
   [ "$impact_decision" = "none" ] || impact_classes="$(printf '%s\n' "$answer" | sed -n 2p)"
   [ "$impact_decision" != "none" ]
 }

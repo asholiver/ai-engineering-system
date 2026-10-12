@@ -885,7 +885,9 @@ def git_read_form:
       (any(($args | flags_skipping(git_listing_value_flags))[]; test(git_tag_write_flags)) | not)
       and (any($args[]; test("^(-l|--list|-v|--verify|--contains|--no-contains|--points-at|--merged|--no-merged|-n[0-9]*)$"))
            or (($args | positionals_skipping(git_listing_value_flags)) | length) == 0)
-    elif $sub == "stash" then (($positional | first) // "") | IN("list", "show")
+    # N6-1: list and show are the action only as the first argument; Git reads options before them
+    # as push options (`stash -m list`, `stash --mess list` stash with the message "list").
+    elif $sub == "stash" then (($args | first) // "") | IN("list", "show")
     elif $sub == "worktree" then (($positional | first) // "") == "list"
     else false end;
 
@@ -979,9 +981,10 @@ def fallback_git_command:
           | ($args | fallback_flag_words) as $flags
           | if any($flags[]; IN("-h", "--help")) or ($sub | IN(fallback_git_reads[])) then {verdict: "read", sub: $sub}
             elif $sub == "stash" then
-              ($args | fallback_first_operand(["-m", "--message", "--pathspec-from-file"])) as $action
-              | if $action.dynamic then {verdict: "ask", sub: $sub}
-                elif ($action.word // "push") | IN("list", "show") then {verdict: "read", sub: $sub}
+              # N6-1: list and show are the action only as the first argument (as git_read_form).
+              ($args[0] // null) as $first
+              | if $first != null and $first.d then {verdict: "ask", sub: $sub}
+                elif $first != null and ($first.l | IN("list", "show")) then {verdict: "read", sub: $sub}
                 else {verdict: "deny", sub: $sub} end
             elif $sub == "worktree" or $sub == "remote" then
               ($args | fallback_first_operand([])) as $action

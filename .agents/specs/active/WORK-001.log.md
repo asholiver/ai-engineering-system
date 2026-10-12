@@ -299,6 +299,75 @@ Detailed evidence for WORK-001 delivery. The spec's "Implementation state" keeps
 - **Prompt burden:** 1205 corpus commands run through `8a037c5` and round 6, as coordinator and backend. 14 coordinator commands go none → ask, and nothing else changes. They are all the newly recognised forms: abbreviated or `=`-joined options, `reset … -`, and `stash -- <paths>`.
 - **ShellCheck options (owner approval needed; not done):** `brew install shellcheck` (0.11.0, a Homebrew bottle), or the Docker image `koalaman/shellcheck` against a read-only mount. Docker is present. Until one is approved, ShellCheck has never run on WORK-001.
 
+## ShellCheck (2026-10-12, first run on WORK-001)
+- The owner installed ShellCheck with Homebrew: `/opt/homebrew/bin/shellcheck`, version 0.11.0.
+- `scripts/check.sh` at `51ed302` now runs ShellCheck, and **it fails: `check.sh` exits 1.**
+  - Findings: 14 warnings and 23 notes (`-f gcc`, the files `check.sh` lists).
+  - No implementation code was changed, per the owner (the review was running).
+- **Pre-existing:** the same ShellCheck run on tag `v0.2.0`'s files also fails, with 2 warnings and 3 notes (`lib.sh` SC2034 ×2; notes in `external-review.sh`, `gate-fast.sh` and `run-gate.sh`). The gate has therefore never been green with ShellCheck present; earlier `CHECK: PASSED` results all had ShellCheck skipped.
+- Coordinator triage, by reading the code (not yet fixed):
+  - 11× SC1091 (note): ShellCheck cannot follow `source ./lib.sh` and `source guard/hook-git.sh`, because the paths are resolved from the cwd. This causes the cross-file false positives:
+    - SC2154: `impact_decision` and `hook_git_output` "not assigned";
+    - SC2034: `hook_git_output_file`, `hook_git_output`, `gates_*` and `impact_classes` "unused".
+
+    The likely fix is `--source-path=SCRIPTDIR` or per-file directives in `check.sh` and the scripts.
+  - SC2221/SC2222 in `guard-bash.sh:390`: `*cp*` makes the later `*cpio*` redundant in the lookup trigger. Both lead to the same branch, so it is harmless and is a cleanup.
+  - SC2053 in `guard-writes.sh:145`: `component_matches` deliberately glob-matches (`[[ $1 == $2 ]]`). Needs a directive.
+  - SC2034 in `tests/run.sh:2272` (unused loop variable `attempt`), SC2016 ×4 and SC2012 ×4 (notes): style.
+  - Nothing in the triage indicates a security defect. That is an assessment, not a passed check.
+
+## Focused security re-review 6 (Opus, 8a037c5..51ed302)
+- Static review: Read, `git diff` and `grep`. No probes were run and none was denied.
+- **Resolved:** F5-1, F5-2, F5-3, P-2.
+  - The hook-time Git is the four `rev-parse` lookups through `hook_git_run`; none reads the index, trees or objects.
+  - No `git_long_option` use grants an exemption, and nothing in the diff lowers an ask or a deny.
+  - Test integrity: confirmed.
+- **Partial:** P-1, because of N6-1.
+- **N6-1 (MEDIUM, bounded; not a general bypass):** abbreviated value-taking options are still matched exactly (`git_pathspec_file`, `consumes_value`/`git_state_value_flags`, `git_tree_ref_restore`'s `-s|--source`).
+  - Reported cases for the coordinator: `git restore --pathspec-fr list.txt`, `git checkout HEAD~3 --pathspec-fr list.txt` and `git restore --so=HEAD~3 --pathspec-fr list.txt` get none where the exact spelling asks.
+  - `git stash --mess list` is read as the `list` action (none); it already gave none at `8a037c5`.
+  - Git's acceptance of `--pathspec-fr` and `--mess` has not been verified.
+  - Not fixed: the owner said no further remediation while the review was running.
+
+## Fix round 7 (owner-authorised 2026-10-12; N6-1 and the ShellCheck failures only)
+- **Git syntax, established in scratch repositories** (`scratchpad/syntax/n61.sh`, Homebrew Git 2.46.0 and Apple Git 2.39.5, identical results):
+  - Accepted, and changing the state file:
+    - `restore --pathspec-fr list.txt` and `restore --pathspec-from=list.txt` (restored from the index);
+    - `restore --so=HEAD~1 --pathspec-fr list.txt` and `checkout HEAD~1 --pathspec-fr list.txt` (restored from an older commit);
+    - `checkout --pathspec-fr=list.txt`.
+  - Accepted, and creating a stash: `stash --m list`, `stash --mess list`, `stash --mess show`, `stash --message=list`, `stash [push] --pathspec-fr list.txt`.
+  - Accepted, index only: `reset --pathspec-fr list.txt`.
+  - Rejected as ambiguous: `restore --s` (`--source` or `--staged`).
+- **N6-1 fix (policy.jq and classify.jq):**
+  - `git_expand_value_options($names)` spells out an abbreviation that is a unique prefix of the subcommand's long value options. `git_state_items` and `git_tree_ref_restore` judge both the original and the expanded arguments and keep the union, so a wrong expansion can only add an ask.
+  - `git_pathspec_file` accepts abbreviated and `=` spellings. `checkout --pathspec-from-file` asks with or without a ref; the exact `checkout --pathspec-from-file=list.txt` with no ref was also none before.
+  - Specialist side, found while testing: `git_read_form` and the fallback treated `git stash -m list` (even exact) and `git stash --mess list` as the read form `stash list`, so a specialist got ask, not deny. `list` and `show` are now reads only as the first argument, as Git parses them.
+  - Exemptions keep their exact spelling (`--staged`/`-S`).
+- Regression table "round 7 N6-1": 31 cases, covering the accepted forms, an ambiguous form, the exact exemptions, specialist denies, and fallback-entry denies with NBSP.
+- **ShellCheck** (`/opt/homebrew/bin/shellcheck`, 0.11.0):
+  - `check.sh` now runs `shellcheck -x --source-path=SCRIPTDIR <plugin scripts/*.sh, scripts/guard/*.sh, tests/run.sh, scripts/check.sh>`. No rule is disabled globally and the gate still fails on any finding. The "not installed; skipped" branch is unchanged.
+  - With sources resolved, 26 diagnostics were left from the 37 artefact-laden ones.
+  - Fixed in code:
+    - the redundant `*cpio*` pattern in the `guard-bash.sh` root-lookup trigger (SC2221/2222);
+    - an unused loop variable (SC2034);
+    - four `ls | tr` marker listings, replaced by a glob helper `names_in` with identical output (SC2012);
+    - six `source "$scripts/lib.sh"` lines in tests, given `# shellcheck source=` (SC1091, and the dependent SC2154).
+  - Narrow per-line directives, each with its reason:
+    - SC2329: `cleanup`, invoked by the EXIT trap.
+    - SC2053: `component_matches`, a deliberate glob.
+    - SC2034: the outputs `gates_source`, `gates_note`, `impact_classes` and `hook_git_output`, read by the scripts that source them.
+    - SC2016 ×4: a literal `$` in generated test data and programs.
+  - **Result:** `shellcheck` exit 0; `scripts/check.sh` `CHECK: PASSED` with ShellCheck executing. Sections run: plugin and marketplace validation, script syntax (`bash -n` + ShellCheck), hook tests (1914 passed, 0 failed), template names, version consistency, context budget, model routing.
+  - **v0.2.0 baseline** with the same options: exit 1, only `lib.sh` SC2034 ×2 (`gates_source`, `gates_note`). Both are now covered by directives; there are no other differences.
+- No lowering (coordinator):
+  - 1227 corpus commands through `51ed302` and round 7, coordinator and backend. Changes: 14 coordinator none → ask, 5 backend none → deny, 2 backend ask → deny. Nothing was lowered.
+  - `tests/run.sh` removed lines: only the `ls` → `names_in` swaps and the loop-variable rename, which are equivalent.
+  - Marker exploit: 0 failures.
+- **Prompt burden:** the 14 new coordinator asks are all the newly recognised N6-1 forms (abbreviated pathspec-file, source and message options, and `checkout --pathspec-from-file`).
+- Evidence gaps (unchanged, open):
+  - RR3-12 has not been independently probed.
+  - The historical probe corpus is lost and not reconstructed.
+
 ## Finding status (verified facts only)
 | Finding | Status |
 | :- | :- |
