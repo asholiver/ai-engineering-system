@@ -2698,6 +2698,32 @@ m|none|cat <<-'EOF'\n@TAB@hello\n@TAB@EOF
 m|none|git apply <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF
 CASES
 
+# CodeRabbit PR #5 (major, CWE-184): curl and wget output-file options with the destination joined
+# to the option or after other short options in one cluster (c2, c3, c7, c8 and close spellings)
+# are write targets like the exact forms: the authority store denies for every caller, Git's hooks
+# and configuration deny for specialists. Ordinary downloads and stdout output stay no decision.
+fix4_table "CodeRabbit curl/wget output options" "$agent_repository" <<'CASES'
+m|deny|curl -sSLo .agents/specs/active/WORK-9.state.json https://example.invalid/x
+m|deny|curl -o.agents/specs/active/WORK-9.state.json https://example.invalid/x
+m|deny|wget -O.agents/specs/active/WORK-9.state.json https://example.invalid/x
+b|deny|curl -sSLo .git/hooks/pre-commit https://example.invalid/x
+m|deny|curl -sSLo.agents/specs/active/WORK-9.state.json https://example.invalid/x
+m|deny|curl -fsSL -o .agents/specs/active/WORK-9.state.json https://example.invalid/x
+m|deny|curl --output .agents/specs/active/WORK-9.state.json https://example.invalid/x
+m|deny|curl -sSLo .git/ai-engineering/tokens/t https://example.invalid/x
+m|deny|wget -qO.agents/specs/active/WORK-9.state.json https://example.invalid/x
+m|deny|wget -qO .agents/specs/active/WORK-9.state.json https://example.invalid/x
+m|deny|wget --output-document=.agents/specs/active/WORK-9.state.json https://example.invalid/x
+m|deny|wget -qo .agents/specs/active/WORK-9.state.json https://example.invalid/x
+b|deny|wget -qO.git/config https://example.invalid/x
+b|deny|curl -fsSLo.git/hooks/pre-commit https://example.invalid/x
+m|none|curl -sSLo out.json https://example.invalid/x
+m|none|curl -sSL https://example.invalid/x
+m|none|wget -qO- https://example.invalid/x
+m|none|wget -qO out.html https://example.invalid/x
+b|none|curl -fsSLo build/out.json https://example.invalid/x
+CASES
+
 # Closure pass: the WORK-001 replacement probe set (tests/guard-probes.txt; not the lost historical
 # corpus), one risk-focused line per security boundary, in the agent repository (branch feature).
 probe_lines="$(grep -c '^[mb]|' "$repository_directory/tests/guard-probes.txt")"

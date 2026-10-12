@@ -252,6 +252,24 @@ def output_option_values($prog; $args):
         elif ($arg | test("^-[A-Za-z].")) and (($arg[0:2]) | IN($flags[])) then $arg[2:]
         else empty end ];
 
+# Values of a download tool's output-file options (CodeRabbit c2/c3/c7/c8): `-o V`, `--output V`,
+# `--output=V`, and a short-option cluster that contains the letter: `-sSLo V` (letter last: the
+# next word) or `-oV` / `-sSLoV` (letter followed by text: that text). The first output letter in
+# a cluster wins; a misread from an earlier letter that takes a value only adds a candidate path.
+def short_cluster_values($flags; $args):
+  ([ $flags[] | select(test("^-[A-Za-z]$")) | .[1:] ]) as $letters
+  | ([ $flags[] | select(startswith("--")) ]) as $long
+  | [ range(0; $args | length) as $i
+      | $args[$i] as $arg
+      | if ($arg | IN($flags[])) then ($args[$i + 1] // empty)
+        elif ($arg | test("^--[A-Za-z-]+=")) and (($arg | sub("=.*$"; "")) | IN($long[])) then ($arg | sub("^[^=]*="; ""))
+        elif ($arg | test("^-[A-Za-z]")) then
+          ([ range(1; $arg | length) as $k | select($arg[$k:$k + 1] | IN($letters[])) | $k ] | first) as $at
+          | if $at == null then empty
+            elif $at == ($arg | length) - 1 then ($args[$i + 1] // empty)
+            else $arg[$at + 1:] end
+        else empty end ];
+
 # The archive a tar in create, append or update mode writes: -f V, -cfV, --file[=]V, or the word
 # after an old-style first argument holding f (`tar czf out.tgz src`). "-" is standard output.
 def tar_archive_values($args):
@@ -330,14 +348,14 @@ def command_write_targets:
          | ($args | positionals_skipping(["-p", "--tmpdir", "-t", "--suffix"]))[] | (sub("X+$"; "*") + $suffix) | {t: ., level: "git"}
        elif $prog == "curl" then
          (option_values($args; "--output-dir"; "--output-dir")[0] // "") as $directory
-         | (option_values($args; "-o"; "--output")[] | select(. != "-") | under_directory($directory)),
+         | (short_cluster_values(["-o", "--output"]; $args)[] | select(. != "-") | under_directory($directory)),
            (if any($args[]; test("^(-[A-Za-z]*O|--remote-name)$")) then ([ curl_request($args).urls[] | url_basename | select(length > 0) ] | .[] | under_directory($directory)) else empty end)
          | {t: ., level: "git"}
        elif $prog == "wget" then
          (option_values($args; "-P"; "--directory-prefix")[0] // "") as $directory
-         | (option_values($args; "-O"; "--output-document")[] | select(. != "-") | under_directory($directory)),
-           (option_values($args; "-o"; "--output-file")[]),
-           (if (option_values($args; "-O"; "--output-document") | length) == 0 then ([ wget_request($args).urls[] | url_basename | select(length > 0) ] | .[] | under_directory($directory)) else empty end)
+         | (short_cluster_values(["-O", "--output-document"]; $args)[] | select(. != "-") | under_directory($directory)),
+           (short_cluster_values(["-o", "--output-file"]; $args)[]),
+           (if (short_cluster_values(["-O", "--output-document"]; $args) | length) == 0 then ([ wget_request($args).urls[] | url_basename | select(length > 0) ] | .[] | under_directory($directory)) else empty end)
          | {t: ., level: "git"}
        elif $prog == "git" and ($sub | IN("diff", "log", "show", "format-patch")) then option_values($args; "--output"; "--output")[] | {t: ., level: "git"}
        elif $prog == "git" and $sub == "checkout" then
