@@ -649,6 +649,32 @@ Detailed evidence for WORK-001 delivery. The spec's "Implementation state" keeps
   - Comparison with `9bb143a` (1338 commands, coordinator and backend): 3 coordinator and 1 backend none → deny, 2 coordinator and 1 backend none → ask, all `<<-` patch forms. Nothing lowered.
 - Note: the owner's instruction text arrived truncated after "scripts/check.sh with". The coordinator applied the earlier standing instructions: ShellCheck executing, corpus measurement, one narrow independent review, local commits only, then a report.
 
+## Narrow review of the N1 containment (security-reviewer, f118658..5a82e90)
+- **Approved; no new finding.**
+  - `body_text` strips only runs of leading tabs, on the first and every later line, quoted or not, including unterminated bodies. That matches Bash.
+  - No heredoc consumer is lowered: word boundaries are kept, and exact-content readers become more correct.
+  - Excluding `<<-` from H1/H2 and D2 is correct and conservative (`patch --dry-run <<-` now asks).
+  - Deny precedence reads the stripped text in every shape. Test integrity is sound.
+  - Unverified, low: a backslash-newline in an unquoted `<<-` body. Such bodies are already not exact, and no decision impact was found.
+
+## Closure summary (2026-10-12, coordinator)
+- **Committed locally, not pushed:** branch `feature/work-001-guard-v2`, HEAD after this entry. The latest verified gates are at `5a82e90`: `tests/run.sh` 2086 passed, 0 failed; `scripts/check.sh` `CHECK: PASSED` with ShellCheck 0.11.0 executing.
+- **Resolved by owner decisions** and verified by tests and independent exact-commit review:
+  - RR3-1 (Option B: no hook-time object, tree or index reads);
+  - NF-1, NF-2, NF-3, F5-1, F5-2, F5-3, P-1, P-2, N6-1, N7-1;
+  - RR3-12 G12-1..4;
+  - file-backed patches never trusted (option 1);
+  - fail-closed patch tools, with F1 and F2;
+  - N1.
+- **Remaining limitations, open for owner acceptance:**
+  1. The historical probe corpus (674 + 36 probes) is lost and not reproduced. The 45-probe replacement set is forward regression evidence only.
+  2. A store-targeting patch prepared outside the submission (Write tool, an earlier call) is an ask, not a deny: the hook cannot read file contents.
+  3. Concurrent external writers and filesystem aliasing are outside the hook's view: the documented residual for a deliberately adversarial process.
+  4. Prefix assignments and exported Git variables (`GIT_DIR`, `GIT_WORK_TREE`, `PATCH_GET`) do not disqualify the exact patch shapes. Low; no exploit found.
+  5. GNU patch behaviour is unverified; Apple patch 2.0 was tested.
+  6. ShellCheck is skipped, not failed, when it is not installed (pre-existing gate behaviour).
+- **Still required by the spec before merge:** push and PR (owner permission), CodeRabbit external review on the PR head, and owner acceptance, including review of the changed and added test expectations.
+
 ## Finding status (verified facts only)
 | Finding | Status |
 | :- | :- |
