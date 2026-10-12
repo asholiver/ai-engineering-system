@@ -26,6 +26,13 @@ hook_git_output_file="$(mktemp "${TMPDIR:-/tmp}/ai-engineering-guard-writes.XXXX
 trap '[ -z "$hook_git_output_file" ] || rm -f "$hook_git_output_file"' EXIT
 # Prints the output of one hardened Git lookup (nothing when it fails).
 git_lookup() { "$@" && printf '%s' "$hook_git_output"; }
+# NF-3: a store check whose Git lookup failed inside a work tree, or that the hook environment
+# redirects (GIT_DIR and similar), asks instead of passing.
+ask_unverified() {
+  jq -n --arg reason "ai-engineering guard: this write could not be checked against the authority store because a Git lookup failed or the hook environment sets Git variables (attempted: $1). It needs explicit human approval." \
+    '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "ask", permissionDecisionReason: $reason}}'
+  exit 0
+}
 agent_type="$(jq -r '.agent_type // empty' <<<"$hook_input")"
 working_directory="$(jq -r '.cwd // empty' <<<"$hook_input")"
 working_directory="${working_directory:-$PWD}"
@@ -99,6 +106,9 @@ case "$lowered_path" in
         "$common_directory/ai-engineering/tokens" | "$common_directory/ai-engineering/tokens/"*) deny "$authority_store_reason" ;;
       esac
     fi
+    if hook_git_environment_overrides || { [ -z "$common_directory" ] && hook_git_in_work_tree "$working_directory"; }; then
+      ask_unverified "$target_path"
+    fi
     ;;
 esac
 
@@ -112,6 +122,9 @@ if [ -n "$store_common_directory" ]; then
 fi
 link_count() { stat -c %h "$1" 2>/dev/null || stat -f %l "$1" 2>/dev/null; }
 if [ -f "$resolved_path" ] && [ "$(link_count "$resolved_path")" -gt 1 ] 2>/dev/null; then
+  if hook_git_environment_overrides || { { [ -z "$repository_top" ] || [ -z "$store_common_directory" ]; } && hook_git_in_work_tree "$working_directory"; }; then
+    ask_unverified "$target_path"
+  fi
   for store_directory in "${repository_top:+$repository_top/.agents/specs}" "${store_common_directory:+$store_common_directory/ai-engineering/tokens}"; do
     [ -n "$store_directory" ] && [ -d "$store_directory" ] || continue
     if [ -n "$(find "$store_directory" -maxdepth 8 -type f -samefile "$resolved_path" -print 2>/dev/null | head -n 1)" ]; then

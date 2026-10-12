@@ -1241,6 +1241,8 @@ CASES
 # repository root, an ancestor of it, inside .git or .agents/specs, or cannot be resolved; no
 # decision when it cannot contain a protected path; existing denies win. Each form runs for the
 # main session (m) and a specialist (b); "agent|expected|command", the agent repository is the cwd.
+# Changed by Option B (2026-10-12), none -> ask: `git checkout -- .`, `git restore .` and
+# `git reset --hard` (no hook-time state check any more, so a whole-tree discard asks).
 while IFS='|' read -r agent expected command_text; do
   [ -n "$expected" ] || continue
   expect_equal "fix round 2 N6 ($agent): $command_text" "$expected" "$(decision_of "$(agent_output "$command_text" "$agent_repository" "$agent")")"
@@ -1292,9 +1294,9 @@ m|ask|git restore -s HEAD~1 -- ..
 m|ask|git reset --hard HEAD~1
 b|deny|git reset --hard HEAD~1
 m|ask|git read-tree -u --reset HEAD~1
-m|none|git checkout -- .
-m|none|git restore .
-m|none|git reset --hard
+m|ask|git checkout -- .
+m|ask|git restore .
+m|ask|git reset --hard
 m|none|git checkout main -- src/app.ts
 m|none|git restore --source HEAD~1 src
 m|none|git restore --staged --source HEAD~1 .
@@ -1601,22 +1603,28 @@ git -C "$state_fixture" checkout -q main
 if [ -f "$state_fixture/.agents/specs/active/WORK-1.state.json" ] && [ "$(git -C "$state_fixture" rev-parse --abbrev-ref HEAD)" = main ] \
   && ! git -C "$state_fixture" diff --quiet main differs -- .agents && git -C "$state_fixture" diff --quiet main same -- .agents; then pass
 else fail "fix round 3 N6(a): the state fixture repository is not as intended"; fi
-# Clean working tree: only a ref whose state differs (or cannot be resolved) asks.
+# Clean working tree. Changed expectations (Option B, owner decision 2026-10-12): the guard no
+# longer inspects Git state at hook time, so every state-changing form asks, whether or not the
+# state differs. Changed none -> ask: the "same" switch, checkout, checkout -b, merge, rebase and
+# cherry-pick; stash; checkout -- .; restore .; reset --hard; and `git checkout src/a.txt` (one
+# operand may be a branch, which the guard can no longer resolve). The forms that cannot replace
+# tracked state files (paths that cannot reach a protected path, -b/-c from HEAD, stash list,
+# reset without --hard) stay none: added below.
 while IFS='|' read -r agent expected command_text; do
   [ -n "$expected" ] || continue
   expect_equal "fix round 3 N6(a) clean ($agent): $command_text" "$expected" "$(decision_of "$(agent_output "$command_text" "$state_fixture" "$agent")")"
 done <<'CASES'
-m|none|git switch same
+m|ask|git switch same
 m|ask|git switch differs
-m|none|git checkout same
+m|ask|git checkout same
 m|ask|git checkout differs
-m|none|git checkout -b topic same
+m|ask|git checkout -b topic same
 m|ask|git switch -c topic differs
-m|none|git merge same
+m|ask|git merge same
 m|ask|git merge differs
-m|none|git rebase same
+m|ask|git rebase same
 m|ask|git rebase differs
-m|none|git cherry-pick same
+m|ask|git cherry-pick same
 m|ask|git cherry-pick differs
 m|ask|git switch missing-branch
 m|ask|git switch "$BRANCH"
@@ -1624,12 +1632,18 @@ m|ask|git pull
 m|ask|git commit -m x && git switch same
 m|ask|git fetch && git merge same
 m|ask|git -C . switch same
-m|none|git stash
+m|ask|git stash
 m|ask|git stash pop
-m|none|git checkout -- .
-m|none|git restore .
-m|none|git reset --hard
-m|none|git checkout src/a.txt
+m|ask|git checkout -- .
+m|ask|git restore .
+m|ask|git reset --hard
+m|ask|git checkout src/a.txt
+m|none|git checkout -- src/a.txt
+m|none|git restore src/a.txt
+m|none|git checkout -b topic
+m|none|git switch -c topic
+m|none|git stash list
+m|none|git reset HEAD~1
 b|deny|git switch same
 CASES
 # Uncommitted state changes: operations that discard them ask; ordinary paths and switches do not.
@@ -1645,20 +1659,24 @@ m|ask|git reset --hard
 m|ask|git switch -f same
 m|ask|git merge --abort
 m|none|git checkout -- src
-m|none|git switch same
+m|ask|git switch same
 CASES
 git -C "$state_fixture" checkout -q -- .agents
+# Option B: the reason names the operation and says why the guard cannot clear it (it no longer
+# compares states, so it cannot name the difference).
 reason="$(agent_output 'git switch differs' "$state_fixture" m | jq -r '.hookSpecificOutput.permissionDecisionReason')"
-expect_contains "fix round 3 N6(a): the ask names the operation and the state" "git switch: the .agents/specs state files differ between HEAD and differs" "$reason"
+expect_contains "Option B: the ask names the operation" "git switch can replace protected state" "$reason"
+expect_contains "Option B: the ask says the guard does not inspect Git state" "the guard does not inspect Git state" "$reason"
+# Option B: an identical-state switch now asks, so it is logged (was: not logged).
 log_lines_before="$(wc -l <"$state_fixture/.git/ai-engineering/guard-log.jsonl" 2>/dev/null | tr -d ' ')"
 agent_output 'git switch same' "$state_fixture" m >/dev/null
-expect_equal "fix round 3 N6(a): an identical-state switch is not logged" "${log_lines_before:-}" "$(wc -l <"$state_fixture/.git/ai-engineering/guard-log.jsonl" 2>/dev/null | tr -d ' ')"
+expect_equal "Option B: an identical-state switch is logged" "$((${log_lines_before:-0} + 1))" "$(wc -l <"$state_fixture/.git/ai-engineering/guard-log.jsonl" 2>/dev/null | tr -d ' ')"
 (
   source "$scripts/lib.sh"
   classify_command_impact "git switch differs" "$state_fixture"; [ "$impact_decision" = "ask" ] && [ "$impact_classes" = "protected-tree-overwrite" ] || exit 1
-  classify_command_impact "git switch same" "$state_fixture"; [ "$impact_decision" = "none" ] || exit 2
+  classify_command_impact "git switch same" "$state_fixture"; [ "$impact_decision" = "ask" ] && [ "$impact_classes" = "protected-tree-overwrite" ] || exit 2
 )
-expect_equal "lib: classify_command_impact sees the N6(a) state checks (exit code identifies the failed check)" 0 "$?"
+expect_equal "lib: classify_command_impact sees state-changing Git as ask (exit code identifies the failed check)" 0 "$?"
 
 # N6(b) owner ruling: patch, git apply and git am ask when the patch is not text from this
 # submission; a known patch denies when it touches the store (or Git's own files, for specialists).
@@ -1727,7 +1745,8 @@ expect_equal "lib: classify_command_impact sees the fix-round-3 classifications 
 # ---------------------------------------------------------------- WORK-001 fix round 4 (re-review 3 RR3-1 to RR3-13)
 # Table cases are "agent|expected|command" (agents as above); "\n" is a newline and @NAME@ a
 # character expand_characters supplies. First every probe of re-review 3 (rereview3-probes.jsonl),
-# in the agent repository (branch feature, so `git checkout feature` alone is no decision). Two
+# in the agent repository (branch feature; `git checkout feature` alone was no decision and asks
+# under Option B, which no longer resolves refs at hook time). Two
 # probes drop the `\n` of their printf format, which this table would turn into a newline.
 fix4_table() {
   local label="$1" directory="$2" agent expected command_text
@@ -1774,7 +1793,7 @@ m|deny|xxd -r in.hex .agents/specs/active/WORK-9.state.json
 m|deny|ed -s .agents/specs/active/WORK-9.state.json <<'EOF'\n1d\nw\nEOF
 b|deny|eval 'export GIT_EXTERNAL_DIFF=./x' && git diff
 b|deny|printf 'export GIT_EXTERNAL_DIFF=./x' > e && . ./e && git diff
-m|none|git checkout feature
+m|ask|git checkout feature
 CASES
 
 # RR3-1 (HIGH, owner ruling: hardened plumbing only). The hooks' Git (guard/hook-git.sh) must never
@@ -1782,8 +1801,8 @@ CASES
 # configured to touch a marker: fsmonitor, every hook (in .git/hooks and through core.hooksPath), a
 # clean and smudge filter and a textconv driver on the state files, and an external diff with
 # trustExitCode. The state file is stat-dirty (same content, older modification time), which made
-# the earlier `git status` re-hash it through the filter. Each hook-time check (state checks, the
-# branch, root and common-directory lookups, the shell-edit hint, guard-writes.sh) must leave no
+# the earlier `git status` re-hash it through the filter. Each hook-time lookup (the branch, root
+# and common-directory lookups, the shell-edit hint, guard-writes.sh) must leave no
 # marker and reach the ruled decision.
 hostile_repository="$(new_repository hostile-repo main)"
 hostile_markers="$work_directory/hostile-markers" hostile_programs="$work_directory/hostile-programs"
@@ -1837,20 +1856,24 @@ hostile_table() {
     rm -f "$hostile_markers"/*
   done
 }
+# Option B (2026-10-12): no hook-time state checks, so every state-changing form asks (the "same"
+# and whole-tree discard lines were none). The markers still matter: the branch (push), root (cp),
+# common-directory (tokens) and tracked-file (hint) lookups run Git in this repository.
 hostile_table "plain environment" <<'CASES'
-m|none|git stash
-m|none|git reset --hard
-m|none|git restore .
-m|none|git checkout -- .
-m|none|git checkout -f
+m|ask|git stash
+m|ask|git reset --hard
+m|ask|git restore .
+m|ask|git checkout -- .
+m|ask|git checkout -f
 m|ask|git switch differs
-m|none|git switch same
+m|ask|git switch same
 m|ask|git merge differs
-m|none|git merge same
+m|ask|git merge same
 m|ask|git cherry-pick differs
-m|none|git cherry-pick same
-m|none|git checkout same
+m|ask|git cherry-pick same
+m|ask|git checkout same
 m|ask|git push origin feature
+m|ask|git push
 m|ask|cp -R vendor/. .
 m|deny|echo x > .git/ai-engineering/tokens/t
 b|none|echo hi > src/a.txt
@@ -1858,9 +1881,10 @@ b|deny|git stash && X=@NBSP@
 CASES
 git -C "$hostile_repository" config core.hooksPath "$hostile_programs/hooks"
 hostile_table "core.hooksPath" <<'CASES'
-m|none|git stash
+m|ask|git stash
 m|ask|git switch differs
-m|none|git switch same
+m|ask|git switch same
+m|ask|git push origin feature
 CASES
 # Injected configuration in the hook's own environment (a committed settings env block): the
 # hook's Git runs without it, so it cannot see what the command will see, and asks.
@@ -1878,16 +1902,20 @@ CASES
 hostile_table "GIT_DIR" "GIT_DIR=$hostile_repository/.git" <<'CASES'
 m|ask|git switch same
 CASES
-# GIT_EXTERNAL_DIFF changes no repository or configuration: the checks run, without it.
+# GIT_EXTERNAL_DIFF changes no repository or configuration. Option B: the state-changing forms ask
+# regardless (the none lines were identical-state checks).
 hostile_table "GIT_EXTERNAL_DIFF" "GIT_EXTERNAL_DIFF=$hostile_programs/external-diff" "GIT_PAGER=$hostile_programs/external-diff" <<'CASES'
-m|none|git stash
-m|none|git checkout -- .
-m|none|git switch same
+m|ask|git stash
+m|ask|git checkout -- .
+m|ask|git switch same
 m|ask|git switch differs
-m|none|git cherry-pick same
+m|ask|git cherry-pick same
 m|ask|git cherry-pick differs
+m|ask|git push origin feature
 CASES
-# guard-writes.sh: its common-directory and top-level lookups use the same interface.
+# guard-writes.sh: its common-directory and top-level lookups use the same interface. NF-3 (Option
+# B round): a token-store-like path outside .git, judged under injected Git configuration in the
+# hook environment, asks (was none: the lookup ignored the environment the write would see).
 while IFS='|' read -r expected agent target; do
   [ -n "$expected" ] || continue
   output="$(write_input "$agent" "$target" "$hostile_repository" | env "GIT_CONFIG_PARAMETERS='core.fsmonitor=$hostile_programs/fsmonitor'" "$scripts/guard-writes.sh")"
@@ -1897,7 +1925,7 @@ while IFS='|' read -r expected agent target; do
 done <<CASES
 none|ai-engineering:backend|$hostile_repository/src/new.txt
 none|ai-engineering:learning|$hostile_repository/.agents/learnings/x.md
-none||$hostile_repository/x/ai-engineering/tokens/t
+ask||$hostile_repository/x/ai-engineering/tokens/t
 deny||$hostile_repository/.git/ai-engineering/tokens/t
 CASES
 expect_equal "fix round 4 RR3-1: the hostile fixture's state file is still stat-dirty and unchanged" '{"status":"draft"}' "$(cat "$hostile_repository/.agents/specs/active/WORK-1.state.json")"
@@ -2047,65 +2075,69 @@ if [ "$(git -C "$state_fixture" rev-parse --abbrev-ref HEAD)" = main ] && [ -z "
   && [ "$(git -C "$state_fixture" rev-parse merged^2)" = "$(git -C "$state_fixture" rev-parse differs)" ] \
   && [ "$(git -C "$state_fixture" ls-tree symlinked .agents/specs | cut -c1-6)" = 120000 ] && [ -d "$state_worktree/src" ]; then pass
 else fail "fix round 4: the state fixture additions are not as intended"; fi
+# Option B (2026-10-12): every line below that was none (identical state found by the hook-time
+# check) now asks; the asks are unchanged. The value-flag forms (RR3-4) must still be recognised
+# as state-changing, which these lines keep testing.
 fix4_table "RR3-4 to RR3-7" "$state_fixture" <<'CASES'
-m|none|git rebase -m same
+m|ask|git rebase -m same
 m|ask|git rebase -m differs
-m|none|git checkout -m same
+m|ask|git checkout -m same
 m|ask|git checkout -m differs
-m|none|git switch -m same
-m|none|git cherry-pick -x same
+m|ask|git switch -m same
+m|ask|git cherry-pick -x same
 m|ask|git cherry-pick -x differs
-m|none|git cherry-pick -s same
-m|none|git revert -s same
+m|ask|git cherry-pick -s same
+m|ask|git revert -s same
 m|ask|git revert -s differs
 m|ask|git cherry-pick -m 1 merged
-m|none|git cherry-pick -m 2 merged
-m|none|git cherry-pick --mainline=2 merged
-m|none|git cherry-pick -m2 merged
+m|ask|git cherry-pick -m 2 merged
+m|ask|git cherry-pick --mainline=2 merged
+m|ask|git cherry-pick -m2 merged
 m|ask|git revert -m 1 merged
 m|ask|git cherry-pick -m x merged
 m|ask|git checkout amb
 m|ask|git switch amb
 m|ask|git merge amb
-m|none|git merge tag-same
+m|ask|git merge tag-same
 m|ask|git merge tag-differs
-m|none|git checkout tag-same
+m|ask|git checkout tag-same
 m|ask|git switch symlinked
 m|ask|git cherry-pick symlinked
-m|none|git cherry-pick spec-notes
-m|none|git switch spec-notes
+m|ask|git cherry-pick spec-notes
+m|ask|git switch spec-notes
 m|ask|printf '%s' 0 > .git/refs/heads/same && git switch same
 m|ask|make sync && git switch same
 m|ask|npm install && git switch same
 m|ask|X=$(make sync) git switch same
-m|none|echo start && git switch same
-m|none|cd src && git switch same
-m|none|cd src && cd .. && git switch same
+m|ask|echo start && git switch same
+m|ask|cd src && git switch same
+m|ask|cd src && cd .. && git switch same
 m|ask|cd ~ && git switch same
 m|ask|cd - && git switch same
 m|ask|cd "$D" && git switch same
 m|ask|GIT_DIR=x git switch same
 m|ask|export GIT_INDEX_FILE=x; git switch same
-m|none|GIT_PAGER=cat git switch same
+m|ask|GIT_PAGER=cat git switch same
 CASES
+# Option B: the reasons no longer name a ref comparison (none is made); they name the operation.
 reason="$(agent_output 'git checkout amb' "$state_fixture" m | jq -r '.hookSpecificOutput.permissionDecisionReason')"
-expect_contains "fix round 4 RR3-5: the ask names the ambiguous ref" "amb is ambiguous" "$reason"
+expect_contains "Option B RR3-5: the ask names the operation" "git checkout <branch> can replace protected state" "$reason"
 reason="$(agent_output 'git cherry-pick -m 1 merged' "$state_fixture" m | jq -r '.hookSpecificOutput.permissionDecisionReason')"
-expect_contains "fix round 4 RR3-4: the ask names the parent compared" "differ between merged^1 and merged" "$reason"
-# RR3-6: the check runs in the command's directory; another worktree is outside the session repository.
+expect_contains "Option B RR3-4: the ask names the operation" "git cherry-pick can replace protected state" "$reason"
+# RR3-6: worktrees and subdirectories. Option B: all ask (the none lines were identical-state checks).
 expect_equal "fix round 4 RR3-6: cd into a second worktree asks" ask "$(decision_of "$(agent_output "cd $state_worktree && git switch same" "$state_fixture" m)")"
-expect_equal "fix round 4 RR3-6: in the second worktree, a merge with identical state is no decision" none "$(decision_of "$(agent_output 'git merge main' "$state_worktree" m)")"
-expect_equal "fix round 4 RR3-6: in the second worktree, its own HEAD is compared" ask "$(decision_of "$(agent_output 'git switch differs' "$state_worktree" m)")"
-expect_equal "fix round 4 RR3-6: from a subdirectory, the check runs there" none "$(decision_of "$(agent_output 'git switch same' "$state_fixture/src" m)")"
-expect_equal "fix round 4 RR3-6: from a subdirectory, cd .. stays in the session repository" none "$(decision_of "$(agent_output 'cd .. && git switch same' "$state_fixture/src" m)")"
+expect_equal "Option B RR3-6: in the second worktree, a merge asks" ask "$(decision_of "$(agent_output 'git merge main' "$state_worktree" m)")"
+expect_equal "fix round 4 RR3-6: in the second worktree, a switch asks" ask "$(decision_of "$(agent_output 'git switch differs' "$state_worktree" m)")"
+expect_equal "Option B RR3-6: from a subdirectory, a switch asks" ask "$(decision_of "$(agent_output 'git switch same' "$state_fixture/src" m)")"
+expect_equal "Option B RR3-6: from a subdirectory, cd .. && switch asks" ask "$(decision_of "$(agent_output 'cd .. && git switch same' "$state_fixture/src" m)")"
 # RR3-7: untracked state (whether state files are tracked is open until WORK-002).
 printf '{"status":"approved"}\n' >"$state_fixture/.agents/specs/active/WORK-2.state.json"
 fix4_table "RR3-7 untracked state" "$state_fixture" <<'CASES'
 m|ask|git checkout -f same
 m|ask|git switch --discard-changes same
 m|ask|git checkout -f
-m|none|git switch same
-m|none|git stash
+m|ask|git switch same
+m|ask|git stash
 m|ask|git stash -u
 m|ask|git stash push --include-untracked
 m|ask|git stash -a
@@ -2114,9 +2146,10 @@ m|ask|git clean -f .
 m|none|git clean -f src
 CASES
 rm -f "$state_fixture/.agents/specs/active/WORK-2.state.json"
+# Option B: these were none on a clean tree (checked at hook time); they ask now.
 fix4_table "RR3-7 clean tree" "$state_fixture" <<'CASES'
-m|none|git checkout -f same
-m|none|git checkout -f
+m|ask|git checkout -f same
+m|ask|git checkout -f
 CASES
 
 # RR3-8: ~, ~+, ~-, ~user, cd -, a bare cd, popd and pushd with no directory are unresolved; a tilde
@@ -2228,7 +2261,9 @@ mkdir -p "$slow_git_directory"
 printf '#!/bin/bash\necho $$ >>"%s/pids"\nsleep 30 &\necho $! >>"%s/pids"\nwait\n' "$slow_git_directory" "$slow_git_directory" >"$slow_git_directory/git"
 chmod +x "$slow_git_directory/git"
 slow_started=$SECONDS
-output="$(agent_input 'git switch same' "$state_fixture" m | PATH="$slow_git_directory:$PATH" "$scripts/guard-bash.sh")"
+# Option B: `git switch same` asks without any hook-time Git now, so the hanging lookup is reached
+# through a bare push (the current-branch lookup) instead.
+output="$(agent_input 'git push' "$state_fixture" m | PATH="$slow_git_directory:$PATH" "$scripts/guard-bash.sh")"
 slow_elapsed=$((SECONDS - slow_started))
 expect_equal "fix round 4 RR3-13: a hanging hook-time git asks" ask "$(decision_of "$output")"
 if [ "$slow_elapsed" -le 9 ]; then pass; else fail "fix round 4 RR3-13: the hook took ${slow_elapsed} s with a hanging git (deadline 5 s)"; fi
@@ -2241,6 +2276,113 @@ for attempt in 1 2 3 4 5 6 7 8 9 10; do
   sleep 0.1
 done
 expect_equal "fix round 4 RR3-13: no process of the hanging git is left" "" "$slow_left"
+
+# ---------------------------------------------------------------- Option B (re-review 4: NF-1, NF-2, NF-3)
+# NF-1: reading a missing object in a partial clone fetches it from the promisor remote, which runs
+# its transport; a repository's protocol.ext.allow=always overrides protocol.allow=never, and only a
+# Git that knows GIT_NO_LAZY_FETCH stops it. Option B: hook-time Git reads no object. Fixture: a
+# --filter=tree:0 --no-checkout clone whose promisor is an ext:: command that touches a marker; a
+# PATH shim drops GIT_NO_LAZY_FETCH (an older Git) and records each hook-time Git invocation.
+nf1_markers="$work_directory/nf1-markers" nf1_shim="$work_directory/nf1-shim" nf1_client="$work_directory/nf1-client"
+mkdir -p "$nf1_markers" "$nf1_shim"
+nf1_server="$(new_repository nf1-server main)"
+mkdir -p "$nf1_server/.agents/specs/active" "$nf1_server/src"
+printf '{"status":"draft"}\n' >"$nf1_server/.agents/specs/active/WORK-1.state.json"
+printf 'a\n' >"$nf1_server/src/a.txt"
+git -C "$nf1_server" add -A && git -C "$nf1_server" -c user.name=test -c user.email=test@example.com commit -q -m state
+git -C "$nf1_server" config uploadpack.allowFilter true
+git clone -q --no-local --filter=tree:0 --no-checkout "file://$nf1_server" "$nf1_client" 2>/dev/null
+git -C "$nf1_client" config remote.origin.url "ext::sh -c touch% $nf1_markers/fetched% ;false"
+git -C "$nf1_client" config protocol.ext.allow always
+real_git="$(command -v git)"
+printf '#!/bin/bash\nunset GIT_NO_LAZY_FETCH\nprintf "%%s\\n" "$*" >>"%s/calls"\nexec "%s" "$@"\n' "$nf1_shim" "$real_git" >"$nf1_shim/git"
+chmod +x "$nf1_shim/git"
+# Precondition: the fixture is genuine. Reading a tree with the hook's own options but without
+# GIT_NO_LAZY_FETCH runs the promisor command.
+env -u GIT_NO_LAZY_FETCH git -C "$nf1_client" -c protocol.allow=never cat-file -p 'HEAD^{tree}' >/dev/null 2>&1
+if [ -e "$nf1_markers/fetched" ]; then pass; else fail "Option B NF-1: the partial-clone fixture does not fetch lazily"; fi
+rm -f "$nf1_markers"/* "$nf1_shim/calls"
+while IFS='|' read -r agent expected command_text; do
+  [ -n "$expected" ] || continue
+  output="$(agent_input "$command_text" "$nf1_client" "$agent" | PATH="$nf1_shim:$PATH" "$scripts/guard-bash.sh")"
+  expect_equal "Option B NF-1 ($agent): $command_text" "$expected" "$(decision_of "$output")"
+  expect_equal "Option B NF-1: no promisor fetch for: $command_text" "" "$(ls "$nf1_markers" | tr '\n' ' ')"
+  rm -f "$nf1_markers"/*
+done <<'CASES'
+m|ask|git switch main
+m|ask|git checkout main
+m|ask|git cherry-pick main
+m|ask|git checkout -- .
+m|ask|git reset --hard
+m|ask|git stash
+m|ask|git push
+m|ask|cp -R vendor/. .
+m|deny|echo x > .git/ai-engineering/tokens/t
+b|none|echo hi > src/a.txt
+b|deny|git switch main
+CASES
+for target in "$nf1_client/src/new.txt" "$nf1_client/x/ai-engineering/tokens/t"; do
+  write_input "" "$target" "$nf1_client" | PATH="$nf1_shim:$PATH" "$scripts/guard-writes.sh" >/dev/null
+done
+expect_equal "Option B NF-1: guard-writes caused no promisor fetch" "" "$(ls "$nf1_markers" | tr '\n' ' ')"
+# The interface is structural: every hook-time Git call was rev-parse or ls-files (no object read).
+if [ -s "$nf1_shim/calls" ]; then pass; else fail "Option B NF-1: the Git shim recorded no hook-time call"; fi
+expect_equal "Option B NF-1: hook-time Git is only rev-parse and ls-files" "" \
+  "$(grep -Ev '(^| )(rev-parse --git-common-dir|rev-parse --show-toplevel|rev-parse --show-cdup|rev-parse --abbrev-ref HEAD|--literal-pathspecs ls-files -- .*)$' "$nf1_shim/calls" | head -n 3)"
+
+# NF-2: `-` is the previous branch, an operand: every state-changing form with it asks, and a
+# specialist's is denied.
+fix4_table "NF-2 previous branch" "$state_fixture" <<'CASES'
+m|ask|git checkout -
+m|ask|git switch -
+m|ask|git checkout -f -
+m|ask|git checkout -q -
+m|ask|git switch --discard-changes -
+m|ask|git merge -
+m|ask|git rebase -
+m|ask|git cherry-pick -
+m|ask|git revert -
+m|ask|git checkout - -- .
+b|deny|git checkout -
+b|deny|git merge -
+CASES
+
+# NF-3: a lookup a decision depends on that fails inside a work tree, or that the hook environment
+# redirects, turns no decision into ask; it never lowers an ask or a deny. Outside any work tree a
+# failed lookup changes nothing. A failing Git (exit 128, as for a refused safe.directory) is a shim.
+failing_git_directory="$work_directory/failing-git" no_repository_directory="$work_directory/not-a-repository"
+mkdir -p "$failing_git_directory" "$no_repository_directory"
+printf '#!/bin/sh\nexit 128\n' >"$failing_git_directory/git" && chmod +x "$failing_git_directory/git"
+nf3_bash() { agent_input "$1" "$2" "$3" | env PATH="$failing_git_directory:$PATH" "$scripts/guard-bash.sh"; }
+while IFS='|' read -r agent expected command_text; do
+  [ -n "$expected" ] || continue
+  expect_equal "Option B NF-3 failing git ($agent): $command_text" "$expected" "$(decision_of "$(nf3_bash "$command_text" "$main_repository" "$agent")")"
+done <<'CASES'
+m|ask|git push
+m|ask|cp -R src/ build/
+m|deny|echo x > x/ai-engineering/tokens/t
+m|ask|git push --force origin feature
+b|deny|git commit -m x
+m|deny|echo x > .agents/specs/active/WORK-9.state.json
+CASES
+expect_equal "Option B NF-3: outside a work tree, a failed lookup gives no decision" none "$(decision_of "$(nf3_bash 'git push' "$no_repository_directory" m)")"
+expect_equal "Option B NF-3: an unwritable TMPDIR, bare push on main asks" ask \
+  "$(decision_of "$(agent_input 'git push' "$main_repository" m | TMPDIR=/nonexistent "$scripts/guard-bash.sh")")"
+expect_equal "Option B NF-3: GIT_DIR in the hook environment, bare push from outside a repository asks" ask \
+  "$(decision_of "$(agent_input 'git push' "$no_repository_directory" m | env "GIT_DIR=$main_repository/.git" "$scripts/guard-bash.sh")")"
+expect_contains "Option B NF-3: the ask names the failed lookup" "a Git lookup this decision depends on" \
+  "$(nf3_bash 'git push' "$main_repository" m | jq -r '.hookSpecificOutput.permissionDecisionReason')"
+# guard-writes.sh: the token-store and hard-link checks ask when their lookup fails in a work tree;
+# a store path still denies, and an ordinary write is unaffected.
+printf 'x\n' >"$main_repository/linked-a" && ln -f "$main_repository/linked-a" "$main_repository/linked-b"
+nf3_writes() { write_input "" "$1" "$main_repository" | env PATH="$failing_git_directory:$PATH" "$scripts/guard-writes.sh"; }
+expect_equal "Option B NF-3 guard-writes: token-store-like path, failing git" ask "$(decision_of "$(nf3_writes "$main_repository/x/ai-engineering/tokens/t")")"
+expect_equal "Option B NF-3 guard-writes: hard-linked file, failing git" ask "$(decision_of "$(nf3_writes "$main_repository/linked-a")")"
+expect_equal "Option B NF-3 guard-writes: a store path still denies with a failing git" deny "$(decision_of "$(nf3_writes "$main_repository/.agents/specs/active/WORK-9.state.json")")"
+expect_equal "Option B NF-3 guard-writes: an ordinary write, failing git" none "$(decision_of "$(nf3_writes "$main_repository/src/new.txt")")"
+expect_equal "Option B NF-3 guard-writes: token-store-like path, working git" none "$(decision_of "$(write_input "" "$main_repository/x/ai-engineering/tokens/t" "$main_repository" | "$scripts/guard-writes.sh")")"
+expect_equal "Option B NF-3 guard-writes: hard-linked file, working git" none "$(decision_of "$(write_input "" "$main_repository/linked-a" "$main_repository" | "$scripts/guard-writes.sh")")"
+rm -f "$main_repository/linked-a" "$main_repository/linked-b"
 
 # ---------------------------------------------------------------- run-gate
 commit_all() { git -C "$1" add -A && git -C "$1" -c user.name=test -c user.email=test@example.com commit -q -m "$2"; }

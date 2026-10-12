@@ -13,9 +13,11 @@
 # guard/fallback.jq establishes independently of the failed parse; unparseable alone never denies.
 # The guard never returns "allow".
 #
-# Hook-time Git (state checks, branch, root and common-directory lookups, the shell-edit hint) goes
-# only through the hardened plumbing in guard/hook-git.sh, which never runs repository- or
-# environment-controlled programs (RR3-1).
+# Hook-time Git is limited to lookups (branch, root and common directory, the shell-edit hint's
+# tracked-file test) through guard/hook-git.sh; it reads no objects or trees (Option B, owner
+# decision 2026-10-12). State-changing Git commands ask instead (guard/policy.jq git_state_policy).
+# A lookup that a decision depends on and that fails, or that the hook environment redirects,
+# turns no decision into ask (NF-3).
 #
 # This is a guardrail, not a security sandbox: it only sees the command text Claude
 # submits. Indirection (scripts, aliases, variables, encoded strings) can evade it.
@@ -56,6 +58,19 @@ directory_for_git() {
   printf '%s' "${working_directory:-$PWD}"
 }
 
+# NF-3: set when a lookup a decision depends on cannot be trusted, so that no decision becomes ask.
+# Untrusted means the hook environment sets Git variables that redirect Git (the hook's Git runs
+# without them, the command with them), or the lookup failed although the working directory is in
+# a Git work tree (guard/hook-git.sh hook_git_in_work_tree). Outside any work tree a failed lookup
+# is expected and changes nothing.
+git_lookup_failed=""
+note_git_lookup() {
+  if hook_git_environment_overrides || { [ "$1" -ne 0 ] && hook_git_in_work_tree "$(directory_for_git)"; }; then
+    git_lookup_failed=1
+  fi
+  return 0
+}
+
 # ---------------------------------------------------------------- guard log
 # One JSON line per ask or deny in <git-common-dir>/ai-engineering/guard-log.jsonl:
 # time, session id, agent type, decision, classes, parse mode and the SHA-256 of the command.
@@ -77,13 +92,13 @@ restricted_agent() {
   return 1
 }
 
-# Prints the absolute Git common directory of the working directory (nothing when unknown).
+# Prints the absolute Git common directory of the working directory (nothing, and status 1, when unknown).
 resolve_common_directory() {
   local directory common_directory
   directory="$(directory_for_git)"
-  hook_git_common_directory "$directory" || return 0
+  hook_git_common_directory "$directory" || return 1
   common_directory="$hook_git_output"
-  [ -n "$common_directory" ] || return 0
+  [ -n "$common_directory" ] || return 1
   case "$common_directory" in /*) ;; *) common_directory="$directory/$common_directory" ;; esac
   printf '%s' "$common_directory"
 }
@@ -337,8 +352,12 @@ emit_shell_edit_hint() {
 current_branch=""
 branch_loaded="0"
 load_current_branch() {
+  local status
   current_branch=""
-  if hook_git_current_branch "$(directory_for_git)"; then current_branch="$hook_git_output"; fi
+  hook_git_current_branch "$(directory_for_git)"
+  status=$?
+  [ "$status" -ne 0 ] || current_branch="$hook_git_output"
+  note_git_lookup "$status"
   branch_loaded="1"
 }
 # Cheap guesses, matched without regard to case (NR-5: `git PUSH` and `GIT push` run a push on a
@@ -354,7 +373,10 @@ esac
 # only when the command mentions the store, so ordinary commands pay for no extra git call.
 common_directory=""
 case "$hook_input" in
-  *tokens*) common_directory="$(resolve_common_directory)" ;;
+  *tokens*)
+    common_directory="$(resolve_common_directory)"
+    note_git_lookup "$?"
+    ;;
 esac
 
 # The repository root matters only for whole-tree writers (recursive copy, archive extraction,
@@ -363,182 +385,23 @@ esac
 root_cdup="" root_known="0"
 case "$hook_input" in
   *cp* | *rsync* | *ditto* | *tar* | *zip* | *cpio* | *pax* | *7z* | *checkout* | *restore* | *reset* | *read-tree* | *rm* | *clean* | *index* | *hash-object*)
-    if hook_git_show_cdup "$(directory_for_git)"; then root_cdup="$hook_git_output" root_known="1"; fi
+    hook_git_show_cdup "$(directory_for_git)"
+    root_status=$?
+    if [ "$root_status" -eq 0 ]; then root_cdup="$hook_git_output" root_known="1"; fi
+    note_git_lookup "$root_status"
     ;;
 esac
 shopt -u nocasematch
 
-decision="fallback" parse_mode="fallback" classes="" hook_output="" hint_state="none" hint_targets="[]" need_branch="0" floor_text="" state_checks="[]"
+decision="fallback" parse_mode="fallback" classes="" hook_output="" hint_state="none" hint_targets="[]" need_branch="0" floor_text=""
 
-# ---------------------------------------------------------------- state checks (N6(a))
-# The classifier found a branch switch, merge, rebase, cherry-pick, stash or no-ref whole-tree
-# restore with a literal ref (guard/policy.jq git_state_policy). At hook time, ask only if the
-# .agents/specs state files differ between HEAD (or the base) and the ref, the ref cannot be
-# resolved unambiguously, or uncommitted, untracked or ignored state would be discarded. Only the
-# hardened plumbing in guard/hook-git.sh is used (RR3-1), under one deadline for the whole hook
-# (RR3-13). Any failure, timeout, unexpected output or unsupported state asks, never none.
-# Whether state files are tracked, untracked or ignored is not fixed until WORK-002, so all three
-# are covered (RR3-7): committed (the ref diff), staged and modified (index and work tree against
-# the index, compared by raw hash with no filter), untracked and, for stash -a or clean -x, ignored.
-state_reason=""
-max_tracked_state_files=64
-
-# Exit status 0 when the raw diff (hook_git_tree_changes) touches the store: a *.state.json path under
-# .agents/specs, a symbolic link or submodule anywhere under it, or .agents or .agents/specs itself
-# as a non-directory entry (the store replaced by a link or a file). A quoted (unusual) path or a
-# line of another shape counts as a change. Other .agents changes (specs, learnings) do not ask.
-state_diff_touches_store() {
-  printf '%s\n' "$hook_git_output" | LC_ALL=C awk '
-    BEGIN { found = 0 }
-    $0 == "" { next }
-    {
-      tab = index($0, "\t")
-      if (substr($0, 1, 1) != ":" || tab == 0) { found = 1; exit }
-      path = tolower(substr($0, tab + 1))
-      split(substr($0, 2, tab - 2), meta, " ")
-      if (substr(path, 1, 1) == "\"") { found = 1; exit }
-      if (path == ".agents" || path == ".agents/specs") { found = 1; exit }
-      if (index(path, ".agents/specs/") == 1) {
-        if (path ~ /\.state\.json$/) { found = 1; exit }
-        if (meta[1] == "120000" || meta[2] == "120000" || meta[1] == "160000" || meta[2] == "160000") { found = 1; exit }
-      }
-    }
-    END { exit found ? 0 : 1 }'
-}
-
-# Resolves a literal ref in a directory into resolved_commit. Returns 0 when resolved, 1 when it
-# cannot be resolved, 2 when its name is ambiguous (RR3-5: a tag and a branch, or any two of the
-# names Git tries, ask). With prefer_branch (checkout and switch) refs/heads/<name> wins, as in Git.
-resolved_commit=""
-resolve_state_ref() {
-  local directory="$1" ref="$2" prefer_branch="$3" name matches=0 has_branch="" line
-  resolved_commit=""
-  name="${ref%%[~^@:]*}"
-  if [ -n "$name" ]; then
-    case "$name" in -* | *[![:alnum:]._/-]*) return 1 ;; esac
-    hook_git_matching_refs "$directory" "$name" || return 1
-    while IFS= read -r line; do
-      case "$line" in
-        "refs/$name" | "refs/tags/$name" | "refs/remotes/$name" | "refs/remotes/$name/HEAD") matches=$((matches + 1)) ;;
-        "refs/heads/$name") matches=$((matches + 1)) has_branch=1 ;;
-      esac
-    done <<<"$hook_git_output"
-    [ "$matches" -le 1 ] || return 2
-    # An all-capitals name (HEAD, FETCH_HEAD, ...) is also tried as a root ref first.
-    case "$name" in *[![:upper:]_]*) ;; *) [ "$matches" -eq 0 ] || return 2 ;; esac
-    if [ -n "$prefer_branch" ] && [ -n "$has_branch" ] && [ "$ref" = "$name" ]; then ref="refs/heads/$name"; fi
-  fi
-  hook_git_resolve_commit "$directory" "$ref" || return 1
-  resolved_commit="$hook_git_output"
-  return 0
-}
-
-# Returns 0 (and sets state_reason) when the state can change, or cannot be shown not to.
-state_can_change() {
-  local items op ref parent discard path directory untracked prefer_branch separator=$'\x1f'
-  local session_directory session_top ref_commit base_commit base_label record mode object stage file_path
-  local -a records
-  [ "$state_checks" != "[]" ] && [ -n "$state_checks" ] || return 1
-  if hook_git_environment_overrides; then
-    state_reason="the hook environment sets Git variables that change which repository or configuration Git uses"
-    return 0
-  fi
-  # One line per item; a control character in any field (it could split or truncate one) asks.
-  items="$(jq -r '.[] | [.op, (.ref // ""), ((.parent // 1) | tostring), (if .discard then "1" else "0" end), (if .path then "1" else "0" end),
-                        (.dir // ""), (if .untracked then "1" else "0" end), (if .branch then "1" else "0" end)]
-                       | if any(.[]; test("[[:cntrl:]]")) then "invalid" else join("\u001f") end' <<<"$state_checks" 2>/dev/null)" \
-    || { state_reason="the state checks could not be read"; return 0; }
-  session_directory="$(directory_for_git)"
-  session_top=""
-  while IFS="$separator" read -r op ref parent discard path directory untracked prefer_branch; do
-    [ -n "$op" ] || continue
-    if [ "$op" = invalid ]; then state_reason="a state check has a control character"; return 0; fi
-    case "$parent" in '' | *[!0-9]*) state_reason="$op: its parent number is not a number"; return 0 ;; esac
-    # RR3-6: the check runs in the command's own directory, which must be in the session repository.
-    [ -n "$directory" ] || directory="$session_directory"
-    if [ "$directory" != "$session_directory" ]; then
-      if [ -z "$session_top" ]; then
-        hook_git_top_level "$session_directory" && [ -n "$hook_git_output" ] || { state_reason="$op: the session repository cannot be resolved"; return 0; }
-        session_top="$hook_git_output"
-      fi
-      if ! hook_git_top_level "$directory" || [ "$hook_git_output" != "$session_top" ]; then
-        state_reason="$op: it runs in a directory outside the session repository ($directory)"
-        return 0
-      fi
-    fi
-    if [ -n "$ref" ]; then
-      resolve_state_ref "$directory" "$ref" "${prefer_branch#0}"
-      case "$?" in
-        0) ref_commit="$resolved_commit" ;;
-        2) state_reason="$op: $ref is ambiguous (more than one ref has that name)"; return 0 ;;
-        *)
-          # `git checkout <name>` restores a path from the index when <name> is not a ref.
-          if [ "$path" = 1 ] && [ -e "$directory/$ref" ]; then
-            ref="" discard=1
-          else
-            state_reason="$op: $ref cannot be resolved here"
-            return 0
-          fi
-          ;;
-      esac
-    fi
-    if [ -n "$ref" ]; then
-      # The base: HEAD, or the commit's parent for cherry-pick and revert (-m N picks parent N).
-      base_label="HEAD"
-      if [ "$op" = "git cherry-pick" ] || [ "$op" = "git revert" ]; then base_label="$ref^$parent"; fi
-      if [ "$base_label" = HEAD ]; then
-        hook_git_resolve_commit "$directory" HEAD || { state_reason="$op: HEAD cannot be resolved"; return 0; }
-      else
-        hook_git_resolve_commit "$directory" "$ref_commit^$parent" || { state_reason="$op: parent $parent of $ref cannot be resolved"; return 0; }
-      fi
-      base_commit="$hook_git_output"
-      hook_git_tree_changes "$directory" "$base_commit" "$ref_commit" || { state_reason="$op: the .agents/specs state files could not be compared with $ref"; return 0; }
-      if state_diff_touches_store; then
-        state_reason="$op: the .agents/specs state files differ between $base_label and $ref"
-        return 0
-      fi
-    fi
-    if [ "$discard" = 1 ]; then
-      hook_git_staged_state "$directory"
-      case "$?" in
-        0) ;;
-        1) state_reason="$op: staged .agents/specs state changes would be discarded"; return 0 ;;
-        *) state_reason="$op: the staged .agents/specs state files could not be checked"; return 0 ;;
-      esac
-      hook_git_tracked_state "$directory" || { state_reason="$op: the .agents/specs state files could not be listed"; return 0; }
-      # Buffered first: each hash below reuses the output file.
-      records=()
-      while IFS= read -r -d '' record; do
-        records+=("$record")
-        [ "${#records[@]}" -le "$max_tracked_state_files" ] || { state_reason="$op: too many .agents/specs state files to check"; return 0; }
-      done <"$hook_git_output_file"
-      for record in ${records[@]+"${records[@]}"}; do
-        file_path="${record#*$'\t'}" record="${record%%$'\t'*}"
-        mode="${record%% *}" record="${record#* }"
-        object="${record%% *}" stage="${record#* }"
-        if [ "$mode" != 100644 ] && [ "$mode" != 100755 ] || [ "$stage" != 0 ]; then
-          state_reason="$op: a .agents/specs state file is a link, a submodule or in conflict"
-          return 0
-        fi
-        if ! hook_git_hash_file "$directory" "$file_path" || [ "$hook_git_output" != "$object" ]; then
-          state_reason="$op: uncommitted .agents/specs state changes would be discarded"
-          return 0
-        fi
-      done
-      if [ "$untracked" = 1 ]; then
-        hook_git_untracked_state "$directory" || { state_reason="$op: untracked .agents/specs state files could not be listed"; return 0; }
-        [ -z "$hook_git_output" ] || { state_reason="$op: untracked .agents/specs state files would be overwritten or removed"; return 0; }
-      fi
-    fi
-  done <<<"$items"
-  return 1
-}
-# No decision from the classifier or the floor: ask if a state check says so, else the hint.
+# No decision from the classifier or the floor: ask if a lookup the decision depended on failed
+# (NF-3), else the hint.
 finish_without_decision() {
-  if state_can_change; then
-    if [ -n "$classify_only" ]; then printf 'ask\nprotected-tree-overwrite\n'; exit 0; fi
-    log_decision ask protected-tree-overwrite parsed
-    ask "ai-engineering guard: this command can replace protected state ($state_reason). It needs explicit human approval. $guardrail_note"
+  if [ -n "$git_lookup_failed" ]; then
+    if [ -n "$classify_only" ]; then printf 'ask\ngit-lookup-failed\n'; exit 0; fi
+    log_decision ask git-lookup-failed parsed
+    ask "ai-engineering guard: a Git lookup this decision depends on (current branch, repository root or common directory) failed, or the hook environment sets Git variables that change which repository Git uses, so the guard cannot show this command is safe. It needs explicit human approval. $guardrail_note"
   fi
   if [ -n "$classify_only" ]; then printf 'none\n\n'; exit 0; fi
   emit_shell_edit_hint
@@ -547,10 +410,10 @@ finish_without_decision() {
 
 # Runs the classifier once. Past the time budget it is stopped (its whole process group) and the
 # fallback rules apply. RR3-13 worst case, well under Claude Code's 60 s hook timeout: two
-# classifier runs (3 s each), every hook-time Git call together (5 s, guard/hook-git.sh), the
+# classifier runs (3 s each), every hook-time Git lookup together (5 s, guard/hook-git.sh), the
 # restricted-agent fallback check (3 s) and linear keyword scans.
 run_classifier() {
-  decision="fallback" parse_mode="fallback" classes="" hook_output="" hint_state="none" hint_targets="[]" need_branch="0" floor_text="" state_checks="[]"
+  decision="fallback" parse_mode="fallback" classes="" hook_output="" hint_state="none" hint_targets="[]" need_branch="0" floor_text=""
   set -m
   jq -r -L "$guard_directory" --arg branch "$current_branch" --arg branchLoaded "$branch_loaded" --arg commonDir "$common_directory" \
     --arg rootCdup "$root_cdup" --arg rootKnown "$root_known" \
@@ -569,7 +432,6 @@ run_classifier() {
       read -r hint_targets
       read -r need_branch
       read -r floor_text
-      read -r state_checks
     } <"$classifier_output_file"
   fi
   kill -KILL -- "-$watchdog_pid" 2>/dev/null
@@ -617,8 +479,6 @@ if [ "$branch_loaded" = "0" ]; then
 fi
 keyword_fallback "$current_branch"
 if [ "${#fallback_intents[@]}" -eq 0 ]; then
-  # Soft uncertainty (main.jq): the parse is sound, so the hook-time state checks it found still
-  # run (degraded parsing must not erase an established fact). After hard uncertainty there are none.
   finish_without_decision
 fi
 classes="$(IFS=,; printf '%s' "${fallback_intents[*]}")"

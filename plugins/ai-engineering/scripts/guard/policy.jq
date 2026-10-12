@@ -561,15 +561,14 @@ def patch_findings($cmds; $context; $restricted):
         | .git += [ $paths[] | select($restricted and git_protected_hit(.; $where) != null) ]
       end);
 
-# ---------------------------------------------------------------- state-changing Git (N6(a) owner ruling)
-# Branch switches, merge, pull, rebase, cherry-pick, stash and no-ref whole-tree restores replace
-# tracked files, the authority store's .agents/specs state files among them. They ask only when
-# the state can change: pull always; a dynamic ref, an earlier ref- or index-changing command in
-# the submission, another repository (git -C, --git-dir, --work-tree) or an operation in progress
-# (--continue, --skip, a range) ask now; otherwise the wrapper checks at hook time whether the state
-# files differ between HEAD and the ref (or base and ref) and whether uncommitted state changes
-# would be discarded, and asks only if so. Each item: {op, ref, parent, discard, path, branch,
-# untracked, ignored, dir, now} (the wrapper reads them, guard-bash.sh state_can_change).
+# ---------------------------------------------------------------- state-changing Git (N6(a), Option B)
+# Branch switches, merge, pull, rebase, cherry-pick, revert, stash and no-ref whole-tree restores
+# replace tracked files, the authority store's .agents/specs state files among them. The guard does
+# not inspect Git state at hook time (owner decision 2026-10-12, Option B, after re-review 4 NF-1),
+# so it cannot show that the state is unaffected: each of these asks, from every caller. Forms that
+# cannot replace tracked files get no item: checkout -b and switch -c from HEAD, restore and
+# checkout of paths that cannot reach a protected path, reset without --hard, stash list or show.
+# Ref restores of paths are judged by protected_tree_policy. Each item: {op, why}.
 # RR3-4: options that take a value, per subcommand (-x and -s are flags of cherry-pick and revert,
 # -m a flag of checkout, switch and rebase, and the mainline number of cherry-pick and revert).
 def git_state_value_flags($sub):
@@ -582,107 +581,48 @@ def git_state_value_flags($sub):
    "stash": ["-m", "--message", "--pathspec-from-file"],
    "restore": ["-s", "--source", "--pathspec-from-file", "--conflict"],
    "reset": ["--pathspec-from-file"]}[$sub // ""] // [];
-# RR3-5: a control character in a ref asks (it could split or truncate what the wrapper reads).
-def literal_ref: test("[$`*?\\[[:cntrl:]]") | not;
 def git_state_items($context; $root):
   .sub as $sub | .args as $args
-  | git_state_value_flags($sub) as $value_flags
-  | ($args | positionals_skipping($value_flags)) as $operands
-  | any($args[]; test("^(-f|--force|--discard-changes)$")) as $force
-  | any($args[]; test("^--(abort|quit)$")) as $abort
-  | any($args[]; test("^--(continue|skip)$")) as $resume
+  # NF-2: a bare `-` is the previous branch (@{-1}), an operand, not an option.
+  | ($args | map(if . == "-" then "@{-1}" else . end) | positionals_skipping(git_state_value_flags($sub))) as $operands
   | ([ range(0; $args | length) as $i | select($args[$i] == "--") | $i ] | first) as $dashes
   | ($context + {cwd: .dir, base: $context.cwd}) as $where
   | def reaches($dests): any($dests[]; protected_reach(.; $where; $root) != null);
-    def switch_ref: if . == "-" then "@{-1}" else . end;
-    if $sub == "pull" then [{op: "git pull", now: "it fetches and merges commits whose state is not known here"}]
+    def item($op): [{op: $op, why: "the guard does not inspect Git state, so it cannot show that the .agents/specs state files are unaffected"}];
+    if $sub == "pull" then item("git pull")
     elif $sub == "checkout" then
-      (if $dashes != null then
-         (if ($args[0:$dashes] | positionals_skipping($value_flags) | length) == 0 and reaches($args[$dashes + 1:])
-          then [{op: "git checkout -- <paths>", discard: true}] else [] end)
-       elif any($args[]; test("^(-b|-B|--orphan)$")) then
-         (if any($args[]; . == "--orphan") then [{op: "git checkout --orphan", now: "it starts a branch with no files"}]
-          elif ($operands | length) > 0 then [{op: "git checkout -b", ref: ($operands[0] | switch_ref), discard: $force, untracked: $force}] else [] end)
-       elif ($operands | length) == 1 then
-         [{op: "git checkout <branch>", ref: ($operands[0] | switch_ref), path: true, branch: true, discard: $force, untracked: $force}]
+      # With `--`, the paths decide, whatever ref comes before them.
+      (if $dashes != null then (if reaches($args[$dashes + 1:]) then item("git checkout -- <paths>") else [] end)
+       elif any($args[]; . == "--orphan") then item("git checkout --orphan")
+       elif any($args[]; test("^(-b|-B)$")) then (if ($operands | length) > 0 then item("git checkout -b <start point>") else [] end)
+       # One operand is a branch or a path; the guard cannot tell which, so it asks.
+       elif ($operands | length) == 1 then item("git checkout <branch>")
        # RR3-7: checkout -f with no ref discards every local change.
-       elif ($operands | length) == 0 and $force then [{op: "git checkout -f", discard: true, untracked: true}]
+       elif ($operands | length) == 0 and any($args[]; test("^(-f|--force)$")) then item("git checkout -f")
        else [] end)
     elif $sub == "switch" then
-      (if any($args[]; . == "--orphan") then [{op: "git switch --orphan", now: "it starts a branch with no files"}]
-       elif any($args[]; test("^(-c|-C|--create|--force-create)$")) then
-         (if ($operands | length) > 0 then [{op: "git switch -c", ref: ($operands[0] | switch_ref), discard: $force, untracked: $force}] else [] end)
-       elif ($operands | length) > 0 then [{op: "git switch", ref: ($operands[0] | switch_ref), branch: true, discard: $force, untracked: $force}]
-       else [] end)
-    elif $sub == "merge" or $sub == "rebase" or $sub == "cherry-pick" or $sub == "revert" then
-      (if $abort then [{op: ("git " + $sub + " --abort"), discard: true}]
-       elif $resume then [{op: ("git " + $sub + " --continue"), now: "it continues an operation in progress"}]
-       elif $sub == "rebase" and any($args[]; test("^(--root|-i|--interactive)$")) then [{op: "git rebase", now: "it rewrites history interactively or from the root"}]
-       elif $sub == "cherry-pick" or $sub == "revert" then
-         # -m N: the change is taken against parent N (RR3-4).
-         ((option_values($args; "-m"; "--mainline") + [ $args[] | select(test("^-m.")) | .[2:] ]) | last) as $mainline
-         | (if ($operands | length) == 0 then []
-            elif $mainline != null and ($mainline | test("^[1-9][0-9]{0,2}$") | not) then [{op: ("git " + $sub), now: "its parent number is not a number"}]
-            elif any($operands[]; contains("..")) then [{op: ("git " + $sub), now: "it applies a range of commits"}]
-            else [ $operands[] | {op: ("git " + $sub), ref: ., parent: (($mainline // "1") | tonumber)} ] end)
-       else [ (if ($operands | length) > 0 then $operands[] else "@{upstream}" end), option_values($args; "--onto"; "--onto")[]
-              | {op: ("git " + $sub), ref: .} ] end)
+      (if any($args[]; . == "--orphan") then item("git switch --orphan")
+       elif ($operands | length) == 0 then []
+       elif any($args[]; test("^(-c|-C|--create|--force-create)$")) then item("git switch -c <start point>")
+       else item("git switch") end)
+    # merge and rebase with no operand use the upstream; --abort and --continue change files too.
+    elif $sub == "merge" or $sub == "rebase" then item("git " + $sub)
+    elif $sub == "cherry-pick" or $sub == "revert" then
+      (if ($operands | length) > 0 or any($args[]; test("^--(abort|quit|continue|skip)$")) then item("git " + $sub) else [] end)
     elif $sub == "stash" then
       ((($operands | first) // "push") as $action
-       | if $action | IN("push", "save") then
-           # RR3-7: untracked (-u) and ignored (-a) files are stashed and removed too. Bounded and
-           # simple: these always ask, whatever is untracked or ignored now.
-           (if any($args[]; test("^(--include-untracked|--all|-[A-Za-z]*[ua][A-Za-z]*)$"))
-            then [{op: "git stash (untracked or ignored files)", now: "it also removes untracked or ignored files, which can include state files"}]
-            else [{op: "git stash", discard: true}] end)
-         elif $action | IN("pop", "apply") then [{op: ("git stash " + $action), ref: ($operands[1] // "stash@{0}")}]
-         elif $action == "branch" then [{op: "git stash branch", now: "it checks out a branch from a stash"}]
-         else [] end)
+       | if $action | IN("push", "save", "pop", "apply", "branch") then item("git stash " + $action) else [] end)
     elif $sub == "restore" then
       (if any($args[]; test("^(-s|--source)(=.*)?$|^-s.")) or (any($args[]; test("^(--staged|-S)$")) and (any($args[]; test("^(--worktree|-W)$")) | not)) then []
-       elif reaches([ ($args | positionals_skipping(["--pathspec-from-file"]))[], git_pathspec_file($args)[] ]) then [{op: "git restore <paths>", discard: true}]
+       elif reaches([ ($args | positionals_skipping(["--pathspec-from-file"]))[], git_pathspec_file($args)[] ]) then item("git restore <paths>")
        else [] end)
     elif $sub == "reset" then
-      (if any($args[]; test("^--(hard|merge|keep)$")) and ($operands | length) == 0 then [{op: "git reset --hard", discard: true}] else [] end)
+      (if any($args[]; test("^--(hard|merge|keep)$")) and ($operands | length) == 0 then item("git reset --hard") else [] end)
     else [] end;
 
-# RR3-6: a command that cannot change refs, the index or files: a read-only program, a context
-# command (cd, export, test, ...; exported Git variables are judged on the Git command itself) or a
-# Git read form with no executing construct (fetch excluded: it moves remote-tracking refs), that
-# writes no file (redirections, sort -o, uniq IN OUT, ...: command_write_targets).
-def provably_read_only:
-  ([ command_write_targets[].t | select(test("^(/dev/(null|stdout|stderr|tty)|-|[0-9]+-?)$") | not) ] | length) == 0
-  and .prog != null
-  and ((.prog | IN(readonly_programs[])) or (.prog | IN(context_programs[]))
-       or (.prog == "git" and .sub != "fetch" and ({sub: .sub, args: .args} | git_read_form)
-           and (git_exec_construct({sub: .sub, rest: .args, globals: .globals}) | not)));
-
-# {now: [{op, why}], checks: [items]} over the commands in order (substitutions before the command
-# that holds them, as they run).
+# Every state-changing Git command in the submission, in order: [{op, why}].
 def git_state_policy($cmds; $context; $root):
-  (($context.cwd // "") | normalize_path("/")) as $session_directory
-  | reduce range(0; $cmds | length) as $i ({now: [], checks: [], changed: false};
-    $cmds[$i] as $command
-    | if $command.prog != "git" then .changed = (.changed or ($command | provably_read_only | not))
-      else
-        ($command | git_state_items($context; $root)) as $items
-        | (([ $command.globals[] | select(test("^--(git-dir|work-tree)")) ] | length) > 0 or (($command.chdir // []) | length) > 0) as $elsewhere
-        | ([ ($command.env // [])[] | select(git_env_safe | not) | sub("=.*$"; "") ] | first) as $variable
-        | reduce $items[] as $item (.;
-            if $item.now != null then .now += [{op: $item.op, why: $item.now}]
-            elif $elsewhere then .now += [{op: $item.op, why: "it runs in another directory or repository"}]
-            elif $variable != null then .now += [{op: $item.op, why: ("it runs with " + $variable + " set")}]
-            elif .changed then .now += [{op: $item.op, why: "an earlier command in this submission can change refs, the index or files"}]
-            elif $item.ref != null and ($item.ref | literal_ref | not) then .now += [{op: $item.op, why: "its ref is not literal"}]
-            # RR3-6: the check runs in the command's directory; one this submission cannot resolve asks.
-            elif $command.dir == $session_directory or $command.dir == ($context.cwd // "") then .checks += [$item]
-            elif (directory_suffix({cwd: $command.dir, base: $session_directory}) | is_pattern_target) or ($command.dir | test("[[:cntrl:]]")) then
-              .now += [{op: $item.op, why: "its directory cannot be resolved"}]
-            else .checks += [$item + {dir: $command.dir}] end)
-        # Anything but a read makes later checks stale.
-        | .changed = (.changed or ($items | length) > 0 or ($command | provably_read_only | not))
-      end)
-  | {now: .now, checks: .checks[0:8], over: ((.checks | length) > 8)};
+  [ $cmds[] | select(.prog == "git") | git_state_items($context; $root)[] ];
 
 # ---------------------------------------------------------------- shell-edit hint
 # "hint" (certain), "check" (redirection targets the wrapper must test against `git ls-files`:
@@ -706,7 +646,6 @@ def protected_ask($op; $why):
    reason: ("ai-engineering guard: " + $op + " can replace protected state (.agents/specs state files, the authority store): " + $why
             + ". It needs explicit human approval. " + guardrail_note), hint: "none", hintTargets: []};
 
-# stateChecks (on a verdict with no decision): the hook-time Git checks for the wrapper (N6(a)).
 def decide($result; $context):
   compound_policy($result; ($context.floor // [])) as $compound
   | with_directories([ $result.units[].cmds[] ]; $context.cwd) as $cmds
@@ -736,9 +675,8 @@ def decide($result; $context):
     elif $tree != null then $tree + {hint: "none", hintTargets: []}
     elif $compound.decision != "none" then $compound + {hint: "none", hintTargets: []}
     elif ($patches.ask | length) > 0 then protected_ask($patches.ask[0]; "its patch is not text written in this submission, so the files it changes are unknown")
-    elif ($state.now | length) > 0 then protected_ask($state.now[0].op; $state.now[0].why)
-    elif $state.over then protected_ask($state.checks[0].op; "too many state-changing Git commands to check")
+    elif ($state | length) > 0 then protected_ask($state[0].op; $state[0].why)
     elif $agent | IN(implementation_agents[]) then
       shell_edit_hint($cmds) as $edit
-      | $compound + {hint: $edit.hint, hintTargets: $edit.targets, stateChecks: $state.checks}
-    else $compound + {hint: "none", hintTargets: [], stateChecks: $state.checks} end;
+      | $compound + {hint: $edit.hint, hintTargets: $edit.targets}
+    else $compound + {hint: "none", hintTargets: []} end;

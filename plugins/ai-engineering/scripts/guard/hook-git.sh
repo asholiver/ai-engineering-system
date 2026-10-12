@@ -12,35 +12,28 @@
 #     file (include.path and includeIf included): core.fsmonitor=false (no fsmonitor hook or
 #     daemon), core.hooksPath=/dev/null (no hook can be found), core.untrackedCache=false and
 #     core.splitIndex=false (no index rewrite), diff.external= and core.pager=cat, --no-pager,
-#     protocol.allow=never (no transport, so no lazy fetch from a promisor remote), and
-#     --no-optional-locks (no opportunistic index refresh or write, so no post-index-change hook);
+#     protocol.allow=never, and --no-optional-locks (no opportunistic index refresh or write, so no
+#     post-index-change hook);
 #   - reads nothing from standard input and keeps standard error out of the decision;
 #   - runs in its own process group under one deadline shared by every call of this hook
 #     (hook_git_deadline_seconds); a call past the deadline is killed with its children.
-# A non-zero exit, a timeout or output of the wrong shape is reported to the caller, which asks.
-# None of the invocations below reads work-tree file contents through a filter, runs a diff
-# driver, textconv or external diff, writes the index or refs, or contacts a remote.
+# A non-zero exit, a timeout or output of the wrong shape is reported to the caller.
+#
+# No invocation below reads an object or a tree (Option B, owner decision 2026-10-12): re-review 4
+# (NF-1) showed that reading a missing object in a partial clone fetches it lazily, which runs the
+# promisor remote's transport (an ext:: command, for example). protocol.allow=never does not stop
+# that, because a repository's protocol.<name>.allow overrides it; GIT_NO_LAZY_FETCH=1 does, but
+# only on Git releases that know it. So the guard no longer inspects Git state at hook time; the
+# interface is limited to repository discovery, HEAD's name and the index. None of these reads
+# work-tree file contents, runs a filter, diff driver, textconv or external diff, writes the index
+# or refs, or contacts a remote.
 #
 # Invocations (the whole interface; add nothing here without the same safety argument):
 #   hook_git_common_directory DIR   rev-parse --git-common-dir     reads .git discovery only
 #   hook_git_top_level DIR          rev-parse --show-toplevel      reads .git discovery only
 #   hook_git_show_cdup DIR          rev-parse --show-cdup          reads .git discovery only
-#   hook_git_current_branch DIR     rev-parse --abbrev-ref HEAD    reads HEAD only
-#   hook_git_resolve_commit DIR REF rev-parse --verify --quiet --end-of-options REF^{commit}
-#                                   reads refs and objects; REF cannot be an option
-#   hook_git_matching_refs DIR NAME for-each-ref --format=%(refname) -- <5 full names>
-#                                   reads refs; no signature or contents atoms
-#   hook_git_tree_changes DIR A B   diff-tree -r --raw --no-ext-diff --no-textconv --no-renames A B
-#                                   -- :(top,icase).agents   compares two commits' trees (objects
-#                                   only, never the work tree); --raw prints modes and object names
-#   hook_git_staged_state DIR       diff-index --cached --quiet --no-ext-diff HEAD -- <state glob>
-#                                   compares the index with HEAD; --cached never reads the work tree
-#   hook_git_tracked_state DIR      ls-files -s -z -- <state glob>   lists index entries; no refresh
-#   hook_git_hash_file DIR PATH     hash-object --no-filters -- PATH  hashes raw bytes: no clean
-#                                   filter, no attributes, nothing written
-#   hook_git_untracked_state DIR    ls-files --others --exclude-standard -- <state glob>
-#                                   walks directories and reads ignore files; no untracked cache
-#   hook_git_is_tracked DIR PATH    --literal-pathspecs ls-files -- PATH   lists index entries
+#   hook_git_current_branch DIR     rev-parse --abbrev-ref HEAD    reads HEAD only (its name, not the commit)
+#   hook_git_is_tracked DIR PATH    --literal-pathspecs ls-files -- PATH   lists index entries; no refresh
 #
 # Residual (documented): the git found on PATH is trusted, as are jq and the other tools this
 # hook runs; a hostile PATH controls every program the hook starts, not only Git.
@@ -49,11 +42,6 @@ hook_git_started_at=$SECONDS
 hook_git_output=""
 # The caller sets this to a private temporary file before the first call.
 hook_git_output_file=""
-
-# The .agents/specs state files (the authority store's committed half), in every spelling a
-# case-insensitive file system resolves.
-hook_git_state_pathspec=':(top,glob,icase).agents/specs/**/*.state.json'
-hook_git_agents_pathspec=':(top,icase).agents'
 
 # Private: runs one invocation above. Status: Git's own, 124 past the deadline, 125 no output file.
 hook_git_run() {
@@ -88,38 +76,23 @@ hook_git_top_level() { hook_git_run "$1" rev-parse --show-toplevel; }
 hook_git_show_cdup() { hook_git_run "$1" rev-parse --show-cdup; }
 hook_git_current_branch() { hook_git_run "$1" rev-parse --abbrev-ref HEAD; }
 
-# Succeeds only when the output is one object name.
-hook_git_resolve_commit() {
-  hook_git_run "$1" rev-parse --verify --quiet --end-of-options "$2^{commit}" || return 1
-  case "$hook_git_output" in
-    *[!0123456789abcdef]* | '') return 1 ;;
-  esac
-  [ "${#hook_git_output}" -eq 40 ] || [ "${#hook_git_output}" -eq 64 ]
-}
-
-hook_git_matching_refs() {
-  hook_git_run "$1" for-each-ref '--format=%(refname)' -- "refs/$2" "refs/tags/$2" "refs/heads/$2" "refs/remotes/$2" "refs/remotes/$2/HEAD"
-}
-
-hook_git_tree_changes() {
-  hook_git_run "$1" diff-tree -r --raw --no-ext-diff --no-textconv --no-renames "$2" "$3" -- "$hook_git_agents_pathspec"
-}
-
-hook_git_staged_state() {
-  hook_git_run "$1" diff-index --cached --quiet --no-ext-diff HEAD -- "$hook_git_state_pathspec"
-}
-
-hook_git_tracked_state() { hook_git_run "$1" ls-files -s -z -- "$hook_git_state_pathspec"; }
-
-hook_git_hash_file() { hook_git_run "$1" hash-object --no-filters -- "$2"; }
-
-hook_git_untracked_state() { hook_git_run "$1" ls-files --others --exclude-standard -- "$hook_git_state_pathspec"; }
-
 hook_git_is_tracked() { hook_git_run "$1" --literal-pathspecs ls-files -- "$2"; }
+
+# True when DIR or an ancestor has a .git entry. Runs no Git: it tells a lookup that failed inside a
+# work tree (which must not count as "no repository") from one outside any repository (NF-3).
+hook_git_in_work_tree() {
+  local directory="$1"
+  while [ -n "$directory" ] && [ "$directory" != "." ]; do
+    [ ! -e "$directory/.git" ] || return 0
+    [ "$directory" != "/" ] || return 1
+    directory="$(dirname "$directory")"
+  done
+  return 1
+}
 
 # True when the hook's own environment sets a variable that changes which repository, index,
 # objects or configuration Git uses. The hook's Git runs without them, so it cannot establish what
-# the submitted command (which inherits them) will see: state checks ask instead.
+# the submitted command (which inherits them) will see: callers treat their lookups as failed (NF-3).
 hook_git_environment_overrides() {
   local name
   for name in GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \

@@ -1,9 +1,8 @@
-# Entry point for guard-bash.sh. Reads the PreToolUse hook JSON and emits nine lines:
+# Entry point for guard-bash.sh. Reads the PreToolUse hook JSON and emits eight lines:
 #   decision (none | ask | deny | fallback | floor), parse mode, classes (comma separated),
 #   the hook output JSON ("" when there is no decision), the shell-edit hint state
 #   (none | hint | check), a JSON array of redirection targets for "check", needBranch ("1"
-#   when a push was found and the branch was not looked up), the floor text (one line), and a
-#   JSON array of hook-time Git state checks (N6(a), policy.jq git_state_policy) for no decision.
+#   when a push was found and the branch was not looked up) and the floor text (one line).
 # "fallback" asks the wrapper to apply the v0.2 keyword rules to the whole command (parse not
 # confident). "floor" means the parse found no decision but its floor text was too large to scan
 # here: the wrapper applies the same keyword rules to the floor text (linear grep) and asks on a hit.
@@ -46,20 +45,17 @@ def floor_budget_bytes: 16384;
                  or (if $floor_deferred then guard_push_mentioned($floor_text)
                      else floor_mentions_push($floor_text) end))) as $needBranch
          # Soft uncertainty (classify.jq): the parse is sound, so a decision it reaches stands; with no
-         # decision, something it would run is unknown and the fallback reads the whole command. Its
-         # hook-time state checks are kept: the wrapper runs them when the fallback finds nothing (RR3-2).
+         # decision, something it would run is unknown and the fallback reads the whole command.
          | if ($parsed.soft // false) and $verdict.decision == "none" then
-             {decision: "fallback", parseMode: "fallback", classes: [], output: "", hint: "none", targets: [], needBranch: $needBranch,
-              stateChecks: ($verdict.stateChecks // [])}
+             {decision: "fallback", parseMode: "fallback", classes: [], output: "", hint: "none", targets: [], needBranch: $needBranch}
            else
              {decision: (if $floor_deferred and $verdict.decision == "none" then "floor" else $verdict.decision end),
               parseMode: "parsed", classes: $verdict.classes,
               output: (if $verdict.decision == "none" then "" else hook_output($verdict.decision; $verdict.reason) end),
               hint: $verdict.hint, targets: $verdict.hintTargets, needBranch: $needBranch,
-              floorText: (if $floor_deferred and $verdict.decision == "none" then $floor_text else "" end),
-              stateChecks: (if $verdict.decision == "none" then ($verdict.stateChecks // []) else [] end)}
+              floorText: (if $floor_deferred and $verdict.decision == "none" then $floor_text else "" end)}
            end
        end
    end)
 | .decision, .parseMode, (.classes | join(",")), .output, (.hint // "none"), ((.targets // []) | tojson), (if .needBranch then "1" else "0" end),
-  (.floorText // ""), ((.stateChecks // []) | tojson)
+  (.floorText // "")

@@ -204,6 +204,64 @@ Detailed evidence for WORK-001 delivery. The spec's "Implementation state" keeps
   - Partial substitute: the 1145 distinct commands from the `tests/run.sh` tables, run through the v0.2.0 cache guard and the working-tree guard in one feature-branch fixture (coordinator and backend). This gave 33 coordinator and 30 backend v0.2 ask → none, all of them commands that the suite exercises and passes. The ones listed are proven-data or out-of-scope shapes (Landra instances, GET release URLs, `echo`/`grep` text, push to a non-default branch). Each one's expected value was not individually re-read (see the dogfood note).
   - The historical probe coverage is an open evidence gap, not claimed.
 - **Dogfood observation (2026-10-12):** a read-only `grep -nF` over `tests/run.sh`, with literal reserved-keyword phrases as patterns, was rejected before execution. The root cause was not verified (guard hook, classifier or user rejection). Per the owner, it was not retried or rephrased; inspection continued with the Read tool.
+- **Dogfood observation (2026-10-12, re-review 4):** a combined commit-amend-and-push command was rejected before execution; per the owner, the commit was not amended and the push was left to a separate owner decision. During the focused re-review, the security reviewer's Bash probe of a write-then-run command shape was rejected before execution by the governing v0.2 tooling. The root cause was not verified. Per the owner, it was not retried or rephrased. The reviewer was told to continue with inert hook-JSON fixture files (written with Write, fed to the guard by path). The denial is not a Guard v2 finding unless it is reproduced through that interface.
+- **Dogfood observation (2026-10-12, Option B round):** a Bash call that ran an inline Python heredoc to rewrite `guard/main.jq` was rejected before execution. Afterwards, `git status` showed no source change. Per the owner, it was not retried; the edits were made with the Edit tool. A Bash call that wrote and opened a temporary text copy of a report was also rejected. The root cause was not verified for either.
+
+## Focused security re-review 4 (Opus, f1fb238..2d5a295)
+- Verdict: **not ready to close.** There is no new HIGH general parsing bypass.
+  - Resolved and independently verified: RR3-2, RR3-3, RR3-5, RR3-6, RR3-7, RR3-8, RR3-10, RR3-11.
+  - Partial: RR3-1 (NF-1, NF-3), RR3-4 (NF-2), RR3-9 (C-style escapes checked in tests only), N6(a) (NF-2), N6(b)/(c).
+  - Implemented, not independently verified: RR3-12 (the reviewer's probe was rejected), RR3-13 (not re-measured), NR-3c, NR-4, H5, N2, N5, M3 (beyond the fallback probes).
+  - Test integrity: `tests/run.sh` +518/−0; `check.sh` glob extension only.
+- New findings:
+  - **NF-1 (MEDIUM; HIGH on affected Git versions).** The lazy-fetch block in `hook-git.sh` depends solely on `GIT_NO_LAZY_FETCH=1`.
+    - The comment's claim that "`protocol.allow=never` means no transport" is wrong: repository `protocol.ext.allow=always` overrides it.
+    - Coordinator reproduction (`scratchpad/nf1/repro2.sh`): a `--filter=tree:0 --no-checkout` partial clone, an `ext::` remote that touches a marker, the hook's exact `env -i git … diff-tree` line.
+      - With `GIT_NO_LAZY_FETCH=1`: exit 128, no marker, on Homebrew git 2.46.0 and Apple git 2.39.5.
+      - Without it: **marker created** on both.
+    - So on a Git that ignores `GIT_NO_LAZY_FETCH`, hook-time Git executes repository-controlled code. That was not tested on such a binary; it is the demonstrated mechanism. Both Git binaries on this machine honour the variable.
+    - This meets the owner's RR3-1 stop condition, conditionally on the Git version, so it is escalated, not fixed.
+  - **NF-2 (MEDIUM, bounded).** A bare `-` (the previous branch) skips the N6(a) state check. For example, `git checkout -` gives none and changes the state file. Not a regression from f1fb238.
+  - **NF-3 (MEDIUM, regression from f1fb238/v0.2 in environmental edge cases).** A failed hook-git branch lookup gives none for a bare `git push` on main. Reproduced with `TMPDIR=/nonexistent`, and with a hook-environment `GIT_DIR` from a non-repository cwd. The same pattern applies to the common-directory, root and `guard-writes.sh` lookups.
+  - Low: in the fallback, `env`/`command`/`time git commit` from a restricted agent asks rather than denies. This is within the RR3-3 ruling.
+- The reviewer's second hand-back agrees: NF-2/NF-3 are reported as F4-1/F4-2, and F4-1 adds `merge -` and `rebase -`.
+- Evidence gap: the reviewer has no Write tool, so the inert-fixture probes for RR3-12 could not be built. RR3-12 rests on the code and `tests/run.sh:2201-2214` only.
+- Status: remediation stopped under the RR3-1 stop condition; on 2026-10-12 the owner chose Option B (see below). NF-1, NF-2 and NF-3 are implemented and stay open until the focused re-review of the Option B commit.
+
+## Owner decision (2026-10-12): Option B, remove hook-time Git state inspection
+- An explicit architectural decision under the RR3-1 stop condition. It is not a weakening of the core guarantees: positively identified prohibited operations still deny, and failures still ask.
+- Implementation (fix round 5, bounded):
+  - `guard/hook-git.sh` keeps only `rev-parse` discovery (`--git-common-dir`, `--show-toplevel`, `--show-cdup`, `--abbrev-ref HEAD`) and `ls-files` of one path. Every object, tree and ref read is removed (`resolve_commit`, `matching_refs`, `diff-tree`, `diff-index`, `ls-files -s`/`--others`, `hash-object`). The false `protocol.allow=never` claim is corrected.
+  - `guard-bash.sh`: the state-check machinery is deleted (`state_can_change` and its helpers, about 160 lines).
+  - `policy.jq` `git_state_policy` is now a list of state-changing Git forms, each of which asks with the reason "the guard does not inspect Git state". The pull, checkout, switch, merge, rebase, cherry-pick, revert, stash, restore and `reset --hard` forms are kept as they were, except for the changes below.
+  - NF-2: a bare `-` is treated as the operand `@{-1}`. `checkout … -- <paths>` asks when the paths can reach a protected path, whatever ref precedes them.
+  - NF-3:
+    - A branch, root or common-directory lookup asks when no other decision applies if it fails inside a Git work tree (a `.git` entry in the cwd or an ancestor, found without running Git) or if `hook_git_environment_overrides` is true.
+    - `guard-writes.sh` asks on the same condition for the token-store-like path and the hard-link check. Its deny checks run first, so a deny is never lowered.
+- Tests:
+  - 52 table expectations go none → ask, plus the guard-writes token path under injected configuration (none → ask). Each is commented in place with the reason.
+  - The state-comparison reason assertions are replaced by operation-name assertions.
+  - The RR3-13 hanging-Git test now reaches the lookup through a bare `git push`.
+  - New:
+    - NF-1: a partial clone with an `ext::` promisor and `protocol.ext.allow=always`. The precondition asserts it fetches lazily, and a shim drops `GIT_NO_LAZY_FETCH`. The tests assert no fetch, and that every hook-time Git call is `rev-parse` or `ls-files`.
+    - NF-2: 12 cases.
+    - NF-3: a failing-Git shim, unwritable TMPDIR, `GIT_DIR` in the hook environment, and guard-writes asks. They also check that deny is never lowered and that there is no ask outside a work tree.
+  - No ask or deny expectation was removed.
+- Verification (coordinator, 2026-10-12):
+  - `tests/run.sh`: 1823 passed, 0 failed.
+  - `scripts/check.sh`: `CHECK: PASSED`. **shellcheck is not installed on this machine and was skipped**, here and in the round-4 run; `bash -n` ran.
+  - Performance: 485 µs per command, unchanged.
+  - The independent marker exploit (`scratchpad/rr3-1/exploit.sh`): 0 failures and no marker; every state-changing command now asks.
+- **Prompt trade-off (measured).**
+  - The 1165 distinct commands in the test tables were run through `2d5a295` and through Option B, as coordinator and as backend.
+  - 31 coordinator commands changed from none to ask; there were no other changes (no ask/deny → none, no specialist change).
+  - The new asks: `git checkout <branch>`/`git switch <branch>` (and `-`); `git checkout <file>` without `--` (a single operand may be a branch); `git merge`, `rebase`, `cherry-pick` and `revert`, including `--abort`/`--continue`; `git stash` push, pop and apply; `git reset --hard`; `git restore .` and `git checkout -- .`; `git checkout -f`.
+  - Still no decision: `checkout -b`/`switch -c` from HEAD, path restores that cannot reach a protected path (`git restore src/x`, `git checkout -- src/x`), `reset` without `--hard`, `stash list`/`show`, and all read forms.
+  - Real-world frequency is not measured here. The guard log's `protected-tree-overwrite` entries will measure it; a possible future improvement is a hook-time check that needs no object reads.
+- Evidence gaps (unchanged):
+  - The historical probe corpus is not reconstructed.
+  - RR3-12 is not independently probed.
+  - shellcheck has not run.
 
 ## Finding status (verified facts only)
 | Finding | Status |
@@ -216,8 +274,9 @@ Detailed evidence for WORK-001 delivery. The spec's "Implementation state" keeps
 | NR-1 to NR-5, H5 environment, N6(a)(b)(c) rulings | Open: fix round 3 implemented. Coordinator verification:<br>- diff limited to the guard scripts and `tests/run.sh` (plus coordinator docs, spec and log); no protected or system file changed, and `guard-writes.sh` is unchanged;<br>- the only removed test lines are an outdated comment about the old 8 KB target;<br>- the v0.2 cache is identical to `v0.2.0`, the install record is `b875f32`, and there is no `--plugin-dir`;<br>- `GATE fast: PASSED (exit 0) command: tests/run.sh` (1409 passed);<br>- `compare.sh` gives 0 mismatches and 0 v0.2-ask→none regressions on all five probe sets (674 probes);<br>- my 27 original re-review-2 expectations are kept or strengthened (three NR-3c write-then-run cases ask→deny; boundary lines set to the owner's rulings).<br>Focused re-review pending. |
 | N6 boundary (a), (b), (c) | Owner ruled 2026-10-07; implemented in fix round 3. Re-review 3: (a) **not resolved** (RR3-1, RR3-4 to RR3-7); (b), (c) partially resolved (RR3-8, RR3-9) |
 | Re-review 3 verdicts at f1fb238 | **Resolved:** NR-1, NR-2, NR-3a/b, NR-5, N6 Unicode, H1 remainder. **Open:** NR-3c, NR-4, H5, N2, N5, M3, N6(a)/(b)/(c), RR3-1 to RR3-13 |
-| RR3-1 to RR3-13 and the re-review-3 remainders | Open: fix round 4 implemented and coordinator-verified (see "Fix round 4 coordinator verification"); RR3-1 independent marker exploit: no repository program ran. Focused re-review of the round-4 commit pending. |
-| Performance (spec: p95 < 150 ms up to 8 KB) | **Not met**; see "Performance analysis". Not accepted; an owner recommendation is pending. |
+| RR3-1 to RR3-13 and the re-review-3 remainders | **Open: implemented, not closed.** Fix round 4 is committed as `2d5a295` and coordinator-verified (see "Fix round 4 coordinator verification"); the RR3-1 independent marker exploit ran no repository program. The commit subject says "close RR3-1..RR3-13": read that as "address", because none counts as closed until the focused re-review of `2d5a295` confirms it. The commit was deliberately not amended (owner, 2026-10-12). It is local only, not pushed. |
+| Performance, corrected spec (owner-approved 2026-10-07: three properties) | Measured at `2d5a295`, not yet re-reviewed:<br>- (1) typical p95 99 ms over 20 runs, budget 150 ms (coordinator, direct timing; the test asserts the 500 ms CI tolerance);<br>- (2) 471 µs per command, bound 1500 µs, linearity asserted;<br>- (3) 250 KB heredoc 150 ms, budget 1 s.<br>Fixture preconditions are asserted in each test. This supersedes the row below. |
+| Performance (spec: p95 < 150 ms up to 8 KB), **superseded by the 2026-10-07 specification correction; kept as the historical record** | **Not met**; see "Performance analysis". Not accepted; an owner recommendation is pending. |
 
 ## Owner ruling N6 (2026-10-07): ask, narrowly
 - Whole-directory restore, recursive copy/synchronisation, archive extraction and equivalent operations are legitimate and are never denied merely for writing broadly.
