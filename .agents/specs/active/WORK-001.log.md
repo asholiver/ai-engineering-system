@@ -611,6 +611,23 @@ Detailed evidence for WORK-001 delivery. The spec's "Implementation state" keeps
   - `scripts/check.sh` with ShellCheck 0.11.0: `CHECK: PASSED`.
   - Comparison with `ab7fd33` (1328 commands, coordinator and backend): 4 coordinator and 2 backend none → ask (F1 forms), and 3 coordinator ask → deny (F2 restored). Nothing lowered.
 
+## Confirmation review of the F1/F2 corrections (security-reviewer, ab7fd33..9bb143a)
+- **Approved for F1 and F2.**
+  - F1 is closed: any non-stdin descriptor, `<&`, `<>`, `<&-`, an extra redirection, two heredocs or `00<<` makes the shape non-exact. An earlier `exec 0<f` cannot matter, because the command's own fd-0 heredoc takes precedence.
+  - The lexer change has no side effects: no whole-object comparison, `pending_fd` is never stale, and heredoc indexing and `.bad` are unchanged.
+  - F2 is closed with G1 kept. Test integrity is sound.
+  - Low: only the patch shape uses `fd`; `own_stdin` elsewhere (SQL clients) still treats `3<<` as stdin. No decision change was found.
+- **New finding N1 (HIGH as reported, bounded; not introduced by this work).** The lexer recognises `<<-` but does not strip the leading tabs from the body, so `patch_paths` (anchored `^---`, `^+++`, `^diff --git`) finds no headers. Bash strips the tabs, so the tool applies the real hunks.
+  - **Tested by the coordinator** (`scratchpad/n1/probes.jsonl`, tab-indented bodies as JSON `\t`, at `9bb143a`):
+    - n1 (`git apply <<-` with a C-quoted, octal-escaped store name) gives **none**, expected deny.
+    - n1d (the same with `patch -p1 <<-`) gives **none**, expected deny.
+    - n1c (`git apply <<-` with a harmless `src/x` patch) gives none. It qualifies as H1 although its content is misread; under fail-closed it should ask.
+    - n1b (a plain store name in `<<-`) gives deny: the `.state.json` text match still catches it.
+  - Same results at `ab7fd33`, `891e82b` and `38465e0`. At v0.2.0 all four give none. **Not a regression.**
+  - **Not fixed:** outside the authorised scope; owner decision requested. Candidate fixes:
+    - (a) strip leading tabs from `<<-` bodies in the lexer, as Bash does. This affects every heredoc consumer (SQL scans, scripts, patches) and makes them more correct.
+    - (b) exclude `<<-` from the H1/H2 shapes, so it asks. Without (a), the deny for octal-escaped store names inside `<<-` stays an ask.
+
 ## Finding status (verified facts only)
 | Finding | Status |
 | :- | :- |
