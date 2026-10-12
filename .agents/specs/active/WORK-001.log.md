@@ -419,6 +419,24 @@ Detailed evidence for WORK-001 delivery. The spec's "Implementation state" keeps
 - Verification:
   - `tests/run.sh`: 1973 passed, 0 failed.
   - `scripts/check.sh` with ShellCheck 0.11.0 executing: `CHECK: PASSED`.
+- **RR3-12: independent verification, step 2 (executed at `cc63324`).**
+  - The security-reviewer confirmed that the fixtures match its design and that the runner cannot execute probe text. It ran the fixed runner once; it was not denied.
+  - **Tested results** (20 probes):
+    - 15 as expected.
+    - Probe 1 gave deny, stricter than ask. The coordinator confirmed the reason from the fixture: `sh deploy.sh [unclassified-deploy]` was bundled with other commands. That is the deploy-path rule, a probe-design artefact.
+    - **4 gaps confirmed, 9-12: none where ask was expected.**
+  - What RR3-12 itself covers, now tested independently: case-insensitive matching, untrusted non-exact spellings, appends that accumulate, and overwrites by `cp`/`tee`. Harmless controls stay none and specialist script writes deny.
+  - **New bounded gaps G12-1 to G12-4 (MEDIUM, class (b): an incomplete list of overwrite forms, not a general parsing or trust bypass).** A patch file written in the submission and then replaced without the guard seeing its content reaches `git apply` with no decision:
+    - **G12-1:** `dd of=<file>`: `overwrite_targets` keys the whole word `of=…`.
+    - **G12-2:** `sort -o <file>`: `sort` is not in `file_writer_programs`. `uniq`, `yq`, `xxd`, `base64` and `iconv` are probably similar (not run).
+    - **G12-3:** `1<>` (and probably `>&<file>`, not run): not a write op in `collect_context`.
+    - **G12-4:** a first write with `>>` is treated as the whole file.
+  - Precondition: content staged outside the guard's view (for example with the Write tool). Effect: the protected-tree ask, and the authority-store deny for a patch that targets a state file, are skipped.
+  - Code-reading note (low): the SQL `-f` and shell `<` paths ignore the known flag; the keyword floor masks it today.
+  - **Not fixed:** outside this pass's authority. The owner must decide to fix or to accept explicitly.
+- Static review of `fd52596..cc63324` (same reviewer):
+  - N7-1 is sound: nothing lowered, and no read form misread.
+  - The probe set and its loader are sound and add-only. A future comment containing `|` would be read as a probe, and most likely fail loudly.
 
 ## Finding status (verified facts only)
 | Finding | Status |
