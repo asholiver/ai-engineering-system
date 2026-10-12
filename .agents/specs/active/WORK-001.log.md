@@ -555,6 +555,44 @@ Detailed evidence for WORK-001 delivery. The spec's "Implementation state" keeps
 - **Not regressions:** p1-p9 also give none at `38465e0`, at `cc63324` and at v0.2.0.
 - Not fixed: outside the option-1 authorisation, so an owner decision is requested. Coordinator assessment: like N6-1 and P-1, these come from emulating each tool's option grammar (values, bundles, abbreviations, `--`, xargs argument injection), which is open-ended.
 
+## Owner decision (2026-10-12): fail closed for patch tools
+- An explicit architectural decision: no further enumeration of patch-command bypasses.
+- **Allowed exemption shapes (the whole list).**
+  - Each shape requires an unwrapped command: the first word is `git`/`patch`, with no xargs/env/sudo/time or other wrapper.
+  - It also requires no dynamic word, no Git global option, no pipeline producer, and exactly the stated redirections.
+  - Flags are matched as whole words only: abbreviations, combined flags, `=` values and value-taking options never qualify.
+  - **D1** (no decision): `git apply --check|--stat|--numstat|--summary [-pN] FILE…`. Exactly one of the four flags, no redirection, at least one file. Safe because no value-taking option can swallow the dry-run flag (G2), and the flags only read.
+  - **D2** (no decision): `patch --dry-run [-pN]`, with stdin either one `<` or its own heredoc, and no operand or `-i`. Safe because the input is stdin only and the dry run writes nothing.
+  - **H1 / H2** (judged by content): `git apply [-pN]` / `patch [-pN]`, whose own stdin is a heredoc or here-string and nothing else. Safe because the content is literally in the command text and nothing can replace it; its paths are checked, so store hunks deny.
+  - Everything else is a mutating apply of unknown content and asks: `cat <<EOF | git apply`, `git am`, `-R`, `--index`, wrapped forms, value options, extra redirections, file operands.
+- **Deny precedence:** the store and Git-file hunks the submission wrote, or its own stdin text (not a wrapper's), are checked in every shape. Specialists' Git writes stay denied.
+- **G1:** a wrapper's standard input is never patch content.
+- Implementation:
+  - classify.jq builds the patch object with `dry` and `known` from the exact shapes, reusing the command's existing facts (`unwrapped.names`, `raw_head`, `git_parts.globals`, redirections, pipeline producers).
+  - policy.jq `patch_dry_run` is now `.patch.dry == true`. The earlier `git_long_option` dry-run exclusion is replaced, not stacked.
+  - No new parser, tracker or Git inspection.
+- **Real behaviour (scratch, Git 2.46.0 and Apple 2.39.5, Apple patch 2.0):** every D1 and D2 shape (`--check` with two files, `--stat -p1`, `--numstat`, `--summary`, `patch --dry-run -p1 <` and its heredoc form) left the files, the index and the directory unchanged.
+- **Tests:**
+  - 1 expectation changed none → ask (`cat <<'EOF' | git apply`, commented).
+  - New table "fail-closed patch tools", 38 cases:
+    - the 9 confirmed gaps p1-p9, all ask or deny;
+    - 17 unknown-shape cases that fail closed, e.g. `--chec`, `--ap`, `-v`, a missing file, extra `<`, `git -C`, `env`, `time`, `patch FILE`, `--dry`, `-o`, `-R`, `--index`, `git am`, a dynamic name, `> out.txt`;
+    - 2 deny-precedence cases;
+    - 10 allowed shapes staying none;
+    - 2 specialist denies.
+  - All four independent fixture sets rerun:
+    - opt1-r: p1-p13 as expected; p14 (`--check --exclude=x`) now asks by design.
+    - rr312-r2 and rr312: only the file-backed r12 and probe 19 (asking per option 1), and the probe-1 artefact.
+    - rr312-fix: all 8 deny.
+- Verification:
+  - `tests/run.sh`: 2065 passed, 0 failed.
+  - `scripts/check.sh` with ShellCheck 0.11.0 executing: `CHECK: PASSED`.
+- **Comparison with `891e82b`** (1319 corpus commands, coordinator and backend):
+  - 22 coordinator none → ask and 1 none → deny (p4).
+  - 6 backend none → ask: plain `patch` forms. `patch` is not a Git write, so specialists get the same fail-closed ask.
+  - Nothing was lowered.
+- **Prompt measure (corpus only):** 29 additional asks out of 2638 decisions (1319 × 2 callers), all in patch-tool commands outside the four shapes.
+
 ## Finding status (verified facts only)
 | Finding | Status |
 | :- | :- |

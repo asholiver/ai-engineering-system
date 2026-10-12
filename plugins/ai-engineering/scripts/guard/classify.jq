@@ -1433,8 +1433,37 @@ def parse_script_in($text; $depth; $branch; $outer):
                        # directly or through `cat FILE |`, still count for the store and Git-file deny.
                        | ([ $sources[], ($before[] | select(raw_head(.) == "cat") | .w[1:][] | select((.d | not) and (.l | startswith("-") | not)) | .l) ]
                           | map(file_entry($ctx; $run_dir; .) | select(. != null) | .t)) as $written
-                       | if ($sources | length) > 0 then {texts: $written, known: false}
-                         else stdin_content($command; $before) as $stdin | $stdin + {texts: ($stdin.texts + $written)} end
+                       # Owner decision (closure, fail-closed patch tools): only these exact shapes get
+                       # an exemption; every other form (wrapped, abbreviated, combined, with a value-
+                       # taking option, a Git global option, a dynamic word, a pipeline producer or an
+                       # extra redirection) is a mutating apply of unknown content and asks.
+                       #   D1 git apply --check|--stat|--numstat|--summary [-pN] FILE...  (dry: none)
+                       #   D2 patch --dry-run [-pN], stdin one `<` or its own heredoc   (dry: none)
+                       #   H1 git apply [-pN] / H2 patch [-pN], stdin its own heredoc or here-string
+                       #      (content known: judged by its paths)
+                       # A wrapper's standard input (xargs <<< f) is never patch content (G1).
+                       | (($unwrapped.names | length) == 0 and raw_head($command) == $program.name
+                          and (any($command.w[]; .d) | not) and ($before | length) == 0
+                          and ($git_parts == null or (($git_parts.globals // []) | length) == 0)) as $plain
+                       | (if $program.name == "patch" then $args else $git_parts.rest end) as $tool_args
+                       | [ $tool_args[] | select(startswith("-")) ] as $flags
+                       | ([ $tool_args[] | select(startswith("-") | not) ] | length) as $operand_count
+                       | [ $command.r[].op ] as $redirections
+                       | ($redirections == ["<<"] or $redirections == ["<<<"]) as $own_text
+                       | def only_flags($allowed): all($flags[]; test("^-p[0-9]+$") or IN($allowed[]));
+                         def one_of($names): ([ $flags[] | select(IN($names[])) ] | length) == 1;
+                         ($plain and (if $program.name == "patch" then
+                                        only_flags(["--dry-run"]) and one_of(["--dry-run"]) and $operand_count == 0
+                                        and ($redirections == ["<"] or $own_text)
+                                      else
+                                        $git_parts.sub == "apply" and only_flags(["--check", "--stat", "--numstat", "--summary"])
+                                        and one_of(["--check", "--stat", "--numstat", "--summary"]) and $operand_count > 0
+                                        and ($redirections | length) == 0
+                                      end)) as $dry
+                       | ($plain and $own_text and $operand_count == 0 and only_flags([])
+                          and ($program.name == "patch" or $git_parts.sub == "apply")) as $direct
+                       | (if $plain then stdin_content($command; $before) else {texts: [], known: false} end) as $stdin
+                       | {texts: ($stdin.texts + $written), known: ($direct and $stdin.known), dry: $dry}
                      else null end) as $patch
                   | {kind: (if ($inner_texts | length) > 0 then "none"
                             elif is_context($program.name; $args) and $op == null then "ctx" else "eff" end),

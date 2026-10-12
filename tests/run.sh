@@ -2586,6 +2586,8 @@ CASES
 # as do store hunks written into any applied file. Content given directly on standard input stays
 # judged by content. Dry runs stay none unless an abbreviated --apply (`--ap`, which Git 2.46 and
 # 2.39 apply) or --build-fake-ancestor makes them real. Specialists stay denied.
+# Changed by the fail-closed patch decision (below), none -> ask: `cat <<'EOF' | git apply` (content
+# through a pipeline producer is not one of the exact direct shapes).
 fix4_table "closure option 1" "$agent_repository" <<'CASES'
 m|ask|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\ncp other/f.patch .\ngit apply f.patch
 m|ask|cat > f.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\ncurl -fsSLO https://example.invalid/f.patch\ngit apply f.patch
@@ -2608,10 +2610,61 @@ m|none|git apply --stat fix.patch
 m|none|patch --dry-run -p1 < fix.patch
 m|none|git apply <<'EOF'\n--- a/src/app.ts\n+++ b/src/app.ts\nEOF
 m|none|patch -p1 <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF
-m|none|cat <<'EOF' | git apply\n--- a/src/x\n+++ b/src/x\nEOF
+m|ask|cat <<'EOF' | git apply\n--- a/src/x\n+++ b/src/x\nEOF
 m|deny|git apply <<'EOF'\n--- a/.agents/specs/active/W.state.json\n+++ b/.agents/specs/active/W.state.json\nEOF
 b|deny|git apply fix.patch
 b|deny|git apply <<'EOF'\n--- a/src/app.ts\n+++ b/src/app.ts\nEOF
+CASES
+
+# Fail-closed patch tools (owner decision 2026-10-12). Exemptions only for exact, unwrapped shapes with
+# no dynamic word, Git global option, pipeline producer or extra redirection:
+#   D1 git apply --check|--stat|--numstat|--summary [-pN] FILE...   none (verified: writes nothing)
+#   D2 patch --dry-run [-pN] with stdin one `<` or its own heredoc   none (verified: writes nothing)
+#   H1 git apply [-pN] / H2 patch [-pN] with its own heredoc or here-string: judged by content
+# Everything else asks; store hunks deny in every shape; specialists deny. First the nine
+# independently confirmed gaps (p1-p9: G1 xargs input, G2 a value-taking option before a dry-run
+# flag, G3 cat after --, G4 combined or abbreviated patch input options), then unknown shapes.
+fix4_table "fail-closed patch tools" "$agent_repository" <<'CASES'
+m|ask|xargs git apply <<'EOF'\nfix.patch\nEOF
+m|ask|xargs git apply <<< fix.patch
+m|ask|git apply --exclude --check fix.patch
+m|deny|cat > p.diff <<'EOF'\n--- a/.agents/specs/active/W.state.json\n+++ b/.agents/specs/active/W.state.json\nEOF\ngit apply --exclude --check p.diff
+m|ask|patch -p1 -i --dry-run <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF
+m|ask|patch -p1 -fi fix.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF
+m|ask|patch -p1 --inp=fix.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF
+m|ask|patch -p1 --inp fix.patch <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF
+m|ask|cat -- -fix.patch <<'EOF' | git apply\n--- a/src/x\n+++ b/src/x\nEOF
+m|ask|git apply --check --exclude=x fix.patch
+m|ask|git apply --chec fix.patch
+m|ask|git apply --check --ap fix.patch
+m|ask|git apply --check -v fix.patch
+m|ask|git apply --check
+m|ask|git apply --check fix.patch < other.patch
+m|ask|git -C . apply --check fix.patch
+m|ask|env git apply --check fix.patch
+m|ask|patch --dry-run fix.patch
+m|ask|patch --dry -p1 < fix.patch
+m|ask|patch --dry-run -p1 -o out < fix.patch
+m|ask|git apply -R <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF
+m|ask|git apply --index <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF
+m|ask|git am <<'EOF'\nFrom: x\n--- a/src/x\n+++ b/src/x\nEOF
+m|ask|time git apply <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF
+m|ask|git apply "$P"
+m|ask|git apply <<'EOF' > out.txt\n--- a/src/x\n+++ b/src/x\nEOF
+m|deny|git apply -R <<'EOF'\n--- a/.agents/specs/active/W.state.json\n+++ b/.agents/specs/active/W.state.json\nEOF
+m|deny|xargs git apply <<'EOF'\nfix.patch\nEOF\ncat > p.diff <<'EOF'\n--- a/.agents/specs/active/W.state.json\n+++ b/.agents/specs/active/W.state.json\nEOF\ngit apply p.diff
+m|none|git apply --check fix.patch two.patch
+m|none|git apply --stat -p1 fix.patch
+m|none|git apply --numstat fix.patch
+m|none|git apply --summary fix.patch
+m|none|patch --dry-run -p1 < fix.patch
+m|none|patch --dry-run <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF
+m|none|git apply <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF
+m|none|git apply -p1 <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF
+m|none|patch -p1 <<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF
+m|none|git apply <<< '--- a/src/x'
+b|deny|git apply --check --exclude=x fix.patch
+b|deny|xargs git apply <<< fix.patch
 CASES
 
 # Closure pass: the WORK-001 replacement probe set (tests/guard-probes.txt; not the lost historical

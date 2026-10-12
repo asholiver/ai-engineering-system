@@ -563,13 +563,8 @@ def patch_paths:
        (capture("^(?:rename|copy) (?:from|to) (?<p>.+)$") | .p | c_unquote),
        (capture("^Index: (?<p>.+)$") | .p))
     | select(. != "/dev/null" and length > 0) | ., sub("^[ab]/"; "") ] | unique;
-def patch_dry_run:
-  if .prog == "patch" then any(.args[]; test("^(--dry-run|-C|--check)$"))
-  # Closure (option 1): an abbreviated `--apply` (`--ap`, accepted by Git 2.46 and 2.39) applies
-  # even with --check, and --build-fake-ancestor writes a file; either makes it a real apply.
-  elif .sub == "apply" then any(.args[]; test("^--(check|stat|numstat|summary)$"))
-    and (any(.args[]; git_long_option(["--apply", "--build-fake-ancestor"])) | not)
-  else false end;
+# A dry run only in the exact shapes D1 and D2 (classify.jq, the fail-closed patch policy).
+def patch_dry_run: .patch.dry == true;
 def patch_label: if .prog == "patch" then "patch" else "git " + .sub end;
 # {ask: [labels], deny: [paths]} over the commands that apply a patch.
 def patch_findings($cmds; $context; $restricted):
