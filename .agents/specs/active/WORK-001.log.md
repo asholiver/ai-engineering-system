@@ -704,6 +704,16 @@ Detailed evidence for WORK-001 delivery. The spec's "Implementation state" keeps
   - timing tolerances on a shared runner;
   - the npm postinstall of the CLI's Linux binary.
 
+## First CI run (2026-10-12): workflow rejected; nothing executed
+- Owner-approved push of `379fea5` and `c558289` only. Remote and PR #5 head `c5582894d1086bd3389531ce5a0453e8f404bf21`; `main` unchanged at `1faa02e`.
+- Run 38305111175 (event `push`, 0 jobs) failed as an **invalid workflow file**: "(Line: 60, Col: 11): 'http_proxy' is already defined, (Line: 61, Col: 11): 'https_proxy' is already defined". GitHub treats `env:` keys case-insensitively.
+- **ShellCheck, Claude CLI plugin validation, `tests/run.sh` and `scripts/check.sh` did not execute in CI.** There is no Ubuntu evidence yet.
+- Fix prepared locally, not pushed (outside the approved push): the proxy variables are exported in the step's shell script in both spellings. YAML re-parsed with no case-insensitive duplicate `env` keys.
+- CodeRabbit: the incremental review of `da5b45d..c558289` (2 files) was in progress when recorded; no new review had been posted yet.
+- **Item requiring clarification (owner):** the spec states p95 under 150 ms (typical) and under 1 s (large input), while the tests enforce CI tolerances (500 ms and 2500 ms), as CodeRabbit noted for `WORK-001.md:199`. The spec wording or the tests need an owner decision.
+- Docstring coverage warning (50% against 80%): treated as non-blocking. It names no concrete defect.
+- c2, c3, c7 and c8 remain OPEN security findings. Not remediated.
+
 ## Finding status (verified facts only)
 | Finding | Status |
 | :- | :- |
