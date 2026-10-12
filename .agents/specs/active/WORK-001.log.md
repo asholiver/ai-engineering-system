@@ -593,6 +593,24 @@ Detailed evidence for WORK-001 delivery. The spec's "Implementation state" keeps
   - Nothing was lowered.
 - **Prompt measure (corpus only):** 29 additional asks out of 2638 decisions (1319 × 2 callers), all in patch-tool commands outside the four shapes.
 
+## Independent review of the fail-closed patch policy (security-reviewer, 301a4c2..ab7fd33), and corrections
+- Static verdict:
+  - The design is right; question 4 (tests and denials not weakened) holds.
+  - Wrappers, a heredoc plus `<`, global options, aliases, `-p1` values, an operand named `--check`, and `bash -c`/eval all fail closed.
+  - Low, unverified: `$plain` ignores prefix assignments and exported Git variables (`GIT_WORK_TREE`, `GIT_DIR`, `PATCH_GET`); no concrete exploit was found.
+- **Tested by the coordinator** (inert runner, `scratchpad/fc-r/probes.jsonl`, the reviewer's 10 probes verbatim, at `ab7fd33`):
+  - **F1 (HIGH as reported, bounded):** f1, f2, f4 and f5 gave none. The lexer drops the fd number of a redirection, so `git apply 3<<'EOF'` or `4<<< x` (and `patch --dry-run 3< f`) counted as the tool's own stdin. With `{ …; } < fix.patch` or `exec < fix.patch`, the tool actually applies a file.
+  - **F2 (MEDIUM, a deny lowered by `ab7fd33`):** f7-f9 (`time git apply`, `cat <<EOF | git apply` and `git -C . apply`, each with an octal-escaped store name) denied at `301a4c2` and asked at `ab7fd33`. The non-plain shapes had stopped passing their stdin text to the deny check.
+  - f3, f6 and f10 as expected.
+- **Corrections** (defects in the implementation of the authorised decision; no new architecture):
+  - F1: lexer.jq keeps the fd number as `fd` on each redirection (the operator is unchanged). The shape check counts only stdin redirections (no fd, or fd 0) as the tool's own input; any other descriptor makes the shape non-exact.
+  - F2: the command's own and producer stdin text always goes into `texts` for the store and Git-file deny. `known` still needs the direct shape, so G1 holds.
+- Tests: table "fail-closed patch tools F1 F2", 9 cases (4 ask, 2 fd-0 controls none, 3 deny). All five fixture sets rerun: fc-r 0 mismatches; the others unchanged apart from the documented by-design differences.
+- Verification:
+  - `tests/run.sh`: 2074 passed, 0 failed.
+  - `scripts/check.sh` with ShellCheck 0.11.0: `CHECK: PASSED`.
+  - Comparison with `ab7fd33` (1328 commands, coordinator and backend): 4 coordinator and 2 backend none → ask (F1 forms), and 3 coordinator ask → deny (F2 restored). Nothing lowered.
+
 ## Finding status (verified facts only)
 | Finding | Status |
 | :- | :- |

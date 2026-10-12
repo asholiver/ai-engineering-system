@@ -1448,7 +1448,9 @@ def parse_script_in($text; $depth; $branch; $outer):
                        | (if $program.name == "patch" then $args else $git_parts.rest end) as $tool_args
                        | [ $tool_args[] | select(startswith("-")) ] as $flags
                        | ([ $tool_args[] | select(startswith("-") | not) ] | length) as $operand_count
-                       | [ $command.r[].op ] as $redirections
+                       # Only standard input counts (no fd number, or 0): `3<<EOF` or `3< f` feed
+                       # another descriptor, so the tool still reads whatever stdin it inherits.
+                       | [ $command.r[] | if (.fd // "") == "" or .fd == "0" then .op else "fd" + .fd + .op end ] as $redirections
                        | ($redirections == ["<<"] or $redirections == ["<<<"]) as $own_text
                        | def only_flags($allowed): all($flags[]; test("^-p[0-9]+$") or IN($allowed[]));
                          def one_of($names): ([ $flags[] | select(IN($names[])) ] | length) == 1;
@@ -1462,7 +1464,10 @@ def parse_script_in($text; $depth; $branch; $outer):
                                       end)) as $dry
                        | ($plain and $own_text and $operand_count == 0 and only_flags([])
                           and ($program.name == "patch" or $git_parts.sub == "apply")) as $direct
-                       | (if $plain then stdin_content($command; $before) else {texts: [], known: false} end) as $stdin
+                       # Every text the command or its producers carry still counts for the store and
+                       # Git-file deny (deny precedence, whatever the shape); only `known` needs the
+                       # direct shape, so a wrapper's input (xargs <<< f) never decides content (G1).
+                       | stdin_content($command; $before) as $stdin
                        | {texts: ($stdin.texts + $written), known: ($direct and $stdin.known), dry: $dry}
                      else null end) as $patch
                   | {kind: (if ($inner_texts | length) > 0 then "none"

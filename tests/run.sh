@@ -2666,6 +2666,21 @@ m|none|git apply <<< '--- a/src/x'
 b|deny|git apply --check --exclude=x fix.patch
 b|deny|xargs git apply <<< fix.patch
 CASES
+# Independent re-review of the fail-closed policy (F1, F2). F1: a heredoc, here-string or `<` on
+# another descriptor (3<<, 4<<<, 3<) is not the tool's standard input, so no exemption; fd 0 is.
+# F2: the command's own and its producers' text still counts for the store deny in every shape,
+# including octal-escaped C-quoted names (a deny that ab7fd33 had lowered to ask).
+fix4_table "fail-closed patch tools F1 F2" "$agent_repository" <<'CASES'
+m|ask|{ git apply 3<<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF\n} < fix.patch
+m|ask|exec < fix.patch; git apply 4<<< x
+m|ask|patch --dry-run -p1 3< fix.patch
+m|ask|exec < fix.patch; patch -p1 3<<< x
+m|none|git apply 0<<'EOF'\n--- a/src/x\n+++ b/src/x\nEOF
+m|none|patch --dry-run -p1 0< fix.patch
+m|deny|time git apply <<'EOF'\ndiff --git "a/.agents/specs/active/W.state\056json" "b/.agents/specs/active/W.state\056json"\nEOF
+m|deny|cat <<'EOF' | git apply\ndiff --git "a/.agents/specs/active/W.state\056json" "b/.agents/specs/active/W.state\056json"\nEOF
+m|deny|git -C . apply <<'EOF'\ndiff --git "a/.agents/specs/active/W.state\056json" "b/.agents/specs/active/W.state\056json"\nEOF
+CASES
 
 # Closure pass: the WORK-001 replacement probe set (tests/guard-probes.txt; not the lost historical
 # corpus), one risk-focused line per security boundary, in the agent repository (branch feature).

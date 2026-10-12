@@ -269,18 +269,19 @@ def parse_raw($text; $depth):
             (if $raw == "esac" then .in_case_pattern = false else .cur.fw += [$word.l] | add_word($word; -1) end)
           elif .pending != null then
             .pending as $redirect
+            | (.pending_fd // "") as $fd
             | (if $redirect == "<<" or $redirect == "<<-" then
                  (.hd_index as $index
-                  | if ($lexed.hd[$index] // null) == null then .bad = true | .cur.r += [{op: "<<", t: $word.l, body: ""}]
+                  | if ($lexed.hd[$index] // null) == null then .bad = true | .cur.r += [{op: "<<", t: $word.l, body: "", fd: $fd}]
                     else
                       $lexed.hd[$index] as $heredoc
-                      | .cur.r += [{op: "<<", t: $word.l, body: $heredoc.body, q: $heredoc.quoted}]
+                      | .cur.r += [{op: "<<", t: $word.l, body: $heredoc.body, q: $heredoc.quoted, fd: $fd}]
                       | .hd_index += 1
                       | if $heredoc.quoted or ($heredoc.body | test("[$`]") | not) then .
                         else add_word({s: ($heredoc.body | expansion_substitutions)}; -1) end
                     end)
                else
-                 .cur.r += [{op: $redirect, t: $word.l, d: $word.d, p: ($word.ps != null)}] | add_word($word; -1)
+                 .cur.r += [{op: $redirect, t: $word.l, d: $word.d, p: ($word.ps != null), fd: $fd}] | add_word($word; -1)
                end)
             | .pending = null
           elif .in_bracket then
@@ -320,7 +321,9 @@ def parse_raw($text; $depth):
       elif ($token | is_redirect_token) then
         if .in_bracket then .cur.w += [{l: $token, d: false, s: []}]
         elif .in_case_pattern then .
-        else (if .pending != null then .bad = true else . end) | .pending = ($token | sub("^[0-9]+"; "")) end
+        # The operator without its file-descriptor number; the number ("" when none) is kept in fd
+        # (fail-closed patch tools: `git apply 3<<EOF` does not feed git apply's standard input).
+        else (if .pending != null then .bad = true else . end) | .pending = ($token | sub("^[0-9]+"; "")) | .pending_fd = ($token | match("^[0-9]*").string) end
       else word_in_command($token) end)
   | finish_command
   | {units: [.units[] | select(length > 0)],
