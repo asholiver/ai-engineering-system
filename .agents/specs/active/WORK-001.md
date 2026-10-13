@@ -95,6 +95,8 @@ Excluded (non-goals):
   2. **Per-command scaling:** analysis cost is linear in the number of commands, with an explicit upper bound per command. The bound is set conservatively from the measured implementation, with headroom for measurement variance, and recorded in `WORK-001.log.md`. The test asserts its fixture's command count.
   3. **Large inert input:** commands dominated by heredoc or data content stay bounded independently of command count: under 1 s up to 256 KB. The test asserts its fixture's byte size.
 
+  Verification status (owner decision, 2026-10-13): the targets in 1 and 3 (p95 under 150 ms, under 1 s) are unchanged, but the tests enforce only CI regression tolerances (500 ms and 2500 ms). Passing CI therefore does not establish that targets 1 and 3 are met. This is a known verification gap and a follow-up for later assurance work, not a verified performance result.
+
   Reason: the original criterion ("p95 under 150 ms for commands up to 8 KB") used bytes as a proxy, which was invalid. Runtime is driven mainly by command count (measured: a fixed jq compile cost plus a roughly constant cost per command, while a 12.6 KB heredoc costs only the fixed part). Its "8 KB" fixture was actually about 3.5 KB, which hid the overrun. This is a specification correction, not acceptance of a regression or a security trade. No size-triggered fallback is introduced. Past the parser's existing size or time budget (256 KB, the watchdog), the fallback applies as before.
 ## Business rules
 Invariants:
@@ -196,7 +198,7 @@ Table-driven cases in `tests/run.sh`, fed hook JSON directly (no Claude, no netw
 - a no-decision command writes nothing;
 - an unwritable log directory still returns the correct decision.
 
-Performance: three tests, matching the three properties in Requirements (typical latency, per-command bound, large inert input). Each asserts its fixture's preconditions (command count and/or byte size), within a tolerance generous enough for CI machines.
+Performance: three tests, matching the three properties in Requirements (typical latency, per-command bound, large inert input). Each asserts its fixture's preconditions (command count and/or byte size). The latency tests enforce CI regression tolerances (500 ms typical, 2500 ms large input), not the stated targets (150 ms, 1 s). Meeting the targets is unverified (see Requirements, Performance).
 ## Risks
 - **Parser complexity in bash.** Mitigated by a narrow grammar, the fail-safe fallback and table tests. Escalate if bash + jq proves inadequate.
 - **New false-positive categories** (for example interpreter inline code containing SQL-like prose). Documented as a residual category; measured through the guard log.

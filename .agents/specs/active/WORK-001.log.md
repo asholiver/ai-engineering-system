@@ -803,6 +803,18 @@ Detailed evidence for WORK-001 delivery. The spec's "Implementation state" keeps
 - **Branch protection:** `main` has none, so the `check` job is not a required check. Owner decision.
 - Docstring coverage warning (50% against 80%): non-blocking.
 
+## Owner decision (2026-10-13): performance targets versus CI tolerances
+- The specification targets are unchanged: p95 under 150 ms for typical commands, and under 1 s for large inert input up to 256 KB.
+- The CI regression tolerances in `tests/run.sh` are unchanged: 500 ms and 2500 ms.
+- **Passing CI with these tolerances does not establish that the targets are met.** This is a **known verification gap** and a follow-up for later assurance work, not a verified performance success.
+- Measurements recorded so far are single runs, not p95 against the target:
+  - locally, 8 KB command 212 ms;
+  - CI, 8 KB command 253-376 ms and 250 KB heredoc 178-246 ms.
+- This resolves the earlier "needs owner clarification" item and supersedes it.
+
+## Branch protection (2026-10-13, read-only check)
+- The repository ruleset "Protect main" (id 24951286) is active on the default branch with no bypass actors. It blocks deletion and force-push, requires a pull request (0 approvals, all review threads resolved, merge commits only), and requires the GitHub Actions check `check (ubuntu, ShellCheck 0.11.0)` (non-strict). This supersedes the earlier "`main` has none" entry.
+
 ## Finding status (verified facts only)
 | Finding | Status |
 | :- | :- |
