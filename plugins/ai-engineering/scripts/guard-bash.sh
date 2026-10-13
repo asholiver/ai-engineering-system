@@ -28,8 +28,11 @@ log_max_bytes=1048576
 guardrail_note="Hooks are guardrails, not a sandbox."
 
 # Prints an ask decision without needing jq (reasons here contain no quotes or backslashes).
-ask() {
+print_ask() {
   printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"%s"}}\n' "$1"
+}
+ask() {
+  print_ask "$1"
   exit 0
 }
 
@@ -136,6 +139,9 @@ write_guard_log() {
   [ ! -L "$log_directory" ] || return 0
   (umask 077 && mkdir -p "$log_directory") 2>/dev/null || return 0
   [ ! -L "$log_directory" ] && [ ! -L "$log_file" ] || return 0
+  # A FIFO, device or socket there is never opened (opening a FIFO blocks with no reader). The
+  # check can race with a swap; log_decision's deadline covers that.
+  if [ -e "$log_file" ] && [ ! -f "$log_file" ]; then return 0; fi
   if [ -f "$log_file" ]; then
     size="$(wc -c <"$log_file" 2>/dev/null | tr -d ' ')"
     if [ "${size:-0}" -gt "$log_max_bytes" ]; then rotate_guard_log "$log_directory" "$log_file"; fi
@@ -158,9 +164,25 @@ write_guard_log() {
 # arguments, and the environment (settings env blocks, exports) must not change its output.
 classify_only=""
 [ "${1:-}" = "--classify-only" ] && classify_only=1
+# Logging never delays or changes the decision: every caller prints its decision first, and the
+# write runs in its own process group under a deadline, killed with all its children when the
+# deadline passes. So a log destination that blocks (a FIFO, including one swapped in after
+# write_guard_log's type check, or a stalled filesystem) holds the hook for at most the deadline.
+log_deadline_seconds=2
 log_decision() {
+  local pid watchdog
   [ -z "$classify_only" ] || return 0
-  write_guard_log "$@" >/dev/null 2>&1 || true
+  set -m
+  write_guard_log "$@" </dev/null >/dev/null 2>&1 &
+  pid=$!
+  (sleep "$log_deadline_seconds"; kill -KILL -- "-$pid") </dev/null >/dev/null 2>&1 &
+  watchdog=$!
+  set +m
+  wait "$pid" 2>/dev/null
+  kill -KILL -- "-$watchdog" 2>/dev/null
+  wait "$watchdog" 2>/dev/null
+  kill -KILL -- "-$pid" 2>/dev/null
+  return 0
 }
 
 # ---------------------------------------------------------------- keyword fallback
@@ -404,8 +426,9 @@ decision="fallback" parse_mode="fallback" classes="" hook_output="" hint_state="
 finish_without_decision() {
   if [ -n "$git_lookup_failed" ]; then
     if [ -n "$classify_only" ]; then printf 'ask\ngit-lookup-failed\n'; exit 0; fi
+    print_ask "ai-engineering guard: a Git lookup this decision depends on (current branch, repository root or common directory) failed, or the hook environment sets Git variables that change which repository Git uses, so the guard cannot show this command is safe. It needs explicit human approval. $guardrail_note"
     log_decision ask git-lookup-failed parsed
-    ask "ai-engineering guard: a Git lookup this decision depends on (current branch, repository root or common directory) failed, or the hook environment sets Git variables that change which repository Git uses, so the guard cannot show this command is safe. It needs explicit human approval. $guardrail_note"
+    exit 0
   fi
   if [ -n "$classify_only" ]; then printf 'none\n\n'; exit 0; fi
   emit_shell_edit_hint
@@ -415,7 +438,8 @@ finish_without_decision() {
 # Runs the classifier once. Past the time budget it is stopped (its whole process group) and the
 # fallback rules apply. RR3-13 worst case, well under Claude Code's 60 s hook timeout: two
 # classifier runs (3 s each), every hook-time Git lookup together (5 s, guard/hook-git.sh), the
-# restricted-agent fallback check (3 s) and linear keyword scans.
+# restricted-agent fallback check (3 s), the guard-log write (2 s, after the decision is printed)
+# and linear keyword scans.
 run_classifier() {
   decision="fallback" parse_mode="fallback" classes="" hook_output="" hint_state="none" hint_targets="[]" need_branch="0" floor_text=""
   set -m
@@ -470,8 +494,9 @@ case "$decision" in
     fi
     classes="$(IFS=,; printf '%s' "${fallback_intents[*]}")"
     if [ -n "$classify_only" ]; then printf 'ask\n%s\n' "$classes"; exit 0; fi
+    print_ask "ai-engineering guard: words in this command look like a reserved operation and are not proven to be data (class: ${classes//,/, }). It needs explicit human approval. $guardrail_note"
     log_decision ask "$classes" parsed
-    ask "ai-engineering guard: words in this command look like a reserved operation and are not proven to be data (class: ${classes//,/, }). It needs explicit human approval. $guardrail_note"
+    exit 0
     ;;
 esac
 
@@ -490,11 +515,12 @@ if [ -n "$restricted_git_write" ]; then
   # RR3-3: a Git write established directly in the text (see keyword_fallback), not inferred
   # from the failed parse. Same reason as the parsed policy (guard/policy.jq git_write_policy).
   if [ -n "$classify_only" ]; then printf 'deny\n%s\n' "$classes"; exit 0; fi
-  log_decision deny "$classes" fallback
   printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"%s"}}\n' \
     "ai-engineering guard: denied. $restricted_git_write is not on the read-only Git list for this agent: the coordinator owns Git. Do not run Git commands that change the repository or its configuration; leave the changes in the working tree and say in your report what should be committed. (The command could not be fully analysed; this Git write was identified directly.) $guardrail_note"
+  log_decision deny "$classes" fallback
   exit 0
 fi
 if [ -n "$classify_only" ]; then printf 'ask\n%s\n' "$classes"; exit 0; fi
+print_ask "ai-engineering guard: this command could not be fully analysed, so keyword rules were applied. It needs explicit human approval (class: ${classes//,/, }). $guardrail_note"
 log_decision ask "$classes" fallback
-ask "ai-engineering guard: this command could not be fully analysed, so keyword rules were applied. It needs explicit human approval (class: ${classes//,/, }). $guardrail_note"
+exit 0

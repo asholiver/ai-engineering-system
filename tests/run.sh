@@ -2730,6 +2730,87 @@ probe_lines="$(grep -c '^[mb]|' "$repository_directory/tests/guard-probes.txt")"
 if [ "$probe_lines" -ge 45 ]; then pass; else fail "closure: the replacement probe set has $probe_lines probes (expected at least 45)"; fi
 fix4_table "replacement probes" "$agent_repository" <"$repository_directory/tests/guard-probes.txt"
 
+# ---------------------------------------------------------------- guard log never blocks (FIFO)
+# Logging never delays or changes a decision (spec: "a logging failure never changes the decision").
+# A FIFO planted as the guard log used to block every logged path: the fallback, floor and
+# lookup-failure asks and the fallback deny printed nothing; the parsed ask and deny printed but the
+# hook never exited. Now every path prints first, a non-regular log is skipped, and the write runs
+# under a 2 s deadline in its own process group (which also covers a FIFO swapped in after the
+# type check). Each run here is its own process group, killed with all its children after 8 s.
+bounded_guard() { # hook JSON file, then optional NAME=value environment assignments
+  local input_file="$1" pid killer start
+  shift
+  rm -f "$work_directory/bounded.out" "$work_directory/bounded.done"
+  start=$SECONDS
+  set -m
+  ( env "$@" "$scripts/guard-bash.sh" <"$input_file" >"$work_directory/bounded.out" 2>/dev/null; : >"$work_directory/bounded.done" ) &
+  pid=$!
+  ( sleep 8; kill -KILL -- "-$pid" ) </dev/null >/dev/null 2>&1 &
+  killer=$!
+  set +m
+  wait "$pid" 2>/dev/null
+  bounded_seconds=$((SECONDS - start))
+  kill -KILL -- "-$killer" 2>/dev/null; wait "$killer" 2>/dev/null
+  kill -KILL -- "-$pid" 2>/dev/null
+  bounded_output="$(cat "$work_directory/bounded.out" 2>/dev/null)"
+  if [ -e "$work_directory/bounded.done" ]; then bounded_done=1; else bounded_done=0; fi
+}
+fifo_repository="$(new_repository fifo-repo feature)"
+mkdir -p "$fifo_repository/.git/ai-engineering"
+fifo_log="$fifo_repository/.git/ai-engineering/guard-log.jsonl"
+{ printf 'foo'; i=0; while [ "$i" -lt 2500 ]; do printf ' word%s' "$i"; i=$((i + 1)); done; printf ' terraform apply'; } >"$work_directory/fifo-floor.txt"
+fifo_cases() { # label|agent|expected|command lines on stdin; environment assignment in $1 (may be empty)
+  local label agent expected command_text
+  while IFS='|' read -r label agent expected command_text; do
+    [ -n "$expected" ] || continue
+    command_text="$(expand_characters "$command_text")"
+    [ "$command_text" = "@FLOOR@" ] && command_text="$(cat "$work_directory/fifo-floor.txt")"
+    agent_input "$command_text" "$fifo_repository" "$agent" >"$work_directory/fifo.json"
+    if [ "$label" = "lookup-failure ask" ]; then bounded_guard "$work_directory/fifo.json" "GIT_CONFIG_PARAMETERS='x.y=z'"
+    else bounded_guard "$work_directory/fifo.json"; fi
+    expect_equal "guard log $1: $label decision" "$expected" "$(decision_of "$bounded_output")"
+    expect_equal "guard log $1: $label completes by itself" 1 "$bounded_done"
+    if [ "$bounded_seconds" -le 4 ]; then pass; else fail "guard log $1: $label took ${bounded_seconds} s (logging deadline 2 s)"; fi
+  done
+}
+fifo_table='parsed ask|m|ask|terraform apply
+fallback ask|m|ask|echo '"'"'unbalanced; terraform apply
+floor ask|m|ask|@FLOOR@
+lookup-failure ask|m|ask|git push
+parsed deny|m|deny|echo x > .agents/specs/active/W.state.json
+fallback deny|b|deny|X=@NBSP@ git commit -m x
+no decision|m|none|ls'
+rm -f "$fifo_log"; mkfifo "$fifo_log"
+fifo_cases "FIFO" <<<"$fifo_table"
+if [ -p "$fifo_log" ]; then pass; else fail "guard log FIFO: the FIFO was replaced or removed"; fi
+# Control: a regular log keeps working, one line per ask or deny (six here), never for no decision.
+rm -f "$fifo_log"
+fifo_cases "regular file" <<<"$fifo_table"
+expect_equal "guard log regular file: one line per ask or deny" 6 "$(wc -l <"$fifo_log" | tr -d ' ')"
+# Deadline (stands in for a FIFO swapped in between the type check and the open, which a test cannot
+# time reliably): a Git that hangs, reached only from the log write (`npm publish` asks and its text
+# triggers no earlier branch, root or common-directory lookup; `terraform` would, through "rm"). The
+# decision is printed, the hook finishes within the deadline, and the hung Git is gone once its own
+# lookup deadline (5 s) passes.
+stalled_git_directory="$work_directory/stalled-git"
+mkdir -p "$stalled_git_directory"
+printf '#!/bin/bash\necho $$ >>"%s/pids"\nsleep 30 &\necho $! >>"%s/pids"\nwait\n' "$stalled_git_directory" "$stalled_git_directory" >"$stalled_git_directory/git"
+chmod +x "$stalled_git_directory/git"
+agent_input 'npm publish' "$fifo_repository" m >"$work_directory/fifo.json"
+bounded_guard "$work_directory/fifo.json" "PATH=$stalled_git_directory:$PATH"
+expect_equal "guard log deadline: a stalled log write still asks" ask "$(decision_of "$bounded_output")"
+expect_equal "guard log deadline: the hook completes by itself" 1 "$bounded_done"
+if [ "$bounded_seconds" -le 4 ]; then pass; else fail "guard log deadline: the hook took ${bounded_seconds} s (logging deadline 2 s)"; fi
+if [ -s "$stalled_git_directory/pids" ]; then pass; else fail "guard log deadline: the stalled git shim never ran"; fi
+stalled_left=""
+for _ in $(seq 1 80); do
+  stalled_left=""
+  while IFS= read -r stalled_pid; do kill -0 "$stalled_pid" 2>/dev/null && stalled_left="$stalled_left $stalled_pid"; done <"$stalled_git_directory/pids"
+  [ -n "$stalled_left" ] || break
+  sleep 0.1
+done
+expect_equal "guard log deadline: no stalled git process is left" "" "$stalled_left"
+
 # ---------------------------------------------------------------- run-gate
 commit_all() { git -C "$1" add -A && git -C "$1" -c user.name=test -c user.email=test@example.com commit -q -m "$2"; }
 gate_repository="$(new_repository gate-repo main)"
