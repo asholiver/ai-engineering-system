@@ -35,8 +35,8 @@ There is one authoritative copy of each global rule, in the plugin's standards s
 | Event | Script | Behaviour |
 | :- | :- | :- |
 | `SessionStart` | `inject-standards.sh` | Adds core standards to the main session. |
-| `PreToolUse` Bash | `guard-bash.sh` | Returns `ask` for high-impact operations, classified by intent. |
-| `PreToolUse` Write/Edit/NotebookEdit | `guard-writes.sh` | Denies `ai-engineering:learning` writes outside `.agents/`. |
+| `PreToolUse` Bash | `guard-bash.sh` | Parses the command and classifies each executed action. It returns `ask` for a lone reserved operation (or one preceded only by context-setting commands) and `deny` when a reserved operation is bundled with other commands. It denies Git writes by specialist and reviewer subagents and shell writes to the authority store, and gives implementation agents a non-blocking hint to edit files with Edit/Write. See [Guard v2](#guard-v2-structured-action-classification). |
+| `PreToolUse` Write/Edit/NotebookEdit | `guard-writes.sh` | Denies `ai-engineering:learning` writes outside `.agents/`, and writes from any caller to the authority store. |
 | `SubagentStop` frontend/backend/platform | `gate-fast.sh` | Off by default. Only with `AI_ENGINEERING_HOOK_GATES=1`: runs the `fast` gate in the agent's working tree; failure keeps the agent working for at most 2 fix attempts, then it must report `GATE FAILED`. See [Trust boundary](#trust-boundary-for-project-code). |
 
 Plugin agents ignore `hooks`, `permissionMode` and `mcpServers` frontmatter, so all enforcement is plugin-level and filtered by `agent_type` where needed. Plugins cannot ship permission rules, so approval is enforced through the hook rather than `permissions.deny`.
@@ -50,6 +50,32 @@ Plugin agents ignore `hooks`, `permissionMode` and `mcpServers` frontmatter, so 
 ### Hooks are guardrails, not a security sandbox
 
 The guard sees only the command text Claude submits. It does not see inside scripts, aliases, Makefiles beyond target names, variables, encoded strings or programs that call cloud APIs directly. It errs towards asking: a false positive costs one confirmation. Hard boundaries require OS-level sandboxing, least-privilege credentials, protected branches and environment approvals in CI/CD.
+
+### Guard v2: structured action classification
+
+Decision record: [ADR-0003](decisions/ADR-0003-structured-action-guard.md). Work spec: `WORK-001`.
+
+- **Parse, then classify.** `guard-bash.sh` is a thin wrapper around one jq run: `guard/lexer.jq` splits the command into simple commands and pipelines; `guard/classify.jq` classifies each by program, operation and HTTP method using the declarative tables in `guard/tables.jq`; `guard/policy.jq` decides. Adding a program or verb is a table change with a test.
+- **Safety floor by construction.** The v0.2 keyword rules (ask-only) run over the whole command text, at every nesting depth, minus a narrow list of *proven data* spans. Classification and policy can raise the result (deny, precise labels) but never lower it below the floor. A program is never assumed inert: if it has an executing construct (for example `awk system()`, `tar --to-command`, `git -c core.pager`, `git rebase -x`, `--upload-pack`), none of its text counts as data.
+- **Proven data, the only exemptions.** These are defined in `guard/tables.jq`, and each has a test with its not-data counterpart:
+  - `echo`/`printf` arguments, `cat` operands, and heredoc or here-string input to `cat`, `tee`, `echo` or `printf`, when nothing downstream can run the text;
+  - search patterns and paths of `grep`, `rg` and `ag`;
+  - `git grep` and `git log -S/-G` values, and `git commit|tag|notes` messages;
+  - Git path and revision operands of read and staging subcommands;
+  - `sed` scripts made only of `s` commands with no `e` or `w` flag;
+  - package names after a package manager's non-task subcommand;
+  - URL operands of read-only (GET or HEAD) HTTP requests;
+  - `gh release download|view|list` operands;
+  - shell comments.
+  
+  Data is classified only where the receiving program executes it: shell `-c`, `eval`, `ssh` and similar text is parsed recursively, and SQL-client arguments and stdin are scanned for destructive statements. Interpreter inline code (`python -c`, `node -e` and similar) is scanned for destructive SQL only.
+- **One operation per approval.** A lone reserved operation, or one preceded only by context-setting commands (`cd`, `pushd`, assignments, `export`, toolchain activation such as `nvm use`), asks. A reserved operation bundled with any other command is denied, with a reason telling the agent to resubmit it alone. A pipeline feeding a SQL client or `xargs` is one operation.
+- **Deploy classes.** Deploys are labelled `production-deploy`, `ephemeral-deploy` or `unclassified-deploy`. All of them currently ask.
+- **Fail-safe.** When the parse is not confident (unbalanced quotes, a dynamic program name, a parser error, an oversized command, or the time budget is exceeded) the guard applies v0.2-style keyword rules and asks if any match. It never denies for being unparseable, and never returns `allow`.
+- **Policy without work-item state.** Specialist and reviewer subagents (identified by `agent_type`) may run only an allow-list of Git read forms. Everything else is denied: writes, `-c` keys outside a small safe list, and options that execute commands. The coordinator owns Git, and the main session is unaffected. Writes to `.agents/specs/**/*.state.json` and the authority-token store under the Git common directory are denied from any caller, through Bash or Write/Edit/NotebookEdit; the plugin's own transition script does not go through tool hooks. Store matching is case-insensitive, treats non-ASCII look-alikes as wildcards (APFS case folding), follows `cd`, `git -C` and `env -C`, and treats glob, brace and dynamic write targets that could reach the store as hits. Hard links into the store are refused. Protection follows an operation's *write effect*, not only literal paths: whole-tree restores, recursive copies and syncs, and archive extractions whose destination can contain the store or `.git` (the repository root, `.agents`, `.agents/specs`, `.git`) ask (`protected-tree-overwrite`), from every caller, without inspecting the source. Git commands that can replace tracked state files (branch switches, merge, pull, rebase, cherry-pick, revert, stash, `reset --hard`, whole-tree restores, the previous-branch shorthand `-` included) ask from the coordinator too. The guard does not inspect Git state at hook time: its only hook-time Git is repository discovery and HEAD's name, through hardened plumbing that reads no objects and no index. A lookup a decision depends on that fails, or that Git variables in the hook environment redirect, asks rather than passing. Implementation agents that edit files through the shell get a non-blocking `additionalContext` hint, never a decision.
+- **One classification interface.** `classify_command_impact` in `lib.sh` runs the guard in classify-only mode (an explicit argument, never an environment setting). `run-gate.sh` and `external-review.sh` refuse a configured command classified `ask` or `deny`, or one the guard could not classify.
+- **Guard log.** Each `ask` or `deny` appends one JSON line to `<git-common-dir>/ai-engineering/guard-log.jsonl`: time, session id, `agent_type`, decision, classes, parse mode and the SHA-256 of the command, never the command text. It is local, uncommitted, rotated at 1 MiB, and a logging failure never changes the decision. It supports measuring false and true positives.
+- **Residual risk.** Scripts, aliases, variables, encoded strings and programs that call APIs directly can still evade the guard. Interpreter inline code is scanned only for destructive SQL. Authority-store protection prevents honest mistakes; it is not a defence against a deliberately adversarial process with shell access.
 
 ### Trust boundary for project code
 

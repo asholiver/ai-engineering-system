@@ -90,7 +90,14 @@ Excluded (non-goals):
 - The guard never returns `allow`. Possible outputs: nothing, `ask`, `deny`, or context only.
 - Deny reasons are written for the agent: name the operation, and say to resubmit it alone or that the coordinator owns Git.
 - Ask reasons are written for the human: name the single operation and its class, and keep "Hooks are guardrails, not a sandbox."
-- Performance: p95 under 150 ms for commands up to 8 KB, and under 1 s up to 256 KB (large heredocs). Past the parser's size or time budget, use the fallback.
+- Performance (specification correction approved by the owner, 2026-10-07). Three independent properties, each tested, and each test validates its own fixture preconditions:
+  1. **Typical commands:** p95 under 150 ms (interactive latency).
+  2. **Per-command scaling:** analysis cost is linear in the number of commands, with an explicit upper bound per command. The bound is set conservatively from the measured implementation, with headroom for measurement variance, and recorded in `WORK-001.log.md`. The test asserts its fixture's command count.
+  3. **Large inert input:** commands dominated by heredoc or data content stay bounded independently of command count: under 1 s up to 256 KB. The test asserts its fixture's byte size.
+
+  Verification status (owner decision, 2026-10-13): the targets in 1 and 3 (p95 under 150 ms, under 1 s) are unchanged, but the tests enforce only CI regression tolerances (500 ms and 2500 ms). Passing CI therefore does not establish that targets 1 and 3 are met. This is a known verification gap and a follow-up for later assurance work, not a verified performance result.
+
+  Reason: the original criterion ("p95 under 150 ms for commands up to 8 KB") used bytes as a proxy, which was invalid. Runtime is driven mainly by command count (measured: a fixed jq compile cost plus a roughly constant cost per command, while a 12.6 KB heredoc costs only the fixed part). Its "8 KB" fixture was actually about 3.5 KB, which hid the overrun. This is a specification correction, not acceptance of a regression or a security trade. No size-triggered fallback is introduced. Past the parser's existing size or time budget (256 KB, the watchdog), the fallback applies as before.
 ## Business rules
 Invariants:
 - Destructive and reserved operations are never silently allowed.
@@ -191,7 +198,7 @@ Table-driven cases in `tests/run.sh`, fed hook JSON directly (no Claude, no netw
 - a no-decision command writes nothing;
 - an unwritable log directory still returns the correct decision.
 
-Performance: a test asserts the time budget on a 256 KB heredoc, within a tolerance generous enough for CI machines.
+Performance: three tests, matching the three properties in Requirements (typical latency, per-command bound, large inert input). Each asserts its fixture's preconditions (command count and/or byte size). The latency tests enforce CI regression tolerances (500 ms typical, 2500 ms large input), not the stated targets (150 ms, 1 s). Meeting the targets is unverified (see Requirements, Performance).
 ## Risks
 - **Parser complexity in bash.** Mitigated by a narrow grammar, the fail-safe fallback and table tests. Escalate if bash + jq proves inadequate.
 - **New false-positive categories** (for example interpreter inline code containing SQL-like prose). Documented as a residual category; measured through the guard log.
@@ -248,7 +255,12 @@ Performance: a test asserts the time budget on a 256 KB heredoc, within a tolera
 - None. D1–D6 are resolved (see `WORK-001-planning.md`).
 ## Implementation state
 <!-- v0.2 deliver records task status and verdict lines here. Keep entries to one line each; put detailed evidence in WORK-001.log.md so this spec stays small. -->
--
+- Delivery authorised by the owner 2026-10-06 (governed by installed v0.2.0). Branch `feature/work-001-guard-v2` from `main` 1faa02e. Sequential tasks (no `worktree.baseRef: "head"`).
+- T1 (backend), done with T3 in one commit: parser, classifier tables, compound/context policy, fail-safe fallback, deploy classes, HTTP semantics, guard log, performance. Files: `scripts/guard-bash.sh` plus new sourced helpers, `tests/run.sh`. AC 1–5, 8, 10.
+- T2 (backend), done; fast gate `GATE fast: PASSED (exit 0) command: tests/run.sh` (619 passed); judgement calls listed in the log: `agent_type` Git-write policy, authority-store denial (Bash and Write/Edit/NotebookEdit), shell-edit hint, implementation-agent instructions. Files: guard scripts, `guard-writes.sh`, `agents/{frontend,backend,platform}.md`, `tests/run.sh`. AC 6, 7.
+- T3 (backend), done: `lib.sh` `classify_command_impact` (`ask`, `deny` and `unknown` are high-impact), used by `run-gate.sh` and `external-review.sh`; guard `--classify-only` argument (an env-var switch was rejected as a bypass). AC 9.
+- T1+T3 fast gate: `GATE fast: PASSED (exit 0) command: tests/run.sh` (386 passed, 0 failed). Findings F-T1-1 and F-T3-1 are in the log.
+- T4 (coordinator), pending, after T1–T3: `docs/architecture.md`, `versions/CHANGELOG.md` 0.3.0 entry. AC 11 via the full gate.
 ## Review state
 <!-- v0.2 review records its status block here. -->
 -

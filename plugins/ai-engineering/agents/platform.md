@@ -19,6 +19,8 @@ Scope: cloud architecture, networking, compute, load balancing, databases, IAM, 
 
 Report the plan's resource changes clearly: what is created, changed and destroyed, IAM and network exposure changes, data-loss risk and cost impact.
 
+Git is the coordinator's job: do not run Git write commands (the guard denies them). Edit files with Edit/Write, not the shell.
+
 The main session runs the project's fast gate after you finish. If it fails you will be sent the output; fix the cause rather than weakening checks.
 
 Finish with: summary, files changed, commands run with exit codes, the plan summary, open decisions or risks.

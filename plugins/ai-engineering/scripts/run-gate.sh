@@ -53,8 +53,8 @@ if [ -z "$gate_command" ]; then
 fi
 
 repository_directory="$(repository_root "$working_directory")"
-if is_high_impact_command "$gate_command" "$repository_directory"; then
-  echo "GATE $gate_name: REFUSED (the configured command contains a high-impact operation that needs human approval; run it manually) command: $gate_command$config_suffix"
+if classify_command_impact "$gate_command" "$repository_directory"; then
+  echo "GATE $gate_name: REFUSED (the configured command contains a high-impact operation that needs human approval; classified $impact_decision: ${impact_classes:-unclassified}; run it manually) command: $gate_command$config_suffix"
   exit 5
 fi
 output_file="$(mktemp "${TMPDIR:-/tmp}/ai-engineering-gate.XXXXXX")"
