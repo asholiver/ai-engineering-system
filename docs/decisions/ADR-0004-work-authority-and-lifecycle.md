@@ -1,8 +1,15 @@
 # ADR-0004: Work authority lives in state, not conversation
 ## Status
+**Original accepted decision (2026-10-06; historical text, unchanged):**
+
 Accepted (by Ashley Oliver, 2026-10-06) as part of the v0.3 architecture. Implemented by work spec `WORK-002`. Takes effect on release of v0.3.0. Includes owner decisions D1–D3 of 2026-10-06.
 
-**Amended 2026-10-13 (pending security review and G1 closure; implementation not authorised):** the owner-transition mechanism changes from `UserPromptExpansion` tokens (D1, superseded) to user-presence owner signatures. The trusted approval path (G1) is OPEN; a separate macOS approver account (G1-b) is the provisional architecture for investigation. The trust anchor is deferred. The original text is kept below, marked as superseded.
+**Status clarification (2026-10-13):**
+- **Accepted and unchanged:** the 2026-10-06 decision, except for its owner-transition mechanism. Authority lives in state, not conversation; the lifecycle, delivery policy, escalation triggers, remediation, Git ownership and lean handoffs stand.
+- **Superseded:** the `UserPromptExpansion` authority-token mechanism (D1). It will not ship in v0.3.0 or any later release.
+- **Proposed amendment, not accepted:** user-presence owner signatures replace the token mechanism. The amendment is approved in principle for design only. It needs a security review, G1 closure (the trusted approval path, currently OPEN, with a separate macOS approver account (G1-b) as the provisional architecture) and the owner's separate, explicit acceptance before implementation. Completing the security review does not by itself accept it. The trust anchor (O3) is deferred.
+- **v0.3.0 release:** "Takes effect on release of v0.3.0" applies only to the parts of this ADR that are accepted and implemented by then. Neither the superseded token mechanism nor an unaccepted signed-approval implementation ships automatically with v0.3.0. Owner-only transitions do not ship without an accepted mechanism.
+- The superseded 2026-10-06 text is kept below, marked as superseded.
 ## Context
 In the Landra F0 dogfood, authority was inferred from conversation:
 - about 25 of 36 human prompts were approve, decide or continue;
@@ -28,7 +35,7 @@ Governing principle: agents have autonomy over implementation, not authority ove
   - Approving and authorising are owner-only transitions.
   - So are accepting or waiving risk, lowering a tier, extending scope and revoking.
   - Approval binds a spec content hash. Any change to the spec returns the item to `proposed`.
-- **Verifiable owner transitions by owner signature** (amended 2026-10-13).
+- **Verifiable owner transitions by owner signature** (proposed amendment, 2026-10-13; not accepted; see Status).
   - Owner authority is a signature by a user-presence key over an exact approval record (repository, work item, action and scope, spec commit and hash, expiry, and a nonce for transition approvals). The owner makes it through a trusted approval path; it is verified unattended against a trust anchor outside the agent's write reach.
   - There are two kinds. A **transition approval** is intended to be single-use and authorises one owner-only lifecycle transition; single use is not yet rollback-resistant (see the replay limitation in Consequences). A **delivery permission** is short-lived, names one increment and an explicit list of permitted actions, and may be reused until it expires; every use is verified afresh. Agent-writable state never expands authority, and no security property depends on agent-writable revocation state. Longer-lived permissions are open, and so is durable revocation: early revocation of an unexpired permission is not cryptographically enforceable today (see Consequences). When a permission is absent or expired, protected operations pause for fresh owner approval.
   - Provisional key placement: the private signing key isolated in a separate approver account (G1-b), with a root-owned verification anchor in the Claude-running account (installation deferred).
@@ -41,7 +48,7 @@ Governing principle: agents have autonomy over implementation, not authority ove
     - `/ai-engineering:deliver` authorises or resumes delivery.
 
     Approval and delivery authorisation stay distinct: neither command's approval can perform the other's transitions.
-- **Superseded 2026-10-13: Verifiable owner transitions without new prompts.** Kept as history.
+- **Superseded 2026-10-13: Verifiable owner transitions without new prompts.** Kept as history; this mechanism will not ship.
   - A silent, non-blocking `UserPromptExpansion` hook records a one-time authority token when the owner types a human-only lifecycle command. `UserPromptExpansion` fires only for slash commands the human types. `UserPromptSubmit` is not used, because it also fires for scheduled tasks, background-subagent reports and cross-session messages.
   - The transition script refuses owner-only transitions without a fresh matching token.
   - Conversation alone never grants authority.
