@@ -15,7 +15,7 @@ Governing principle: agents have autonomy over implementation, not authority ove
 ## Decision
 - **One state file per work item.**
   - `.agents/specs/active/WORK-NNN.state.json` holds the lifecycle status, approval, delivery authority and policy, increments, decisions, planned owner actions, tiers and the review ledger.
-  - Only a single transition script changes it.
+  - Only a single transition script changes it. (Amended 2026-10-13: it is the only supported state-transition interface. Under the unrestricted-Bash threat model direct state edits remain possible; they grant no cryptographic authority, and protected operations verify signed authorisation rather than trusting state fields. See `WORK-002` Scope item 1.)
   - The spec (`WORK-NNN.md`) holds intent only. The append-only narrative goes in `WORK-NNN.log.md`, which isn't loaded by default.
 - **Lifecycle** (the normative transition table is in `WORK-002`):
   ```text
@@ -82,7 +82,7 @@ Governing principle: agents have autonomy over implementation, not authority ove
   - the setup question about worktrees;
   - "any open decision goes to the user".
 ## Why
-State that only explicit owner commands can change makes the boundary between intent and implementation checkable and measurable. Routine work then needs no permission. Putting delivery policy in the approved spec moves one decision up front instead of asking many questions mid-delivery.
+State that only explicit owner commands can change makes the boundary between intent and implementation checkable and measurable. (Amended 2026-10-13: "only explicit owner commands" is the supported interface, not a guarantee against direct edits; authority rests on signed owner approvals.) Routine work then needs no permission. Putting delivery policy in the approved spec moves one decision up front instead of asking many questions mid-delivery.
 
 Signatures replaced tokens (2026-10-13) because only something outside the agent's software reach can attest a human. Evidence from the B-SE proof of concept in the Claude-running account (macOS 15.7.3, OpenSSH_9.9p2, Secretive 4.0.0 per the Homebrew cask listing):
 - A1 PASS; A2 retry PASS (agent attempt refused); A3 PASS (unattended, no signature); A5 PASS (locked screen, no signature).

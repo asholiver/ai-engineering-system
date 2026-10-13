@@ -6,12 +6,12 @@ Original status (history): Approved (by Ashley Oliver, 2026-10-06), in principle
 ## Work ID
 WORK-002: Work lifecycle and authority (v0.3 PR B)
 ## Objective
-Move work authority out of conversation into explicit state that only lifecycle commands can change. Once the owner authorises delivery of an approved spec, routine implementation proceeds autonomously, with no "continue", "approve fix" or "approve work-branch push" prompts, while valid, correctly scoped authorisation exists. When a delivery permission has expired or is absent, protected operations (such as preview deploys) pause for fresh owner approval; uninterrupted delivery is not promised. Every legitimate interruption maps to one of five triggers, and intent never changes without the owner.
+Move work authority out of conversation into explicit state that lifecycle commands are the only supported way to change, backed by signed owner approvals. Once the owner authorises delivery of an approved spec, routine implementation proceeds autonomously, with no "continue", "approve fix" or "approve work-branch push" prompts, while valid, correctly scoped authorisation exists. When a delivery permission has expired or is absent, protected operations (such as preview deploys) pause for fresh owner approval; uninterrupted delivery is not promised. Every legitimate interruption maps to one of five triggers, and intent never changes without the owner.
 
 Decision record: [ADR-0004](../../../docs/decisions/ADR-0004-work-authority-and-lifecycle.md). Programme context: [WORK-001-planning.md](WORK-001-planning.md).
 ## Scope
 Included:
-1. **Work-item state.** `.agents/specs/active/WORK-NNN.state.json` (schema under Data), committed with the work. One transition script (`workstate.sh` or equivalent, bash + jq) is the only writer. Every transition validates the current status, the actor requirement and, for owner-only transitions, a valid owner approval (Scope item 3).
+1. **Work-item state.** `.agents/specs/active/WORK-NNN.state.json` (schema under Data), committed with the work. One transition script (`workstate.sh` or equivalent, bash + jq) is the only **supported** state-transition interface; it is not the only possible writer. Every transition through it validates the current status, the actor requirement and, for owner-only transitions, a valid signed owner approval (Scope item 3). Under the unrestricted-Bash threat model, direct edits to state remain possible (amended 2026-10-13). They cannot create cryptographic authority, but they can change workflow state, including undoing a state-only revocation and enabling transition replay after rollback (see the revocation and replay limitations). Protected operations must therefore verify the relevant signed authorisation themselves and never infer authority solely from a state field. This is a design requirement; it is not implemented.
 2. **Lifecycle:** `proposed → approved → authorised → delivering → (blocked ↔ delivering) → done → archived`, with `paused` reachable from `authorised`, `delivering` or `blocked`. Transitions and actors:
 
    | Transition | Actor | Requirement |
@@ -153,7 +153,7 @@ Excluded (non-goals):
 - Scripts are bash + jq, and every behaviour change has a case in `tests/run.sh`.
 - Always-loaded context stays within `scripts/check.sh` budgets. New commands use `disable-model-invocation: true`.
 - State writes are atomic (write then rename) and validated against the schema before replacing the file. A corrupt or unreadable state file stops delivery with a clear message; the script never repairs it silently.
-- Owner-only transitions are impossible without a valid owner signature. This is tested by calling the script directly.
+- The transition script refuses every owner-only transition without a valid signed owner approval; this is tested by calling the script directly. An owner-only transition is accepted as authoritative only with a valid signed approval. Direct state edits outside the script remain possible under the threat model and grant no authority (Scope item 1).
 - Signing and verification use OpenSSH `ssh-keygen -Y sign` and `-Y verify`. Proof-of-concept environment: macOS 15.7.3, OpenSSH_9.9p2 with LibreSSL 3.3.6 (`/usr/bin/ssh-keygen`); Secretive 4.0.0 according to the Homebrew cask listing before installation (the installed build was not read).
 - Owner actions are declared up front: Secretive and key set-up (a new key if G1-b is adopted), the approver account (G1-b), the trusted signer, and the trust anchor (O3).
 - After a Secretive, macOS or OpenSSH update, or a key rotation, the minting regression checklist (A2, A3, A5 equivalents) is re-run before signatures are trusted again.
@@ -317,7 +317,7 @@ End-to-end scenarios run deliberately in a scratch project, using unreleased sou
 - **Parallel worktrees** need dependencies installed (`.worktreeinclude`). Document; fall back to sequential when installation fails, recording why.
 - **Background merge waits across long gaps.** Bounded; an expired wait records "waiting for owner merge" as a planned owner action, not an interruption.
 ## Acceptance criteria
-1. Only the transition script changes state, and every owner-only transition requires a valid owner signature.
+1. The transition script is the only supported state-transition interface, and it accepts an owner-only transition as authoritative only with a valid signed owner approval. Protected operations verify the relevant signed authorisation rather than inferring authority from a state field. Direct state edits remain possible under the threat model; they create no cryptographic authority, and their workflow effects (state-only revocation undone, transition replay after rollback) are documented as limitations.
 2. `/ai-engineering:approve` and `/ai-engineering:deliver` create pending requests without guard noise. Each transition approval and each delivery permission costs the owner one deliberate review and one authentication through the trusted approval path. A new increment, a new action scope or an expired permission can require another approval (amended 2026-10-13; the original criterion was silent token minting).
 3. A conversational statement never changes status or grants delivery authority (boundary tests pass).
 4. After `/deliver`, routine fixes, work-branch pushes and PR updates proceed without owner prompts (E1).
