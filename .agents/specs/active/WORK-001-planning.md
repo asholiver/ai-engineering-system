@@ -20,7 +20,7 @@ DECIDED by Ashley Oliver, approved on 2026-10-06 with the refined architecture:
 - **PRs:** one independently reviewable PR per meaningful increment by default. This is not an invariant.
 - **Landra:** release v0.3.0, upgrade Landra, migrate WORK-001, and use the next F0 increment to measure.
 - **Grouping:** A, B and C. A is isolated because it is security-sensitive. C depends on B.
-- **Command-token mechanism:** silent and non-blocking (event: D1).
+- **Command-token mechanism:** silent and non-blocking (event: D1). Superseded 2026-10-13 by owner signatures; see D1.
 - **Tier 0:** Markdown outside `.agents/`, `docs/**`, and project-declared copy paths from base-ref configuration. `.agents/**` is never tier 0 (instruction-file exclusions: D4).
 - **Parallel worktrees** by default with an opt-out. The coordinator owns Git, and specialists never write to it.
 - **Deployment:**
@@ -32,6 +32,7 @@ DECIDED by Ashley Oliver, approved on 2026-10-06 with the refined architecture:
 - **Governance:** v0.2.0 (installed) governs development of v0.3.0. Unreleased source is exercised only in scratch projects.
 DECIDED by Ashley Oliver on 2026-10-06 (planning decisions D1–D6):
 - **D1:** authority tokens are minted from `UserPromptExpansion`, never `UserPromptSubmit`. The authority signal must be an explicit slash command typed by the owner, not background, scheduled or cross-session text.
+  - **Superseded 2026-10-13** (original decision kept above as history). The WORK-002 spike on Claude Code 2.1.296 showed `UserPromptExpansion` fires for agent-launched sessions, including a pseudo-terminal-driven interactive session with markers identical to a human-typed command, so it cannot attest the owner. The owner selected user-presence owner signatures (B-SE) as the WORK-002 baseline. The trusted approval path (G1) is open, with a separate macOS approver account (G1-b) as the provisional architecture for investigation; the trust anchor (O3) is deferred. See `WORK-002` and ADR-0004.
 - **D2:** the human-only `/ai-engineering:approve` command handles spec approval, finding or risk acceptance, tier lowering and revocation. Approval and delivery authorisation stay distinct.
 - **D3:** no main-session or coordinator model requirement. The user chooses the main-session model, and model routing stays in agent definitions. Opus is still required where the risk policy calls for the Opus security reviewer.
 - **D4:** instruction-bearing Markdown and configuration never qualify as tier 0, and are classified by what they can influence (tier 1 or 2). At minimum this covers `AGENTS.md`, `CLAUDE*.md`, `.claude/**`, `SKILL.md`, plugin agent, skill and command definitions, and `.github/**`. Regression coverage is required.
@@ -62,11 +63,11 @@ DECIDED by Ashley Oliver on 2026-10-06 (planning decisions D1–D6):
 - **External review for A, B and C while v0.2 governs:** CodeRabbit on each PR at its head SHA, with no unresolved actionable findings, recorded in that spec's Review state. v0.2 `/review` will still print `EXTERNAL REVIEW: NOT CONFIGURED`, because v0.2 can't consume PR reviews. The owner judges readiness with the CodeRabbit evidence.
 ## Assumptions
 - `gh` is not installed on this machine (observed 2026-10-06). The v0.3 wait helper and reference adapter need authenticated `gh`. Installing and authenticating it is a **planned owner action** before the next dogfood run, and while developing WORK-002 and WORK-003 if their fixture tests aren't enough.
-- The exact `command_name` that `UserPromptExpansion` reports for plugin skills is verified at the start of WORK-002.
+- The exact `command_name` that `UserPromptExpansion` reports for plugin skills is verified at the start of WORK-002. (Verified 2026-10-13; moot after D1 was superseded.)
 ## Specialist input
 Security review is required on all three PRs, with emphasis on:
 - **A:** guard evasion;
-- **B:** the token, state and guard-policy commit;
+- **B:** the token (owner approval since 2026-10-13), state and guard-policy commit;
 - **C:** self-certification and tier-0 escape.
 ## Cross-work dependencies
 - **A ∥ B:** A and B can be developed in parallel. B's guard-policy integration (WORK-002 Scope item 7) waits for A to merge.
