@@ -815,6 +815,21 @@ Detailed evidence for WORK-001 delivery. The spec's "Implementation state" keeps
 ## Branch protection (2026-10-13, read-only check)
 - The repository ruleset "Protect main" (id 24951286) is active on the default branch with no bypass actors. It blocks deletion and force-push, requires a pull request (0 approvals, all review threads resolved, merge commits only), and requires the GitHub Actions check `check (ubuntu, ShellCheck 0.11.0)` (non-strict). This supersedes the earlier "`main` has none" entry.
 
+## Delivery closure (2026-10-13)
+- **Merged:** PR #5 was merged by the owner at 2026-10-13 06:52:55 UTC as a regular merge commit, `d84683a` (parents `1faa02e` and `0c3707d`). That preserves all 32 PR commits, and the tree of `main` equals the PR head.
+- **Final evidence at `0c3707d`:**
+  - CI run 38354799222 passed (ShellCheck 0.11.0, offline plugin validation, `tests/run.sh` 2154 passed and 0 failed, `CHECK: PASSED`).
+  - CodeRabbit review completed: merge risk Minimal, no architecture-level concerns, both threads resolved.
+- **Owner acceptance** (recorded here; it was given in the session):
+  - the six residual limitations (2026-10-12): the lost historical probe corpus; store patches staged outside the submission ask, not deny; concurrent writers and aliasing are unobservable; prefix and exported Git variables; GNU patch unverified; ShellCheck skipped when not installed locally;
+  - the performance verification gap (2026-10-13);
+  - the merge itself.
+- **Open follow-ups (non-blocking):**
+  - verify the performance targets;
+  - the CodeRabbit notes on unauthenticated `agent_type` and best-effort logging;
+  - archive this spec and log after the v0.3.0 release (feature playbook step 12). They stay in `active/` until then, because the shared programme plan links them and v0.3.0 is unreleased.
+- **Not done here:** no v0.3.0 release, no plugin update, no Landra change. WORK-002 and WORK-003 have not started.
+
 ## Finding status (verified facts only)
 | Finding | Status |
 | :- | :- |

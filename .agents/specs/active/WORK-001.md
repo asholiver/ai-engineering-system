@@ -1,6 +1,10 @@
 # Work Specification
 ## Status
-Approved (by Ashley Oliver, 2026-10-06), in principle, with owner decisions D1–D6 incorporated as recorded in `WORK-001-planning.md`. Delivery is not authorised; it may start only after the gate-bootstrap PR (D5) is merged and the owner explicitly authorises it.
+**Current status: Delivered and accepted (2026-10-13).** PR #5 was merged by the owner on 2026-10-13 as a regular merge commit, `d84683a` (parents `1faa02e` and `0c3707d`), which preserves its 32 commits. Not yet released: WORK-001 ships in v0.3.0 together with WORK-002 and WORK-003.
+
+History (kept as written at the time):
+- 2026-10-06, approval: "Approved (by Ashley Oliver, 2026-10-06), in principle, with owner decisions D1–D6 incorporated as recorded in `WORK-001-planning.md`. Delivery is not authorised; it may start only after the gate-bootstrap PR (D5) is merged and the owner explicitly authorises it." That condition no longer applies.
+- 2026-10-06, delivery authorised by the owner after the gate-bootstrap PR merged (see Implementation state).
 ## Work ID
 WORK-001: Guard v2, structured action classification (v0.3 PR A)
 ## Objective
@@ -260,7 +264,16 @@ Performance: three tests, matching the three properties in Requirements (typical
 - T2 (backend), done; fast gate `GATE fast: PASSED (exit 0) command: tests/run.sh` (619 passed); judgement calls listed in the log: `agent_type` Git-write policy, authority-store denial (Bash and Write/Edit/NotebookEdit), shell-edit hint, implementation-agent instructions. Files: guard scripts, `guard-writes.sh`, `agents/{frontend,backend,platform}.md`, `tests/run.sh`. AC 6, 7.
 - T3 (backend), done: `lib.sh` `classify_command_impact` (`ask`, `deny` and `unknown` are high-impact), used by `run-gate.sh` and `external-review.sh`; guard `--classify-only` argument (an env-var switch was rejected as a bypass). AC 9.
 - T1+T3 fast gate: `GATE fast: PASSED (exit 0) command: tests/run.sh` (386 passed, 0 failed). Findings F-T1-1 and F-T3-1 are in the log.
-- T4 (coordinator), pending, after T1–T3: `docs/architecture.md`, `versions/CHANGELOG.md` 0.3.0 entry. AC 11 via the full gate.
+- T4 (coordinator), done (`89d1dcd`, later kept current in the remediation rounds): `docs/architecture.md`, `versions/CHANGELOG.md` 0.3.0 entry. AC 11 via the full gate.
+- Remediation: security review findings and fix rounds 1-7, plus closure decisions (Option B hook-time Git, file-backed patches never trusted, fail-closed patch tools, N1, curl/wget output options, FIFO guard log). The details are in `WORK-001.log.md`.
+- Final gate at the PR head `0c3707d`: CI run 38354799222 `check (ubuntu, ShellCheck 0.11.0)` passed. It ran ShellCheck 0.11.0, the offline plugin validation and `tests/run.sh` (2154 passed, 0 failed); `scripts/check.sh` gave `CHECK: PASSED`.
 ## Review state
 <!-- v0.2 review records its status block here. -->
--
+- Internal security review (Opus): exact-commit re-reviews after every round. Every finding was remediated or explicitly dispositioned by the owner (log, "Closure summary" and later entries).
+- External review: CodeRabbit on PR #5 completed at the head `0c3707d`. Merge risk Minimal, security architecture risk Low, "No architecture-level concerns identified". Both review threads are resolved: the curl/wget finding (c2, c3, c7, c8) is remediated, and the performance-wording thread was resolved by CodeRabbit once the owner decision of 2026-10-13 was documented.
+- Human acceptance: the owner accepted the six residual limitations (2026-10-12) and the performance verification gap (2026-10-13), then merged PR #5 under the "Protect main" ruleset (required CI check, all threads resolved).
+- Open follow-ups (non-blocking):
+  - Performance targets (p95 under 150 ms, under 1 s at 256 KB) are not verified; CI enforces only the 500 ms and 2500 ms tolerances.
+  - The six accepted residual limitations remain (log, "Closure summary" and "Delivery closure").
+  - CodeRabbit notes: role restrictions trust unauthenticated `agent_type`; guard logging is best effort.
+  - This spec is still in `active/`; archive it per the feature playbook after the v0.3.0 release.
