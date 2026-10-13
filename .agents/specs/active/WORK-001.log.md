@@ -753,6 +753,56 @@ Detailed evidence for WORK-001 delivery. The spec's "Implementation state" keeps
   - Comparison with `233fec8` (1357 commands, coordinator and backend): 6 coordinator and 9 backend none → deny, all the targeted curl/wget forms. Nothing else changed; nothing lowered.
 - Status: implemented and coordinator-verified. CodeRabbit's re-review on the pushed head is pending, so the findings are not closed until it confirms.
 
+## CI run 38308049749 and CodeRabbit on 1283cbf (2026-10-12)
+- PR #5 head `1283cbfe0a06224a0af6182fc117acefd4782478`; event `pull_request`; **success** in 5 m 46 s (21:02:01-21:07:47 UTC).
+  - ShellCheck 0.11.0: checksum `OK`, ran, nothing skipped.
+  - Both offline Claude plugin validations: `✔ Validation passed`.
+  - **`tests/run.sh`: 2105 passed, 0 failed**; `scripts/check.sh`: `CHECK: PASSED`.
+  - The N6(c) test passed with `TMPDIR=$RUNNER_TEMP`.
+- CodeRabbit set status `CodeRabbit: success — Review completed` on `1283cbf`; its summary covers `da5b45d..1283cbf`. No new formal review and no new inline comments. It **resolved its own curl/wget security thread** (resolved by `coderabbitai[bot]`). The performance-wording thread on `WORK-001.md:199` stays open: "a bounded follow-up rather than a merge blocker"; merge risk Low.
+- **c2, c3, c7, c8: REMEDIATED** (`a82a2eb`). Supported by the regression table, the 2105-pass CI run 38308049749, and CodeRabbit's resolved thread.
+
+## FIFO guard-log blocking (CodeRabbit inferred medium; confirmed and remediated 2026-10-13)
+- **Finding (CodeRabbit, "Medium · security · inferred"):** some decision paths log before printing. The append rejected symbolic links but not a FIFO and had no deadline, so a FIFO at `<git-common-dir>/ai-engineering/guard-log.jsonl` could stop decision delivery.
+- **Investigation** (owner-authorised; disposable repository under `$TMPDIR`; synthetic hook input only; 8 s cap per run; macOS bash 3.2). **Confirmed:** every logged path blocked.
+  - Fallback ask, floor ask, lookup-failure ask and fallback deny printed nothing.
+  - Parsed ask and parsed deny printed their decision but the hook never exited.
+  - No decision (not logged) was unaffected.
+  - The first probe left 12 blocked guard processes, because the kill reached only the wrapper subshell. They were identified by PID, parent and start time and stopped. Later probes used process-group kills.
+  - Not investigated, per the owner: whether an agent can create the FIFO through the guard, and what Claude Code does after a hook timeout.
+- **Remediation** (`guard-bash.sh` only; no decision logic changed):
+  - (a) Every path prints its decision before logging.
+  - (b) `write_guard_log` skips an existing non-regular log (FIFO, device, socket). Symbolic links were already refused.
+  - (c) `log_decision` runs the write in its own process group under a 2 s deadline, killed with its children. That covers the check/open race (a FIFO swapped in after the type check) and any other stall.
+  - Regular-file logging is unchanged.
+- **Before and after** (`scratchpad/fifo/probe2.sh`; before = `1283cbf`, after = working tree):
+  - FIFO log, before: all six logged cases were killed at 8 s, four with no output.
+  - FIFO log, after: all six print the correct decision and complete in 107-296 ms.
+  - Regular-log control: identical decisions and 6 log lines, before and after.
+- **Race stress** (`scratchpad/fifo/race.sh`: a loop renames a regular file and a FIFO into the log path while the guard runs 40 times):
+  - before: 17 of 40 hung until the 8 s kill;
+  - after: 40 of 40 printed `ask`, worst 2142 ms (the deadline firing).
+  - No processes or scratch directories were left.
+- **Regression tests** (`tests/run.sh`, "guard log never blocks"; a bounded runner using its own process group, killed with children after 8 s):
+  - FIFO cases for parsed, fallback, floor and lookup-failure ask, parsed and fallback deny, and no decision. Each asserts the decision, self-completion and at most 4 s, and that the FIFO is still a FIFO.
+  - A regular-log control: same decisions and exactly 6 lines.
+  - Deadline: a hanging Git reached only from the log write (`npm publish`). It asserts ask, self-completion within 4 s, and no stalled-Git process left after its 5 s lookup deadline.
+- Verification:
+  - `tests/run.sh`: 2154 passed, 0 failed, no leftover guard processes.
+  - `scripts/check.sh` with ShellCheck 0.11.0: `CHECK: PASSED`.
+  - Comparison with `1283cbf` (1357 commands, coordinator and backend): **0 decision changes**.
+  - `tests/run.sh` diff is add-only (+81).
+- **Ubuntu portability:** the same `set -m` process-group pattern as `hook-git.sh` and `run_classifier`, which already pass on the Ubuntu runner. `mkfifo`, `kill -KILL -- -PGID` and `sleep 0.1` are standard on Linux. The 4 s completion bound leaves 2 s of margin over the deadline on a slower runner. Not yet run in CI.
+- **Remaining limitations:**
+  - A blocked log destination can still add up to 2 s to a decision.
+  - A stalled hook-time Git is bounded by its own 5 s deadline, which predates this change.
+  - The attacker precondition and Claude Code's behaviour after a hook timeout remain untested, by owner instruction.
+
+## Release-gate items still open
+- **Performance target versus CI tolerance:** the spec states p95 under 150 ms (typical) and under 1 s (large input). The tests enforce CI tolerances (500 ms, 2500 ms). Measured: locally 8 KB 212 ms; CI 8 KB 253-371 ms, 250 KB heredoc 178-240 ms. Needs owner clarification (CodeRabbit thread open).
+- **Branch protection:** `main` has none, so the `check` job is not a required check. Owner decision.
+- Docstring coverage warning (50% against 80%): non-blocking.
+
 ## Finding status (verified facts only)
 | Finding | Status |
 | :- | :- |
