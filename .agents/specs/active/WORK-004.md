@@ -11,7 +11,7 @@ Replace WORK-002's interim owner-command transitions with signed owner approvals
 Decision record: the proposed signed-approval amendment in [ADR-0004](../../../docs/decisions/ADR-0004-work-authority-and-lifecycle.md). Context: [WORK-002](WORK-002.md).
 ## Prerequisites (2026-10-16)
 Implementation does not start until all of these hold:
-1. The owner closes G1 (item 3 below), on the G1-b proof of concept in Testing or an owner-chosen alternative.
+1. The owner closes G1 (item 3 below) on a passing proof of concept for the selected approval path: the G1-b proof of concept in Testing, or, if the owner selects an alternative, equivalent criteria for that path written into this spec and approved by the owner first.
 2. The owner accepts the signed-approval amendment to ADR-0004.
 3. The canonical approval record format is fixed in this spec. The G1-B v0-test prototype format (fixed-order ASCII `key: value`, separate transition and delivery namespaces) is the starting point; its assumptions F1–F9 are reviewed, not adopted automatically.
 4. The rollback-resistant replay store (item 5) is chosen.
@@ -41,7 +41,7 @@ Included:
    - **Provisional preference (2026-10-13):** a root-owned verification anchor in the Claude-running account, candidate `/Library/Application Support/ai-engineering/allowed_signers`, installed once by the owner with sudo. The private signing key stays isolated in the separate approver account (G1-b).
    - The verifier refuses unless every path component is root-owned, not group- or other-writable, and not a symlink.
    - Installation waits until the architecture and signing key are settled (under G1-b the key would be a new key in the approver account).
-3. **Trusted owner signer and approval path (G1, OPEN).** The owner must be able to review the exact request through a path the agent cannot modify, spoof or drive, and must be able to tell owner-initiated prompts from agent-initiated ones. Provisional architecture: **G1-b**, a separate macOS approver account (see Open decisions). Account separation alone is not treated as proof of security; G1 stays open until the G1-b proof of concept (Testing) passes and the owner separately approves closing G1.
+3. **Trusted owner signer and approval path (G1, OPEN).** The owner must be able to review the exact request through a path the agent cannot modify, spoof or drive, and must be able to tell owner-initiated prompts from agent-initiated ones. Provisional architecture: **G1-b**, a separate macOS approver account (see Open decisions). Account separation alone is not treated as proof of security; G1 stays open until the proof of concept for the selected path (Testing, or the owner-approved equivalent for an alternative) passes and the owner separately approves closing G1.
 4. **Guard integration for delivery policy.** This is the only guard change in this spec. It is an isolated commit with its own security review, built on WORK-001's classes.
    - **Delivery authority is bound to a signed delivery permission, not to a status value or any agent-writable file** (amended 2026-10-13). An agent-writable state file is never sufficient authority. At every deploy decision, including every repeat of the same deploy, the guard verifies afresh:
      - a signed delivery permission (item 1), against the trust anchor and in its namespace, whose `kind`, repository and work id match;
@@ -147,7 +147,7 @@ Deterministic cases in `tests/run.sh`:
   - **revocation limitation:** after `revoke` changes state, a forged return of state to `delivering` with an unexpired valid permission is documented as still verifying (a known limitation, recorded rather than hidden); the item's honest state asks;
   - **verification latency:** measured at deploy decisions on the target machine and recorded as an acceptance test; a timeout is chosen only from that measurement, and a verifier that exceeds it fails closed.
 
-**G1-b proof of concept** (owner-run; required before G1 can close and before O3). Each test records the exact command, outcome and macOS state:
+**G1-b proof of concept** (owner-run; required before G1 can close and before O3 if G1-b is selected; an alternative path needs equivalent owner-approved criteria, Prerequisite 1). Each test records the exact command, outcome and macOS state:
 - **Cross-account access:** from the Claude-running account, the approver account's Secretive agent socket, key container, keychain items, signer files and approval interface are unreachable (open, connect, read, list and launch attempts all fail). Processes in the approver session cannot be launched or driven from the Claude account.
 - **Approval provenance:** a prompt in the approver session appears only after an owner action there; an agent action in the Claude account produces no prompt there.
 - **Trusted presentation and request substitution:** the signer shows the record it derived; an agent changing the pending request, the spec or the repository's Git configuration between display and signing produces either a refused signature or a visible difference, never a signature over unseen bytes.
@@ -166,7 +166,7 @@ Not yet shown by the 2026-10-16 evidence: signing from a real repository snapsho
 2. Each transition approval and each delivery permission costs the owner one deliberate review and one authentication through the trusted approval path.
 3. No risk is accepted or waived, and no tier lowered, without a signed owner approval.
 4. Ephemeral preview deployment runs autonomously only under the conditions in item 4, including cryptographic verification at the deploy decision and a freshly computed spec hash that matches the signed hash. State alone never grants deploy authority. A spec changed since approval never keeps deploy authority. Production always asks.
-5. The G1-b proof of concept (or the owner-chosen alternative) passes, and the owner closes G1 before implementation of the approval path starts.
+5. The proof of concept for the selected approval path (G1-b in Testing, or the owner-approved equivalent for an alternative, Prerequisite 1) passes, and the owner closes G1 before implementation of the approval path starts.
 6. Guard verification latency at deploy decisions is measured and recorded, and any timeout derived from it fails closed.
 7. The documentation states that early revocation of an unexpired signed delivery permission is not cryptographically enforceable unless durable revocation ships, and no command, message or report claims that `revoke` invalidates a valid signature.
 8. Single-use enforcement of transition approvals is not considered satisfied until the final design passes the rollback replay test.

@@ -12,7 +12,7 @@ Accepted (by Ashley Oliver, 2026-10-06) as part of the v0.3 architecture. Implem
 - The superseded 2026-10-06 text is kept below, marked as superseded.
 
 **Proposed amendment (2026-10-16), pending the owner's acceptance: Path B.**
-- v0.3.0 ships the lifecycle with the **interim owner-command mechanism** (Decision, below) as the accepted mechanism for owner-only transitions. It is a workflow record, not security authority.
+- v0.3.0 ships the lifecycle with the **interim owner-command mechanism** (Decision, below) as the mechanism for owner-only transitions, once the owner accepts this amendment. It is a workflow record, not security authority.
 - The signed-approval amendment, replay protection, the trust anchor and autonomous deployment move to `WORK-004`. Their status is unchanged: proposed, not accepted, and G1 is OPEN.
 ## Context
 In the Landra F0 dogfood, authority was inferred from conversation:
