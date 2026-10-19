@@ -24,3 +24,12 @@ Append-only delivery narrative, written by the coordinator. Not sent to speciali
 - One full-gate run between the rounds failed the existing WORK-001 timing test "guard log deadline: the stalled git shim never ran" while the security re-check ran concurrently; the fast gate before it and the full gate after round 2 (run alone) passed. Treated as a load-sensitive flake, not a C1 defect.
 - Gates after round 2: `GATE fast: PASSED (exit 0) command: tests/run.sh`; `GATE full: PASSED (exit 0) command: scripts/check.sh` (2740 passed, 0 failed).
 - Deferred to the readiness increment: hook command targets in base `.claude/settings.json` as tier 2 (recorded in the spec requirement).
+
+## 2026-10-19: PR #9 review
+- CodeRabbit reviewed `db2132c`: 2 findings (release-notes order; no test that `check.sh` fails on an unknown pin). Both fixed in `4d1baa6`; full gate `GATE full: PASSED (exit 0) command: scripts/check.sh` (2742 passed, 0 failed); CI green.
+- CodeRabbit's re-review of `4d1baa6` was requested twice but did not arrive. On the owner's instruction the coordinator verified each fix (including a mutation check of the new `check.sh` test), replied with evidence and resolved both threads. Not a CodeRabbit approval.
+- PR #9 marked ready for review; merge awaits explicit owner approval. PR #8 (Path B) merged by owner approval as `164d821`; PR #9 needs no rebase.
+
+## 2026-10-19: C1 merged
+- Owner approved merging PR #9 at `4d1baa6`, accepting the residual risks recorded in the spec and acknowledging that CodeRabbit's re-review did not arrive. Merged with a head-commit check as `f71b540` (parents `164d821`, `4d1baa6`).
+- C1 (Scope items 1 and 15) is complete. The rest of WORK-003 remains open. G1 and production approval authority are unchanged.
