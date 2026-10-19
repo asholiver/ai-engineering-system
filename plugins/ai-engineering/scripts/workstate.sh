@@ -37,9 +37,13 @@
 #   deliver         A  marker "deliver": approved -> authorised -> delivering, or resume a paused
 #                      item. Refused for any other status.
 #   block           C  delivering -> blocked: --trigger <1-5> --question <text> [--options a,b]
+#   propose         C  record an open, non-blocking trigger-1 scope proposal while delivering
+#                      (status unchanged): --question <text> [--options a,b]. For a request that
+#                      would add scope without changing the approved work, which continues.
 #   answer          C  blocked -> delivering: --decision <id> [--answer <text>] [--by <name>].
 #                      Conversation answers are recorded as source "conversation". A trigger-3
 #                      decision must already have been answered through an approve sub-action.
+#                      Answering an open proposal records the answer and leaves the status as is.
 #   decision        C  record a non-blocking conversation decision (triggers 1, 2, 4, 5):
 #                      --trigger <n> --question <text> --answer <text>
 #   pause           C  authorised|delivering|blocked -> paused [--actor owner|coordinator]
@@ -54,7 +58,8 @@
 #   status          read-only: a compact JSON summary, including whether the spec hash still matches
 #   readiness       read-only: JSON listing for the readiness report [--inc <id>]: high or critical
 #                   findings and dispositions, owner-command risk and tier decisions (time, spec
-#                   hash), conversation decisions, open findings, pending owner actions
+#                   hash), conversation decisions, open decisions and proposals, open findings,
+#                   pending owner actions
 #
 # Spec-hash check: every mutating command except create, import and approve spec first compares
 # the SHA-256 of the spec file with the approved hash. A difference returns the item to proposed
@@ -125,7 +130,7 @@ def tier: type == "number" and . == floor and . >= 0 and . <= 2;
     need((.status == "proposed") == (.approval == null); "approval must be null exactly when status is proposed"),
     need((.delivery != null) == (.status | one_of(["proposed","approved"]) | not); "delivery must be set exactly when the status is past approved"),
     each_of("ownerActions"; need(type == "object" and (.id | text) and (.description | text) and (.increment | textOrNull) and (.status | one_of(["requested","done"])) and (.requestedAt | text) and (.doneAt | textOrNull); "ownerActions entry is invalid")),
-    each_of("decisions"; need(type == "object" and (.id | text) and (.trigger | (type == "number" and . >= 1 and . <= 5 and . == floor)) and (.question | text) and (.options | type == "array") and (.askedAt | text) and (.answeredAt | textOrNull) and (.answer | textOrNull) and (.source | (. == null or one_of(["owner-command","conversation"]))) and (.by | textOrNull); "decisions entry is invalid")),
+    each_of("decisions"; need(type == "object" and (.id | text) and (.trigger | (type == "number" and . >= 1 and . <= 5 and . == floor)) and (.question | text) and (.options | type == "array") and (.askedAt | text) and (.answeredAt | textOrNull) and (.answer | textOrNull) and (.source | (. == null or one_of(["owner-command","conversation"]))) and (.by | textOrNull) and (.blocking | (. == null or type == "boolean")); "decisions entry is invalid")),
     each_of("increments"; need(type == "object" and (.id | text) and (.title | text) and (.status | one_of(["planned","active","ready","merged"])) and (.proposedTier | tier) and (.tier | tier) and (.branch | textOrNull) and (.pr | textOrNull) and (.baseSha | textOrNull) and (.headSha | textOrNull) and (.mergeSha | textOrNull) and (.recoveries | (type == "number" and . >= 0 and . == floor)) and (.activeAt | textOrNull) and (.readyAt | textOrNull) and (.mergedAt | textOrNull) and (.evidence | type == "array"); "increments entry is invalid")),
     each_of("findings"; need(type == "object" and (.id | text) and (.source | text) and (.severity | one_of(["critical","high","medium","low","info"])) and (.security | type == "boolean") and (.summary | text) and (.disposition | (type == "object" and (.state | one_of(["open","fixed","invalid","owner"])) and ((.state != "fixed") or (.sha | text)) and ((.state != "invalid") or ((.evidence | text) and (.confirmedBy | textOrNull))) and ((.state != "owner") or ((.decisionId | text) and (.action | one_of(["accept","defer","tier"])))))); "findings entry is invalid")),
     each_of("history"; need(type == "object" and (.at | text) and (.transition | text) and (.actor | text); "history entry is invalid"))
@@ -553,18 +558,36 @@ cmd_block() {
       .status = "blocked"
       | .decisions += [{id: ("D" + ((.decisions | length) + 1 | tostring)), trigger: $trigger, question: $question,
                         options: (if $options == "" then [] else ($options | split(",")) end),
-                        askedAt: $now, answeredAt: null, answer: null, source: null, by: null}]' \
+                        askedAt: $now, answeredAt: null, answer: null, source: null, by: null, blocking: true}]' \
     --argjson trigger "$opt_trigger" --arg question "$opt_question" --arg options "$opt_options"
   echo "$id blocked (trigger $opt_trigger): decision D$(query '.decisions | length')"
 }
 
+cmd_propose() {
+  open_for_update
+  require_status propose delivering
+  transition_check
+  [ -z "$opt_trigger" ] || [ "$opt_trigger" = 1 ] || fail "$EXIT_USAGE" "propose records trigger 1 (scope) only; other triggers block"
+  need_text "--question" "$opt_question"
+  check_text "--options" "$opt_options"
+  mutate "scope proposal recorded (trigger 1, not blocking)" "coordinator" '
+      .decisions += [{id: ("D" + ((.decisions | length) + 1 | tostring)), trigger: 1, question: $question,
+                      options: (if $options == "" then [] else ($options | split(",")) end),
+                      askedAt: $now, answeredAt: null, answer: null, source: null, by: null, blocking: false}]' \
+    --arg question "$opt_question" --arg options "$opt_options"
+  echo "$id still delivering: scope proposal D$(query '.decisions | length') recorded for the owner (trigger 1)"
+}
+
 cmd_answer() {
   open_for_update
-  require_status answer blocked
+  require_status answer blocked delivering paused
   transition_check
   need_identifier "--decision" "$opt_decision"
   holds --arg d "$opt_decision" '.decisions | any(.id == $d)' || fail "$EXIT_INVALID_TRANSITION" "decision $opt_decision does not exist"
-  local trigger answered_by_owner
+  local trigger answered_by_owner proposal=no
+  holds --arg d "$opt_decision" '.decisions | any(.id == $d and .blocking == false)' && proposal=yes
+  [ "$proposal" = yes ] || [ "$status" = blocked ] \
+    || fail "$EXIT_INVALID_TRANSITION" "answer is not allowed while $id is $status, except for an open scope proposal"
   trigger="$(query --arg d "$opt_decision" '.decisions[] | select(.id == $d) | .trigger')"
   if [ "$trigger" = "3" ]; then
     holds --arg d "$opt_decision" '.decisions | any(.id == $d and .source == "owner-command" and .answeredAt != null)' \
@@ -577,11 +600,17 @@ cmd_answer() {
   fi
   local who="${opt_by:-owner}"
   check_text "--by" "$who"
-  mutate "blocked->delivering (answer $opt_decision)" "coordinator" '
-      .status = "delivering"
+  local transition="blocked->delivering (answer $opt_decision)"
+  [ "$proposal" = no ] || transition="scope proposal $opt_decision answered ($status unchanged)"
+  mutate "$transition" "coordinator" '
+      (if $proposal == "no" then .status = "delivering" else . end)
       | if $owner == "no" then .decisions |= map(if .id == $d then .answer = $answer | .answeredAt = $now | .source = "conversation" | .by = $by else . end) else . end' \
-    --arg d "$opt_decision" --arg answer "$opt_answer" --arg by "$who" --arg owner "$answered_by_owner"
-  echo "$id delivering again (decision $opt_decision answered)"
+    --arg d "$opt_decision" --arg answer "$opt_answer" --arg by "$who" --arg owner "$answered_by_owner" --arg proposal "$proposal"
+  if [ "$proposal" = yes ]; then
+    echo "$id still $status (scope proposal $opt_decision answered)"
+  else
+    echo "$id delivering again (decision $opt_decision answered)"
+  fi
 }
 
 cmd_decision() {
@@ -815,6 +844,8 @@ cmd_readiness() {
                        | {id, question, answer, at: .answeredAt, specSha256, by}],
       conversationDecisions: [.decisions[] | select(.source == "conversation")
                               | {id, trigger, question, answer, at: .answeredAt, by}],
+      openDecisions: [.decisions[] | select(.answeredAt == null)
+                      | {id, trigger, question, options, askedAt, blocking: (.blocking != false)}],
       openFindings: [.findings[] | select(.disposition.state == "open") | {id, severity, summary}],
       pendingOwnerActions: [.ownerActions[] | select(.status == "requested" and ($inc == "" or .increment == $inc))
                             | {id, description, increment, requestedAt}] }
@@ -961,6 +992,7 @@ case "$command_name" in
   approve) cmd_approve ;;
   deliver) cmd_deliver ;;
   block) cmd_block ;;
+  propose) cmd_propose ;;
   answer) cmd_answer ;;
   decision) cmd_decision ;;
   pause) cmd_pause ;;

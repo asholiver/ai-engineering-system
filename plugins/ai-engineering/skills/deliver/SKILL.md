@@ -40,6 +40,8 @@ Interrupt the owner only for these triggers, recorded with `workstate.sh block -
 4. a reserved operation (every deploy and other protected operation still asks);
 5. an ambiguity whose readings build different things.
 
+A request that would add scope (for example "we also need a CHANGELOG") while the approved work can still be delivered as approved is not a block: record it with `workstate.sh propose --question <text> --options <a,b>`, do not implement it, tell the owner in one line, and continue the approved scope. It stays open in readiness and the final status until answered. Block on trigger 1 only when the approved work cannot continue correctly without the answer.
+
 Specialists tag open questions with a proposed trigger. Resolve any that is not a trigger yourself and note the reasoning in the log. Do not decide a trigger yourself.
 
 ## Decisions
@@ -50,13 +52,14 @@ Specialists tag open questions with a proposed trigger. Resolve any that is not 
 1. Run the `review` skill procedure, the single home of review. Remediate as above, record the result as evidence, and re-run until clean or escalated.
 2. Write the increment's learnings once, collected during the work.
 3. Push the work branch and open or update the PR according to policy.
-4. Produce a readiness summary listing every fix of HIGH severity or above, and every owner-command decision that accepted, waived or deferred risk or lowered a tier.
+4. Produce a readiness summary (from `workstate.sh readiness`) listing every fix of HIGH severity or above, and every owner-command decision that accepted, waived or deferred risk or lowered a tier. It also lists every open decision or scope proposal.
 5. Wait for the owner's merge as a bounded background command: `"${CLAUDE_PLUGIN_ROOT}/scripts/wait-github.sh" merge <pr-number>` (run in the background). A `TIMEOUT` is recorded as the planned owner action "waiting for owner merge" (`workstate.sh owner-action-add --action-id <id> --description <text>`), not retried in a loop.
 6. When it reports `MERGED`, record the increment as merged and continue with the next increment without a prompt (apart from the guard confirmation when it starts).
 7. When every increment is merged, run `workstate.sh done`.
 
 ## Bounded recovery
-- A stalled or failed specialist is re-dispatched once with a fresh brief, recorded with `workstate.sh increment-recovery --inc <id>`. A second failure is escalated.
+- A stalled or failed specialist (it errors, is ended by the harness, or returns without a completion report) is re-dispatched once automatically with a fresh brief, without asking, recorded with `workstate.sh increment-recovery --inc <id>`. A second failure is escalated.
+- A specialist the owner stops is an owner instruction, not a stall: do not re-dispatch it. Record `workstate.sh pause --actor owner` and report; `/ai-engineering:deliver` resumes.
 - External waits (CI checks, merge) use `wait-github.sh`. `NOT AUTHENTICATED` becomes a planned owner action: the owner runs `gh auth login`. Never poll without it, and never read an error payload as data.
 
 ## Boundaries

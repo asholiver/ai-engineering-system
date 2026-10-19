@@ -4118,6 +4118,52 @@ run_ws deliver "$ws_id" --owner-command deliver
 expect_ws "resume a paused-from-blocked item" 0
 expect_equal "resume returns to blocked, not delivering" blocked "$(state_value .status)"
 
+# E2 (WORK-002 E2E): a request that only adds scope is an open proposal, not a block.
+new_item delivering
+run_ws propose "$ws_id" --question "add a CHANGELOG.md?" --options "amend-spec,separate-item"
+expect_ws "propose: a scope proposal is recorded while delivering" 0
+expect_equal "propose: delivery continues (status unchanged)" delivering "$(state_value .status)"
+expect_equal "propose: open trigger-1 decision marked not blocking" "D1 1 false null 2" "$(state_value '.decisions[0] | "\(.id) \(.trigger) \(.blocking) \(.answeredAt) \(.options | length)"')"
+expect_equal "propose: history records it as not blocking" "scope proposal recorded (trigger 1, not blocking)" "$(state_value '.history[-1].transition')"
+run_ws readiness "$ws_id"
+expect_equal "propose: readiness lists the open proposal" "D1 1 false" "$(jq -r '.openDecisions[0] | "\(.id) \(.trigger) \(.blocking)"' <<<"$ws_output")"
+run_ws status "$ws_id"
+expect_equal "propose: status counts the open decision" 1 "$(jq -r .openDecisions <<<"$ws_output")"
+run_ws evidence "$ws_id" --inc I1 --kind gate --result pass
+expect_ws "propose: approved work still records progress with the proposal open" 0
+run_ws answer "$ws_id" --decision D1 --answer "separate work item"
+expect_ws "propose: an open proposal can be answered while delivering" 0
+expect_equal "propose: the answer is recorded and the status is unchanged" "delivering conversation separate work item" "$(state_value '"\(.status) \(.decisions[0].source) \(.decisions[0].answer)"')"
+run_ws answer "$ws_id" --decision D1 --answer "again"
+expect_ws "propose: an answered proposal cannot be answered again" 3
+run_ws readiness "$ws_id"
+expect_equal "propose: an answered proposal leaves the open list" 0 "$(jq -r '.openDecisions | length' <<<"$ws_output")"
+run_ws propose "$ws_id" --trigger 3 --question "accept the risk?"
+expect_ws "propose: a trigger other than 1 is a usage error" 2
+run_ws propose "$ws_id" --question ""
+expect_ws "propose: a question is required" 2
+run_ws propose "$ws_id" --question "1"$'\n'"2"
+expect_ws "propose: control characters in the question are refused" 2
+# An open proposal never unblocks a blocked item, and a blocking decision is not answered outside blocked.
+new_item delivering
+ws propose "$ws_id" --question "add docs?" >/dev/null
+ws block "$ws_id" --trigger 2 --question "which library?" --options a,b >/dev/null
+run_ws answer "$ws_id" --decision D1 --answer "later"
+expect_ws "propose: answering a proposal while blocked is allowed" 0
+expect_equal "propose: answering a proposal does not unblock" blocked "$(state_value .status)"
+run_ws answer "$ws_id" --decision D2 --answer "a"
+expect_equal "propose: answering the blocking decision resumes delivery" delivering "$(state_value .status)"
+expect_equal "block: decisions from block are marked blocking" true "$(state_value '.decisions[1].blocking')"
+new_item blocked
+ws pause "$ws_id" >/dev/null
+run_ws answer "$ws_id" --decision D1 --answer "a"
+expect_ws "a blocking decision cannot be answered while paused" 3
+expect_equal "the paused item stays paused" paused "$(state_value .status)"
+new_item delivering
+printf 'changed\n' >>"$ws_directory/$ws_id.md"
+run_ws propose "$ws_id" --question "add docs?"
+expect_ws "propose: a spec change since approval stops the proposal" 6
+
 # Disallowed transitions: every one fails with exit 3 and changes nothing.
 while IFS='|' read -r target command_line; do
   [ -n "$target" ] || continue
@@ -4149,6 +4195,11 @@ approved|finding-add --finding F1 --source qa --severity low --summary s
 delivering|approve spec --owner-command approve
 delivering|deliver --owner-command deliver
 delivering|answer --decision D1 --answer x
+proposed|propose --question q
+approved|propose --question q
+blocked|propose --question q
+paused|propose --question q
+done|propose --question q
 delivering|archive
 delivering|increment-add --inc I2 --title Two --tier 0
 blocked|deliver --owner-command deliver
@@ -4732,6 +4783,14 @@ expect_contains "skill deliver: an expired wait is a planned owner action" "wait
 expect_contains "skill deliver: not authenticated is a planned owner action" "NOT AUTHENTICATED" "$deliver_text"
 expect_contains "skill deliver: finishes with done" "workstate.sh done" "$deliver_text"
 expect_contains "skill deliver: records one recovery" "workstate.sh increment-recovery" "$deliver_text"
+# WORK-002 E2E findings: E2 (scope request) and E3 (owner stop versus stall).
+expect_contains "skill deliver: a scope-only request is a non-blocking proposal" "workstate.sh propose --question" "$deliver_text"
+expect_contains "skill deliver: a proposal is not implemented and delivery continues" "do not implement it, tell the owner in one line, and continue the approved scope" "$deliver_text"
+expect_contains "skill deliver: block on trigger 1 only when the approved work cannot continue" "Block on trigger 1 only when the approved work cannot continue correctly without the answer" "$deliver_text"
+expect_contains "skill deliver: recovery is automatic and asks nothing" "re-dispatched once automatically with a fresh brief, without asking" "$deliver_text"
+expect_contains "skill deliver: an owner stop is a pause, not a stall" "A specialist the owner stops is an owner instruction, not a stall: do not re-dispatch it" "$deliver_text"
+expect_contains "skill deliver: an owner stop is recorded as an owner pause" "workstate.sh pause --actor owner" "$deliver_text"
+expect_contains "skill deliver: readiness lists open decisions and proposals" "every open decision or scope proposal" "$deliver_text"
 expect_contains "skill deliver: lean handoff excludes the log and legacy sections" 'Never pass the log, the conversation, or a legacy v0.2 "Implementation state" or "Review state" section' "$deliver_text"
 expect_contains "skill deliver: keeps the high-impact boundary" "the guard hook will ask the human" "$deliver_text"
 expect_contains "skill deliver: runs the fast gate through run-gate.sh" 'run-gate.sh" fast' "$deliver_text"
