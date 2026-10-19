@@ -224,6 +224,7 @@ End-to-end scenarios run deliberately in a scratch project, using unreleased sou
 - **Parallel worktrees** need dependencies installed (`.worktreeinclude`). Document; fall back to sequential when installation fails, recording why.
 - **Self-attested records (security review, 2026-10-19):** `finding-invalid --confirmed-by` and `increment-set --status merged` are recorded as the coordinator states them, not verified against the reviewer or Git. Accepted under the threat model (state is a workflow record); readiness and the owner's merge review remain the control.
 - **Effective tier (WORK-003):** `approve tier` records any tier; nothing in WORK-002 reads `.tier`. WORK-003 must compute the effective tier as the maximum of the state tier and the classifier floor, with a test that a state tier of 0 cannot go below a floor of 2.
+- **Commit statuses (security re-check, 2026-10-19):** `wait-github.sh checks <sha>` reads check runs only, not the legacy commit-statuses API. A missing status can only delay a pass, never fake one, and the merge stays the owner's. Accepted for v0.3.0.
 - **Background merge waits across long gaps.** Bounded; an expired wait records "waiting for owner merge" as a planned owner action, not an interruption.
 ## Acceptance criteria
 1. The transition script is the only supported state-transition interface. Owner-only transitions require the interim owner command and are recorded with `source: "owner-command"`. No guard decision or protected operation reads state as authority (amended 2026-10-16).
