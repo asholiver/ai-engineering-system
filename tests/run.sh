@@ -4164,6 +4164,89 @@ printf 'changed\n' >>"$ws_directory/$ws_id.md"
 run_ws propose "$ws_id" --question "add docs?"
 expect_ws "propose: a spec change since approval stops the proposal" 6
 
+# Security re-check M1: an earlier answered owner decision never resumes a later block.
+new_item delivering
+ws finding-add "$ws_id" --finding F1 --source qa --severity low --summary "s" >/dev/null
+ws approve "$ws_id" accept F1 --owner-command approve >/dev/null
+ws block "$ws_id" --trigger 3 --question "waive a security control?" >/dev/null
+run_ws answer "$ws_id" --decision D1
+expect_ws "M1: an earlier owner decision cannot resume a new trigger-3 block" 3
+expect_equal "M1: the item stays blocked on the trigger-3 decision" "blocked null" "$(state_value '"\(.status) \(.decisions[1].answeredAt)"')"
+run_ws deliver "$ws_id" --owner-command deliver
+expect_ws "M1: deliver cannot resume a block whose own decision is unanswered" 3
+expect_equal "M1: still blocked after the refused deliver" blocked "$(state_value .status)"
+new_item delivering
+ws finding-add "$ws_id" --finding F1 --source qa --severity low --summary "s" >/dev/null
+ws approve "$ws_id" accept F1 --owner-command approve >/dev/null
+ws block "$ws_id" --trigger 5 --question "which reading?" --options a,b >/dev/null
+run_ws answer "$ws_id" --decision D1 --answer "a"
+expect_ws "M1: an earlier owner decision cannot resume a trigger-5 block" 3
+expect_equal "M1: the trigger-5 block stays open" "blocked null" "$(state_value '"\(.status) \(.decisions[1].answeredAt)"')"
+run_ws deliver "$ws_id" --owner-command deliver
+expect_ws "M1: deliver cannot resume a trigger-5 block" 3
+run_ws answer "$ws_id" --decision D2 --answer "a"
+expect_ws "M1: the blocking decision itself resumes delivery" 0
+expect_equal "M1: delivering after the right answer" delivering "$(state_value .status)"
+
+# E2 re-test defect 1: /approve with --decision, then /deliver, resumes a trigger-3 block.
+new_item delivering
+ws finding-add "$ws_id" --finding F1 --source security-reviewer --severity low --summary "overflow" --security >/dev/null
+ws block "$ws_id" --trigger 3 --question "defer F1?" --options defer,accept >/dev/null
+run_ws deliver "$ws_id" --owner-command deliver
+expect_ws "resume: deliver is refused before the owner answers the trigger-3 decision" 3
+expect_contains "resume: the refusal names the open decision" "blocked on decision D1" "$ws_output"
+run_ws approve "$ws_id" defer F1 --decision D1 --owner-command approve
+expect_ws "resume: the owner answers through approve with --decision" 0
+expect_equal "resume: approve records the answer but does not change status" blocked "$(state_value .status)"
+run_ws deliver "$ws_id"
+expect_ws "resume: deliver without the owner-command marker is refused" 4
+run_ws deliver "$ws_id" --owner-command deliver
+expect_ws "resume: deliver resumes the blocked item after the owner's decision" 0
+expect_equal "resume: delivering, recorded as an owner-command resume" "delivering blocked->delivering (resumed after owner decision D1) owner-command:deliver" "$(state_value '"\(.status) \(.history[-1].transition) \(.history[-1].actor)"')"
+run_ws deliver "$ws_id" --owner-command deliver
+expect_ws "resume: deliver on a delivering item is still refused" 3
+new_item delivering
+ws finding-add "$ws_id" --finding F1 --source qa --severity low --summary "s" >/dev/null
+ws block "$ws_id" --trigger 3 --question "defer F1?" >/dev/null
+ws approve "$ws_id" defer F1 --decision D1 --owner-command approve >/dev/null
+printf 'changed\n' >>"$ws_directory/$ws_id.md"
+run_ws deliver "$ws_id" --owner-command deliver
+expect_ws "resume: a spec change since approval stops the resume" 6
+expect_equal "resume: the item is proposed again" proposed "$(state_value .status)"
+
+# E2 re-test defect 2: record a head SHA without a status change.
+new_item delivering
+ws increment-set "$ws_id" --inc I1 --status active >/dev/null
+active_at_before="$(state_value '.increments[0].activeAt')"
+run_ws increment-set "$ws_id" --inc I1 --status active --head-sha abc1234
+expect_ws "head sha: repeating the current status records fields only" 0
+expect_equal "head sha: recorded, still active, not ready" "abc1234 active null" "$(state_value '.increments[0] | "\(.headSha) \(.status) \(.readyAt)"')"
+expect_equal "head sha: activeAt unchanged" "$active_at_before" "$(state_value '.increments[0].activeAt')"
+expect_equal "head sha: history shows no status change" "increment I1 updated" "$(state_value '.history[-1].transition')"
+run_ws increment-set "$ws_id" --inc I1 --head-sha def5678
+expect_ws "head sha: recorded with no --status" 0
+expect_equal "head sha: the newer sha replaces it" "def5678 active" "$(state_value '.increments[0] | "\(.headSha) \(.status)"')"
+run_ws increment-set "$ws_id" --inc I1
+expect_ws "head sha: increment-set with nothing to record is a usage error" 2
+run_ws increment-set "$ws_id" --inc I1 --head-sha "not-a-sha"
+expect_ws "head sha: a malformed sha is refused" 2
+ws increment-set "$ws_id" --inc I1 --status ready >/dev/null
+ready_at_before="$(state_value '.increments[0].readyAt')"
+run_ws increment-set "$ws_id" --inc I1 --status ready --head-sha 0123abc
+expect_equal "head sha: ready -> ready keeps readyAt" "0 $ready_at_before ready" "$ws_status $(state_value '.increments[0] | "\(.readyAt) \(.status)"')"
+ws increment-set "$ws_id" --inc I1 --status merged --merge-sha abc1234 >/dev/null
+run_ws increment-set "$ws_id" --inc I1 --status merged --merge-sha def5678
+expect_ws "head sha: merged -> merged stays refused" 3
+
+# Security re-check I1: decisions without a blocking field count as blocking, never as proposals.
+new_item delivering
+ws propose "$ws_id" --question "add docs?" >/dev/null
+jq 'del(.decisions[0].blocking)' "$(state_path)" >"$work_directory/legacy-state.json" && mv "$work_directory/legacy-state.json" "$(state_path)"
+run_ws answer "$ws_id" --decision D1 --answer "later"
+expect_ws "I1: a decision with no blocking field is not answerable as a proposal" 3
+run_ws readiness "$ws_id"
+expect_equal "I1: readiness reports it as blocking" true "$(jq -r '.openDecisions[0].blocking' <<<"$ws_output")"
+
 # Disallowed transitions: every one fails with exit 3 and changes nothing.
 while IFS='|' read -r target command_line; do
   [ -n "$target" ] || continue
@@ -4791,6 +4874,13 @@ expect_contains "skill deliver: recovery is automatic and asks nothing" "re-disp
 expect_contains "skill deliver: an owner stop is a pause, not a stall" "A specialist the owner stops is an owner instruction, not a stall: do not re-dispatch it" "$deliver_text"
 expect_contains "skill deliver: an owner stop is recorded as an owner pause" "workstate.sh pause --actor owner" "$deliver_text"
 expect_contains "skill deliver: readiness lists open decisions and proposals" "every open decision or scope proposal" "$deliver_text"
+# Security re-check L1, L2 and E2 re-test defects.
+expect_contains "skill deliver: an accepted proposal is never built under the current approval" "scope the owner accepts is never implemented under the current approval" "$deliver_text"
+expect_contains "skill deliver: an unclear stop is treated as an owner stop" "If it is unclear whether the owner stopped it, treat it as an owner stop" "$deliver_text"
+expect_contains "skill deliver: only the blocking decision resumes" "Only the decision that caused the block resumes it" "$deliver_text"
+expect_contains "skill deliver: deliver resumes after approve --decision" "then \`/ai-engineering:deliver <WORK-ID>\`" "$deliver_text"
+expect_contains "skill deliver: fields can be recorded without a status change" "omit \`--status\`" "$deliver_text"
+expect_contains "skill approve: points to deliver to resume after a decision" "suggest \`/ai-engineering:deliver <WORK-ID>\` to resume it" "$approve_text"
 expect_contains "skill deliver: lean handoff excludes the log and legacy sections" 'Never pass the log, the conversation, or a legacy v0.2 "Implementation state" or "Review state" section' "$deliver_text"
 expect_contains "skill deliver: keeps the high-impact boundary" "the guard hook will ask the human" "$deliver_text"
 expect_contains "skill deliver: runs the fast gate through run-gate.sh" 'run-gate.sh" fast' "$deliver_text"

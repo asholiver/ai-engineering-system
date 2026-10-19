@@ -21,7 +21,7 @@ Add `--note "<text>"` when the owner gave a reason, and `--decision <id>` when r
 
 ## Report
 Print the script's output, then say what changed in one line. Map the exit code:
-- 0: done. After `spec`, suggest `/ai-engineering:deliver <WORK-ID>`.
+- 0: done. After `spec`, suggest `/ai-engineering:deliver <WORK-ID>`. After `accept`, `defer` or `tier` with `--decision` on a blocked item, suggest `/ai-engineering:deliver <WORK-ID>` to resume it.
 - 2: usage error; show the accepted forms above.
 - 3: invalid transition (wrong status, unknown record or rule not met); say what status is needed.
 - 4: owner command missing; the marker was not accepted.

@@ -35,15 +35,19 @@
 #                      accept, defer and tier accept [--decision <id>] to resolve an open trigger-3
 #                      decision, and [--note <text>].
 #   deliver         A  marker "deliver": approved -> authorised -> delivering, or resume a paused
-#                      item. Refused for any other status.
+#                      item, or resume a blocked item whose blocking decision is trigger 3 and
+#                      was answered by an approve sub-action. Refused for any other status.
 #   block           C  delivering -> blocked: --trigger <1-5> --question <text> [--options a,b]
 #   propose         C  record an open, non-blocking trigger-1 scope proposal while delivering
 #                      (status unchanged): --question <text> [--options a,b]. For a request that
 #                      would add scope without changing the approved work, which continues.
 #   answer          C  blocked -> delivering: --decision <id> [--answer <text>] [--by <name>].
+#                      Only the decision that caused the current block resumes it.
 #                      Conversation answers are recorded as source "conversation". A trigger-3
 #                      decision must already have been answered through an approve sub-action.
-#                      Answering an open proposal records the answer and leaves the status as is.
+#                      Answering an open proposal records the owner's choice only and leaves the
+#                      status as is: accepted scope is never delivered under the current approval
+#                      (it needs a spec change and approve spec, or a separate work item).
 #   decision        C  record a non-blocking conversation decision (triggers 1, 2, 4, 5):
 #                      --trigger <n> --question <text> --answer <text>
 #   pause           C  authorised|delivering|blocked -> paused [--actor owner|coordinator]
@@ -515,15 +519,31 @@ record_owner_decision() { # kind finding tier-spec actor by
   echo "$id: $kind recorded as decision $decision_id (owner-command; a workflow record, not security authority)"
 }
 
+# The decision that caused the current block: the most recent decision created by block.
+# Decisions without a blocking field (written before it existed) never count, so such an item
+# cannot resume through answer or deliver.
+current_block_id() { query '[.decisions[] | select(.blocking == true)] | last | .id // ""'; }
+
 cmd_deliver() {
   require_owner_command deliver
   open_for_update
   case "$status" in
-    approved | paused) ;;
-    *) fail "$EXIT_INVALID_TRANSITION" "deliver is refused: $id is $status; deliver applies only to an approved item or a paused item" ;;
+    approved | paused | blocked) ;;
+    *) fail "$EXIT_INVALID_TRANSITION" "deliver is refused: $id is $status; deliver applies only to an approved item, a paused item, or a blocked item whose trigger-3 decision the owner has answered" ;;
   esac
   snapshot_spec
   transition_check
+  if [ "$status" = blocked ]; then
+    # Resume only when the decision that caused the block is a trigger-3 decision the owner has
+    # answered through an approve sub-action. Other triggers are answered in conversation (answer).
+    local block_id
+    block_id="$(current_block_id)"
+    holds --arg d "$block_id" '.decisions | any(.id == $d and .trigger == 3 and .source == "owner-command" and .answeredAt != null)' \
+      || fail "$EXIT_INVALID_TRANSITION" "deliver is refused: $id is blocked on decision ${block_id:-?}, which is not a trigger-3 decision answered by the owner's approve command. Answer it first (trigger 3: /ai-engineering:approve <accept|defer|tier> ... --decision ${block_id:-<id>}; other triggers: in conversation)."
+    mutate "blocked->delivering (resumed after owner decision $block_id)" "owner-command:deliver" '.status = "delivering"'
+    echo "$id delivering again (decision $block_id answered by the owner; owner-command; a workflow record, not security authority)"
+    return 0
+  fi
   if [ "$status" = approved ] && [ "$(query '.approval.source')" = imported ]; then
     fail "$EXIT_INVALID_TRANSITION" "deliver is refused: the approval of $id was imported from a v0.2 Status line, and v0.2 authority is never v0.3 authority. Approve the current spec first with /ai-engineering:approve $id spec, then deliver."
   fi
@@ -588,6 +608,14 @@ cmd_answer() {
   holds --arg d "$opt_decision" '.decisions | any(.id == $d and .blocking == false)' && proposal=yes
   [ "$proposal" = yes ] || [ "$status" = blocked ] \
     || fail "$EXIT_INVALID_TRANSITION" "answer is not allowed while $id is $status, except for an open scope proposal"
+  if [ "$proposal" = no ]; then
+    # Only the decision that caused the current block can resume it; an earlier answered
+    # decision (for example an unrelated owner-command decision) never can.
+    local block_id
+    block_id="$(current_block_id)"
+    [ "$opt_decision" = "$block_id" ] \
+      || fail "$EXIT_INVALID_TRANSITION" "decision $opt_decision is not the decision that blocked $id (${block_id:-none recorded}); only that decision resumes delivery"
+  fi
   trigger="$(query --arg d "$opt_decision" '.decisions[] | select(.id == $d) | .trigger')"
   if [ "$trigger" = "3" ]; then
     holds --arg d "$opt_decision" '.decisions | any(.id == $d and .source == "owner-command" and .answeredAt != null)' \
@@ -691,8 +719,15 @@ cmd_increment_set() {
   need_sha "--merge-sha" "$opt_merge_sha"
   check_text "--branch" "$opt_branch"
   check_text "--pr" "$opt_pr"
+  [ -n "$opt_status$opt_branch$opt_pr$opt_base_sha$opt_head_sha$opt_merge_sha" ] \
+    || fail "$EXIT_USAGE" "increment-set needs --status or at least one of --branch, --pr, --base-sha, --head-sha, --merge-sha"
   local current
   current="$(query --arg i "$opt_inc" '.increments[] | select(.id == $i) | .status')"
+  # Repeating the current status records fields only (for example a new head SHA while active);
+  # it changes no status or timestamp. merged -> merged stays refused.
+  if [ -n "$opt_status" ] && [ "$opt_status" = "$current" ] && [ "$current" != merged ]; then
+    opt_status=""
+  fi
   if [ -n "$opt_status" ]; then
     case "$current>$opt_status" in
       planned\>active | active\>ready | ready\>active | ready\>merged) ;;
