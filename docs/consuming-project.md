@@ -43,10 +43,18 @@ The project should not silently receive changed hooks. The plugin pins `version`
 2. Change the `ref` in `.claude/settings.json` to the new tag and commit it.
 3. Each developer runs `claude plugin update ai-engineering@ai-engineering-system` (or `/plugin`) and `/reload-plugins`.
 
-Limits: a marketplace `ref` can be a branch or tag but not a commit SHA, and tags can be moved, so this is not tamper-proof. A developer who already registered the marketplace under the same name keeps their existing registration; check with `/plugin`.
+4. Verify the upgrade took effect: start a new session and read the session banner (`ai-engineering <version>, plugin root <path>`). If it shows the old version or an unexpected root, an existing registration is still active; check with `/plugin`.
+
+Limits: a marketplace `ref` can be a branch or tag but not a commit SHA, and tags can be moved, so this is not tamper-proof. A developer who already registered the marketplace under the same name keeps their existing registration; check with `/plugin`, which is why the banner check matters.
+
+## Importing v0.2 work items
+v0.2 specs have no state file. Run `/ai-engineering:setup` and use its import step: it runs `workstate.sh import` for each spec, reading the Status line (Draft or Approved). Import never produces an `authorised` or `delivering` item and never rewrites the spec; approve and deliver again through `/ai-engineering:approve` and `/ai-engineering:deliver`. It is safe to repeat. Historical merged increments are added only when you confirm them. Imported records are workflow records, not security authority; see [work items](architecture.md#work-items-state-and-authority).
 
 ## Parallel worktrees
-`/setup` asks before adding `"worktree": {"baseRef": "head"}`. Without it, `/ai-engineering:deliver` runs tasks sequentially, because Claude Code's default worktree base is the remote default branch.
+`/setup` writes `"worktree": {"baseRef": "head"}` by default and tells you the effect: your own `claude --worktree` sessions then branch from the current HEAD instead of the remote default branch. To opt out, delete the `worktree` key from `.claude/settings.json`. `/ai-engineering:deliver` runs tasks sequentially in one checkout by default; parallel worktrees are opt-in per delivery and need this setting, because Claude Code's default worktree base would not contain the work branch.
+
+## GitHub authentication
+Delivery waits for CI checks and for your merge through authenticated `gh` (`scripts/wait-github.sh`). Run `gh auth login` first. Without it the wait reports `NOT AUTHENTICATED`, which delivery records as an action for you; it never polls unauthenticated.
 
 ## gates.json
 ```json

@@ -301,8 +301,8 @@ D2, D3 and D5 remain resolved (see `WORK-001-planning.md`); D1 is superseded.
 <!-- v0.2 deliver records task status and verdict lines here. Keep entries to one line each; put detailed evidence in WORK-002.log.md. -->
 - Delivery (owner-authorised 2026-10-19; branch `feature/work-002-lifecycle` from `f71b540`; v0.2 deliver, sequential in the main checkout; playbook: feature; Opus security review required):
   - B1 backend: state schema, transition script, owner-command source, policy validation, v0.2 import, guard-parity tests (Scope 1–3, 6, 7, 18; AC1, 3, 7, 12, 13). Status: done; `workstate.sh`; `GATE fast: PASSED (exit 0) command: tests/run.sh` (3069 passed, 0 failed); guard and hook files unchanged.
-  - B2 backend: `/approve` skill, `/deliver` rewrite, `/plan` template, `/setup` (baseRef, import, banner), agent wording, wait helper, recovery (Scope 4, 5, 8–17; AC2, 4–6, 8–11, 14, 16). Status: B2a done (approve skill, deliver entry transition, plan template, setup, banner, agent wording, `wait-github.sh`); `GATE full: PASSED (exit 0) command: scripts/check.sh` (3160 passed, 0 failed). B2b (rest of the `/deliver` rewrite): in progress.
-  - B3 coordinator: docs, CHANGELOG, E1–E3 evidence in a scratch project, gates, reviews. Status: planned.
+  - B2 backend: `/approve` skill, `/deliver` rewrite, `/plan` template, `/setup` (baseRef, import, banner), agent wording, wait helper, recovery (Scope 4, 5, 8–17; AC2, 4–6, 8–11, 14, 16). Status: B2a done (approve skill, deliver entry transition, plan template, setup, banner, agent wording, `wait-github.sh`); `GATE full: PASSED (exit 0) command: scripts/check.sh` (3160 passed, 0 failed). B2b done (`/deliver` rewrite; `review` records evidence for items with state); `GATE full: PASSED (exit 0) command: scripts/check.sh` (3196 passed, 0 failed).
+  - B3 coordinator: docs, CHANGELOG, E1–E3 evidence in a scratch project, gates, reviews. Status: docs and CHANGELOG done with B2b; QA and Opus security review in progress; E1–E3 planned (owner action: type `/approve` and `/deliver` in a scratch project).
 ## Review state
 <!-- v0.2 review records its status block here. -->
 -

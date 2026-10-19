@@ -253,7 +253,7 @@ It never overwrites existing files without showing you the change first, and it 
 - `.agents/gates.json`, after confirming your `fast` and `full` gate commands with you (`externalReview` stays empty until you configure one);
 - a project-specific `AGENTS.md`, and a `CLAUDE.md` that imports it so it keeps loading;
 - `.claude/settings.json` entries that enable the plugin for everyone who clones the project once they trust the folder, and register the marketplace pinned to the installed plugin's release tag, with auto-update off, on machines that don't already have a marketplace named `ai-engineering-system`. A machine that already has one keeps its existing registration, which may point at a different release; check with `/plugin`;
-- optionally, the worktree setting needed for parallel delivery.
+- the `worktree.baseRef: "head"` setting (with the documented opt-out, see [consuming-project.md](docs/consuming-project.md#parallel-worktrees)).
 
 Review and commit what it creates. Until `.agents/gates.json` is committed, implementation checks use the uncommitted file with a warning, and review reads the full gate and the external review command only from the base branch.
 
@@ -263,14 +263,19 @@ After setup, nothing else needs installing: open the project in Claude Code and 
 
 ```text
 /ai-engineering:plan WORK-001      discuss, decide, then write the work specification and ADRs
-/ai-engineering:deliver WORK-001   implement the approved specification through specialist agents
+/ai-engineering:approve WORK-001   record your decision: approve the spec, accept or defer a finding, lower a tier, revoke (human only)
+/ai-engineering:deliver WORK-001   authorise and run the approved specification through specialist agents
 /ai-engineering:review WORK-001    full gate, security and QA checks, independent review
 /ai-engineering:learn              record a learning, regression or incident
 ```
 
-Planning ends with a work specification you explicitly approve. Delivery stops at any decision the specification doesn't make. Review reports whether the work is ready for your final acceptance.
+Planning ends with a work specification. You approve it with `/ai-engineering:approve`, then authorise delivery with `/ai-engineering:deliver`; a conversational "yes" never changes a work item's status. The lifecycle is `proposed`, `approved`, `authorised`, `delivering` (or `blocked`, `paused`), `done`, `archived`. Review reports whether the work is ready for your final acceptance.
 
-Multiple unrelated work streams can run in the same repository, each with its own specification and state. Parallel implementation uses git worktree isolation once the project opts in.
+What runs without prompts once you authorise delivery: fixes inside the approved intent, commits, pushing the work branch, opening or updating the increment pull request (per the spec's delivery policy), gates, review and moving on to the next increment after you merge. Delivery interrupts you only for an intent or scope change, an owner-level trade-off, accepting or downgrading risk, a reserved operation, or an ambiguity. Starting each increment from the updated default branch asks one guard confirmation, and that confirmation pre-authorises nothing else. Every deploy, merge, release, publish, protected push and other reserved operation still asks, whatever the work item's state says. You merge; delivery never does.
+
+The owner commands are workflow records, not security authority, and no guard reads them. Signed approvals and autonomous deployment are planned for WORK-004. See [the architecture](docs/architecture.md#work-items-state-and-authority).
+
+Multiple unrelated work streams can run in the same repository, each with its own specification and state. Tasks run sequentially in one checkout by default; parallel implementation with git worktrees is opt-in.
 
 ### Develop or test unreleased changes
 

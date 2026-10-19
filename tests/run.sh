@@ -4564,6 +4564,45 @@ deliver_text="$(cat "$plugin_directory/skills/deliver/SKILL.md")"
 expect_contains "skill deliver: first action is the deliver transition" 'workstate.sh" deliver $ARGUMENTS --owner-command deliver' "$deliver_text"
 expect_contains "skill deliver: refuses a v0.2 item and points to setup import" "/ai-engineering:setup" "$deliver_text"
 case "$deliver_text" in *".state.json"*) fail "skill deliver: must not name a state file path" ;; *) pass ;; esac
+# WORK-002 B2b: the rewritten procedure.
+expect_contains "skill deliver: sequential in one checkout by default" "Run tasks sequentially in one checkout by default" "$deliver_text"
+expect_contains "skill deliver: parallel worktrees are opt-in" "Parallel worktrees are opt-in" "$deliver_text"
+expect_contains "skill deliver: one guard confirmation per increment start" "Starting an increment from the updated default branch asks one guard confirmation" "$deliver_text"
+expect_contains "skill deliver: each worktree merge also asks" "each worktree merge also asks" "$deliver_text"
+expect_contains "skill deliver: confirmation never pre-authorises another prompt" "never replaces, suppresses or pre-authorises any other guard prompt" "$deliver_text"
+expect_contains "skill deliver: owner-command records are not security authority" "workflow records, not security authority" "$deliver_text"
+expect_contains "skill deliver: coordinator owns Git, never merges" "never merge" "$deliver_text"
+expect_contains "skill deliver: specialists edit and test only" "Specialists edit files and run tests only" "$deliver_text"
+expect_contains "skill deliver: trigger 1" "1. intent or scope change" "$deliver_text"
+expect_contains "skill deliver: trigger 2" "2. an owner-level trade-off" "$deliver_text"
+expect_contains "skill deliver: trigger 3" "3. accepting, waiving, deferring or downgrading risk, or disputing a security finding" "$deliver_text"
+expect_contains "skill deliver: trigger 4" "4. a reserved operation" "$deliver_text"
+expect_contains "skill deliver: trigger 5" "5. an ambiguity whose readings build different things" "$deliver_text"
+expect_contains "skill deliver: blocks with a trigger class" "workstate.sh block --trigger" "$deliver_text"
+expect_contains "skill deliver: weakening a control is trigger 3" "Weakening a test, gate or control to clear a finding is trigger 3" "$deliver_text"
+expect_contains "skill deliver: records fixes" "workstate.sh finding-fixed" "$deliver_text"
+expect_contains "skill deliver: security findings need the reviewer's confirmation" "--confirmed-by" "$deliver_text"
+expect_contains "skill deliver: conversation decisions are recorded" "source \`conversation\`" "$deliver_text"
+expect_contains "skill deliver: risk, tier and scope need approve" "Accepting risk, lowering a tier and adding scope need \`/ai-engineering:approve\`" "$deliver_text"
+expect_contains "skill deliver: runs the review skill procedure" "Run the \`review\` skill procedure" "$deliver_text"
+expect_contains "skill deliver: readiness lists HIGH-or-above fixes and risk decisions" "every fix of HIGH severity or above, and every owner-command decision" "$deliver_text"
+expect_contains "skill deliver: waits for the merge in the background" 'wait-github.sh" merge' "$deliver_text"
+expect_contains "skill deliver: an expired wait is a planned owner action" "waiting for owner merge" "$deliver_text"
+expect_contains "skill deliver: not authenticated is a planned owner action" "NOT AUTHENTICATED" "$deliver_text"
+expect_contains "skill deliver: finishes with done" "workstate.sh done" "$deliver_text"
+expect_contains "skill deliver: records one recovery" "workstate.sh increment-recovery" "$deliver_text"
+expect_contains "skill deliver: lean handoff excludes the log and legacy sections" 'Never pass the log, the conversation, or a legacy v0.2 "Implementation state" or "Review state" section' "$deliver_text"
+expect_contains "skill deliver: keeps the high-impact boundary" "the guard hook will ask the human" "$deliver_text"
+expect_contains "skill deliver: runs the fast gate through run-gate.sh" 'run-gate.sh" fast' "$deliver_text"
+case "$deliver_text" in *"## Prove"*) fail "skill deliver: the Prove section is removed" ;; *) pass ;; esac
+case "$deliver_text" in *[Pp]laybook*) fail "skill deliver: playbook selection is removed" ;; *) pass ;; esac
+case "$deliver_text" in *"goes to the user"*) fail "skill deliver: 'goes to the user' is removed" ;; *) pass ;; esac
+case "$deliver_text" in *"Record the task list under"*) fail "skill deliver: must not write the legacy Implementation state" ;; *) pass ;; esac
+case "$deliver_text" in *[Ss]igned* | *"autonomous deploy"*" is "*) fail "skill deliver: must not claim signing or autonomous deployment" ;; *) pass ;; esac
+# A review that wrote into the spec would change its hash and stop delivery.
+review_text="$(cat "$plugin_directory/skills/review/SKILL.md")"
+expect_contains "skill review: items with state are recorded as evidence, not in the spec" "never edit the spec" "$review_text"
+expect_contains "skill review: items with state use workstate.sh evidence" "workstate.sh evidence" "$review_text"
 
 work_spec_template="$plugin_directory/skills/plan/templates/work-spec.md"
 for template_section in "## Increments" "## Delivery policy" "## Owner actions"; do

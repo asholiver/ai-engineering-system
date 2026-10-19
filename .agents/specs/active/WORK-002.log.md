@@ -25,3 +25,9 @@ Append-only delivery narrative, written by the coordinator. Not sent to speciali
 - Process deviation: the specialist applied part of that fix with a small scripted text edit instead of Edit only. The coordinator checked the resulting `tests/run.sh` diff against HEAD: 169 lines added, none removed, only line-scoped disables.
 - Coordinator decisions (inside intent): `wait-github.sh` treats all-digit targets of up to 6 characters as PR numbers and 7–40 hex characters as SHAs; `/plan` adds increments only while `proposed` and otherwise relies on the spec-hash revert.
 - Coordinator ran the full gate: `GATE full: PASSED (exit 0) command: scripts/check.sh` (3160 passed, 0 failed; always loaded 6474 of 7000 bytes).
+
+## 2026-10-19: B2b `/deliver` rewrite and docs
+- Backend specialist rewrote `skills/deliver/SKILL.md` (sequential default, parallel opt-in, one guard confirmation per increment start that pre-authorises nothing else, five triggers, remediation, readiness summary, background merge waits, bounded recovery, lean handoffs, removals) and updated README, architecture, consuming-project, model-policy and the 0.3.0 CHANGELOG. Edit/Write only; no scripted edits.
+- Coordinator fix (inside intent): the `review` skill wrote its status block into the spec, which would change the spec hash and stop delivery (AC7). For items with state it now never edits the spec, and `/deliver` records the result with `workstate.sh evidence`; v0.2 items are unchanged. Tests added. Further review content changes stay with WORK-003.
+- Noted for E1: resuming after a session restart when a merge happened during an expired wait relies on reading state; to be exercised end to end.
+- Coordinator ran the full gate: `GATE full: PASSED (exit 0) command: scripts/check.sh` (3196 passed, 0 failed).
