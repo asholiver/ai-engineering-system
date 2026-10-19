@@ -64,7 +64,7 @@ Included:
    - Preconditions read state, not prose.
    - It prints a display-only delivery summary (scope, increments, tiers, policy, planned owner actions) without asking a confirmation question.
    - It plans tasks as a dependency graph by file area.
-   - It runs independent tasks in parallel worktrees by default.
+   - It runs tasks sequentially in one checkout by default; parallel worktrees for independent tasks are opt-in. Starting an increment from the updated default branch asks one guard confirmation, because WORK-001's guard asks on branch switches and merges and this spec makes no guard change. That confirmation never replaces, suppresses or pre-authorises any other guard prompt (deploy, merge, publish, protected push or other reserved operation). With parallel worktrees opted in, each worktree merge also asks (amended 2026-10-19, owner decision).
    - It runs the fast gate after each task.
    - It remediates inside intent.
    - At the end of each increment it runs the review procedure (single home: the `review` skill; WORK-003 makes that the readiness procedure).
@@ -232,7 +232,7 @@ End-to-end scenarios run deliberately in a scratch project, using unreleased sou
 6. HIGH-or-above fixes appear in the readiness report. No risk is accepted or waived silently: each owner-command decision that accepts, waives or defers risk, or lowers a tier, is listed in the readiness report (amended 2026-10-16).
 7. A spec change returns the item to `proposed`.
 8. Specialists never perform Git writes. The coordinator owns branches, commits, merges, pushes and PRs.
-9. Parallel worktrees are the default, and the opt-out is documented.
+9. Sequential execution is the default; parallel worktrees are opt-in and documented. The only guard confirmation added by routine delivery is one per increment start (plus one per worktree merge when parallel is opted in), and it pre-authorises nothing else (amended 2026-10-19).
 10. Specialist handoffs exclude the log and legacy state sections.
 11. Stalls are recovered once automatically. External waits run in the background, authenticated, validated and bounded.
 12. Guard parity: every deploy class and reserved operation asks exactly as before WORK-002, whatever the state says (test above). No autonomous deployment in v0.3.0; production always asks (amended 2026-10-16).
@@ -282,7 +282,7 @@ End-to-end scenarios run deliberately in a scratch project, using unreleased sou
 - Remediation depends on fix versus accept, not severity.
 - No pre-authorisation write hook.
 - One PR per meaningful increment by default (not an invariant).
-- Parallel worktrees by default with an opt-out.
+- Parallel worktrees by default with an opt-out. **Amended 2026-10-19:** sequential by default, parallel worktrees opt-in; one guard confirmation per increment start (Scope item 8).
 - Coordinator-owned Git.
 - Deployment authority as clarified on 2026-10-06 (preview autonomous under policy; persistent only if pre-authorised; production owner-only). **Amended 2026-10-13:** preview and pre-authorised persistent deploys run autonomously only while a valid signed delivery permission covers that increment and action; on expiry or absence they pause for fresh owner approval. **Amended 2026-10-16:** autonomous deployment moves to WORK-004; in v0.3.0 every deploy asks.
 - The command-token mechanism. **Superseded 2026-10-13** by owner signatures (now WORK-004; interim owner commands in v0.3.0, Scope item 3).
@@ -301,7 +301,7 @@ D2, D3 and D5 remain resolved (see `WORK-001-planning.md`); D1 is superseded.
 <!-- v0.2 deliver records task status and verdict lines here. Keep entries to one line each; put detailed evidence in WORK-002.log.md. -->
 - Delivery (owner-authorised 2026-10-19; branch `feature/work-002-lifecycle` from `f71b540`; v0.2 deliver, sequential in the main checkout; playbook: feature; Opus security review required):
   - B1 backend: state schema, transition script, owner-command source, policy validation, v0.2 import, guard-parity tests (Scope 1–3, 6, 7, 18; AC1, 3, 7, 12, 13). Status: done; `workstate.sh`; `GATE fast: PASSED (exit 0) command: tests/run.sh` (3069 passed, 0 failed); guard and hook files unchanged.
-  - B2 backend: `/approve` skill, `/deliver` rewrite, `/plan` template, `/setup` (baseRef, import, banner), agent wording, wait helper, recovery (Scope 4, 5, 8–17; AC2, 4–6, 8–11, 14, 16). Status: planned (after B1).
+  - B2 backend: `/approve` skill, `/deliver` rewrite, `/plan` template, `/setup` (baseRef, import, banner), agent wording, wait helper, recovery (Scope 4, 5, 8–17; AC2, 4–6, 8–11, 14, 16). Status: B2a done (approve skill, deliver entry transition, plan template, setup, banner, agent wording, `wait-github.sh`); `GATE full: PASSED (exit 0) command: scripts/check.sh` (3160 passed, 0 failed). B2b (rest of the `/deliver` rewrite): in progress.
   - B3 coordinator: docs, CHANGELOG, E1–E3 evidence in a scratch project, gates, reviews. Status: planned.
 ## Review state
 <!-- v0.2 review records its status block here. -->

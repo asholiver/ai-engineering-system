@@ -9,7 +9,8 @@ disable-model-invocation: true
 Coordinate approved work efficiently. You are the coordinator, not the architecture owner.
 
 ## Preconditions
-- Read `.agents/specs/active/$ARGUMENTS.md`. If it is missing, not `Approved`, or has NEEDS_HUMAN_DECISION items, stop and say what is needed.
+- First action: run `"${CLAUDE_PLUGIN_ROOT}/scripts/workstate.sh" deliver $ARGUMENTS --owner-command deliver`. It authorises an approved item and starts delivery, or resumes a paused one. It records a workflow record, not security authority. If it exits non-zero, stop and report its message: exit 3 means the item is not approved (or not paused), exit 6 means the spec changed and needs `/ai-engineering:approve` again, exit 5 means there is no usable state. A v0.2 item with no state is refused: point the owner to `/ai-engineering:setup` import, and do not create state yourself.
+- Read `.agents/specs/active/$ARGUMENTS.md`. If it has NEEDS_HUMAN_DECISION items, stop and say what is needed.
 - Read `.agents/gates.json`. If `fast` or `full` is missing, say so; gates that are not configured are reported as NOT CONFIGURED, never as passed.
 - Pick the matching playbook from the `playbooks` skill.
 

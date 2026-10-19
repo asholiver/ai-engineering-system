@@ -1,6 +1,6 @@
 # Work Specification
 ## Status
-Draft <!-- Draft | Approved (by <human>, <date>) | Delivered | Accepted | Archived -->
+Draft <!-- the lifecycle status lives in WORK-NNN.state.json; approval happens only through /ai-engineering:approve -->
 ## Work ID
 <id>
 ## Objective
@@ -44,9 +44,13 @@ Draft <!-- Draft | Approved (by <human>, <date>) | Delivered | Accepted | Archiv
 ## Open decisions
 <!-- OPEN / ASSUMPTION / NEEDS_HUMAN_DECISION items; delivery does not start while NEEDS_HUMAN_DECISION items remain -->
 -
-## Implementation state
-<!-- maintained by /ai-engineering:deliver: tasks, owners, status, gate results -->
--
-## Review state
-<!-- maintained by /ai-engineering:review: gates, security, QA, EXTERNAL REVIEW status -->
+## Increments
+<!-- One line per increment: id, title, proposed tier (0, 1 or 2) and the reasons. Delivery lowers nothing; only the owner lowers a tier through /ai-engineering:approve. -->
+- I1: <title> (proposed tier <0|1|2>: <reasons>)
+## Delivery policy
+<!-- Read by workstate.sh: lines of the form "key: value". Only these two keys exist; deployment fields are rejected. -->
+- pushWorkBranch: true
+- openPullRequest: true
+## Owner actions
+<!-- Steps only the owner can take (accounts, credentials, merges, deploys), declared up front. -->
 -

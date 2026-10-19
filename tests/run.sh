@@ -4538,6 +4538,175 @@ done <<'CASES'
 "${CLAUDE_PLUGIN_ROOT}/scripts/workstate.sh" import WORK-002 --merged "I1|One|1|abc1234"
 CASES
 
+# ---------------------------------------------------------------- WORK-002 B2a: skills, templates, banner, wait helper
+plugin_directory="$repository_directory/plugins/ai-engineering"
+frontmatter_of() { awk -v key="$2" 'NR == 1 && $0 == "---" { inside = 1; next } inside && $0 == "---" { exit } inside && index($0, key ": ") == 1 { print substr($0, length(key) + 3) }' "$1"; }
+
+# Human-only commands are never model-invocable.
+for human_only_skill in approve deliver setup learn review; do
+  expect_equal "skill $human_only_skill: disable-model-invocation is true" true "$(frontmatter_of "$plugin_directory/skills/$human_only_skill/SKILL.md" disable-model-invocation)"
+done
+expect_equal "skill approve: name" approve "$(frontmatter_of "$plugin_directory/skills/approve/SKILL.md" name)"
+expect_contains "skill approve: argument hint lists every sub-action" "spec | accept <finding-id> | defer <finding-id> | tier <increment-id> <0|1|2> | revoke" "$(frontmatter_of "$plugin_directory/skills/approve/SKILL.md" argument-hint)"
+approve_text="$(cat "$plugin_directory/skills/approve/SKILL.md")"
+expect_contains "skill approve: runs the script with the approve owner marker" '--owner-command approve' "$approve_text"
+# shellcheck disable=SC2016 # the literal text ${CLAUDE_PLUGIN_ROOT} is what the skill must contain
+expect_contains "skill approve: uses the plugin root" '${CLAUDE_PLUGIN_ROOT}/scripts/workstate.sh' "$approve_text"
+expect_contains "skill approve: says it is not security authority" "not security authority" "$approve_text"
+case "$approve_text" in *".state.json"*) fail "skill approve: must not name a state file path" ;; *) pass ;; esac
+case "$approve_text" in *[Ss]igned* | *[Ss]ignature*" is a"*) fail "skill approve: must not claim signing" ;; *) pass ;; esac
+for approve_exit_code in 0 2 3 4 5 6 7; do
+  expect_contains "skill approve: maps exit $approve_exit_code" "- $approve_exit_code:" "$approve_text"
+done
+
+deliver_text="$(cat "$plugin_directory/skills/deliver/SKILL.md")"
+# shellcheck disable=SC2016 # the literal text $ARGUMENTS is what the skill must contain
+expect_contains "skill deliver: first action is the deliver transition" 'workstate.sh" deliver $ARGUMENTS --owner-command deliver' "$deliver_text"
+expect_contains "skill deliver: refuses a v0.2 item and points to setup import" "/ai-engineering:setup" "$deliver_text"
+case "$deliver_text" in *".state.json"*) fail "skill deliver: must not name a state file path" ;; *) pass ;; esac
+
+work_spec_template="$plugin_directory/skills/plan/templates/work-spec.md"
+for template_section in "## Increments" "## Delivery policy" "## Owner actions"; do
+  expect_equal "spec template has section $template_section" 1 "$(grep -cxF "$template_section" "$work_spec_template")"
+done
+for dropped_section in "## Implementation state" "## Review state"; do
+  expect_equal "spec template drops $dropped_section" 0 "$(grep -cxF "$dropped_section" "$work_spec_template")"
+done
+# The template's own Delivery policy section is accepted by the transition script as written.
+template_directory="$work_directory/template-specs"
+mkdir -p "$template_directory"
+cp "$work_spec_template" "$template_directory/WORK-070.md"
+template_ws() { "$workstate" --dir "$template_directory" "$@"; }
+template_ws create WORK-070 >/dev/null 2>&1
+template_ws increment-add WORK-070 --inc I1 --title One --tier 1 >/dev/null 2>&1
+template_ws approve WORK-070 spec --owner-command approve >/dev/null 2>&1
+template_ws deliver WORK-070 --owner-command deliver >/dev/null 2>&1
+expect_equal "spec template: default delivery policy parses" "delivering true true" "$(jq -r '"\(.status) \(.delivery.policy.pushWorkBranch) \(.delivery.policy.openPullRequest)"' "$template_directory/WORK-070.state.json" 2>/dev/null)"
+plan_text="$(cat "$plugin_directory/skills/plan/SKILL.md")"
+expect_contains "skill plan: records state through create" 'workstate.sh" create' "$plan_text"
+expect_contains "skill plan: ends by pointing at approve" '/ai-engineering:approve <WORK-ID>' "$plan_text"
+expect_contains "skill plan: conversational approval changes nothing" "never changes status" "$plan_text"
+case "$plan_text" in *"Set the spec status to \`Approved\`"*) fail "skill plan: must not set Approved itself" ;; *) pass ;; esac
+
+setup_settings="$plugin_directory/skills/setup/templates/settings.json"
+expect_equal "setup template: worktree.baseRef is head" head "$(jq -r '.worktree.baseRef' "$setup_settings")"
+expect_equal "setup template: still pins the marketplace ref" "v{{PLUGIN_VERSION}}" "$(jq -r '.extraKnownMarketplaces["ai-engineering-system"].source.ref' "$setup_settings")"
+setup_text="$(cat "$plugin_directory/skills/setup/SKILL.md")"
+expect_contains "skill setup: documents the import mode" 'workstate.sh" import' "$setup_text"
+expect_contains "skill setup: documents the --merged option" "--merged" "$setup_text"
+expect_contains "skill setup: documents the claude --worktree effect and opt-out" "claude --worktree" "$setup_text"
+case "$setup_text" in *"Ask whether the project wants parallel"*) fail "skill setup: the worktree question is removed" ;; *) pass ;; esac
+
+# Session banner: plugin version and root.
+banner_output="$(CLAUDE_PLUGIN_ROOT="$plugin_directory" "$scripts/inject-standards.sh")"
+banner_version="$(jq -r '.version' "$plugin_directory/.claude-plugin/plugin.json")"
+expect_contains "banner: shows the plugin version" "ai-engineering $banner_version," "$banner_output"
+expect_contains "banner: shows the plugin root" "plugin root $plugin_directory" "$banner_output"
+
+# Specialists: edit and test only, tagged open questions, no log or legacy sections.
+for specialist in frontend backend platform; do
+  specialist_text="$(cat "$plugin_directory/agents/$specialist.md")"
+  expect_contains "agent $specialist: makes no Git writes" "make no Git writes" "$specialist_text"
+  expect_contains "agent $specialist: tags open questions with a trigger" "proposed trigger" "$specialist_text"
+  expect_contains "agent $specialist: ignores log and legacy sections" 'ignore its log and any legacy "Implementation state" and "Review state" sections' "$specialist_text"
+done
+
+# ---- wait-github.sh with a fake gh on PATH
+wait_helper="$scripts/wait-github.sh"
+fake_gh_directory="$work_directory/fake-gh"
+mkdir -p "$fake_gh_directory/bin" "$fake_gh_directory/bodies"
+cat >"$fake_gh_directory/bin/gh" <<'FAKE'
+#!/bin/bash
+# Fake gh: FAKE_GH_AUTH=0 means logged out. Other calls print the next body file and exit FAKE_GH_EXIT.
+printf '%s\n' "$*" >>"$FAKE_GH_LOG"
+if [ "$1" = auth ]; then exit "${FAKE_GH_AUTH:-0}"; fi
+printf 'token ghp_SECRETTOKENVALUE0123456789 rejected\n' >&2
+count_file="$FAKE_GH_BODIES/count"
+count=$(( $(cat "$count_file" 2>/dev/null || echo 0) + 1 ))
+printf '%s' "$count" >"$count_file"
+body="$FAKE_GH_BODIES/$count.json"
+[ -f "$body" ] || body="$(ls "$FAKE_GH_BODIES"/*.json | sort -V | tail -n 1)"
+cat "$body"
+exit "${FAKE_GH_EXIT:-0}"
+FAKE
+chmod +x "$fake_gh_directory/bin/gh"
+
+run_wait() { # bodies-and-env are set by the caller; args are passed to the helper
+  wait_output="$(PATH="$fake_gh_directory/bin:$PATH" FAKE_GH_LOG="$fake_gh_directory/log" FAKE_GH_BODIES="$fake_gh_directory/bodies" "$wait_helper" "$@" 2>&1)"
+  wait_status=$?
+}
+set_bodies() { rm -f "$fake_gh_directory/bodies"/*; : >"$fake_gh_directory/log"; local number=0 body; for body in "$@"; do number=$((number + 1)); printf '%s' "$body" >"$fake_gh_directory/bodies/$number.json"; done; }
+fast_wait=(--timeout 0 --interval 0)
+retry_wait=(--timeout 5 --interval 0)
+rate_limit_payload='{"message":"API rate limit exceeded for user ID 1.","documentation_url":"https://docs.github.com/rest"}'
+pass_checks='[{"name":"build","bucket":"pass"},{"name":"lint","bucket":"skipping"}]'
+pending_checks='[{"name":"build","bucket":"pass"},{"name":"test","bucket":"pending"}]'
+fail_checks='[{"name":"build","bucket":"pass"},{"name":"test","bucket":"fail"}]'
+
+set_bodies "$pass_checks"; run_wait "${fast_wait[@]}" checks 12
+expect_equal "wait checks pr: success exit" 0 "$wait_status"; expect_contains "wait checks pr: success verdict" "CHECKS PASSED: 12" "$wait_output"
+set_bodies "$fail_checks"; run_wait "${fast_wait[@]}" checks 12
+expect_equal "wait checks pr: failure exit" 1 "$wait_status"; expect_contains "wait checks pr: failure verdict names the check" "CHECKS FAILED: 12 (test)" "$wait_output"
+set_bodies "$pending_checks" "$pass_checks"; run_wait "${retry_wait[@]}" checks 12
+expect_equal "wait checks pr: pending then success" 0 "$wait_status"
+set_bodies "$pending_checks"; run_wait "${fast_wait[@]}" checks 12
+expect_equal "wait checks pr: timeout exit" 4 "$wait_status"; expect_contains "wait checks pr: timeout verdict" "TIMEOUT:" "$wait_output"
+set_bodies "[]"; run_wait "${fast_wait[@]}" checks 12
+expect_equal "wait checks pr: no checks yet is pending, not success" 4 "$wait_status"
+set_bodies '{"total_count":2,"check_runs":[{"name":"build","status":"completed","conclusion":"success"},{"name":"lint","status":"completed","conclusion":"neutral"}]}'; run_wait "${fast_wait[@]}" checks abc1234
+expect_equal "wait checks sha: success exit" 0 "$wait_status"
+set_bodies '{"total_count":2,"check_runs":[{"name":"build","status":"completed","conclusion":"success"},{"name":"lint","status":"completed","conclusion":"failure"}]}'; run_wait "${fast_wait[@]}" checks abc1234
+expect_equal "wait checks sha: failure exit" 1 "$wait_status"
+set_bodies '{"total_count":1,"check_runs":[{"name":"build","status":"in_progress","conclusion":null}]}'; run_wait "${fast_wait[@]}" checks abc1234
+expect_equal "wait checks sha: in progress times out" 4 "$wait_status"
+
+# Error payloads and malformed data are never data.
+set_bodies "$rate_limit_payload"; run_wait "${retry_wait[@]}" checks 12
+expect_equal "wait checks pr: rate-limit payload is an error" 5 "$wait_status"; expect_contains "wait: rate-limit verdict" "ERROR:" "$wait_output"
+set_bodies "$rate_limit_payload"; run_wait "${retry_wait[@]}" checks abc1234
+expect_equal "wait checks sha: rate-limit payload is an error" 5 "$wait_status"
+set_bodies "$rate_limit_payload"; FAKE_GH_EXIT=1 run_wait "${retry_wait[@]}" merge 12
+expect_equal "wait merge: rate-limit payload is an error" 5 "$wait_status"
+set_bodies 'not json {'; run_wait "${retry_wait[@]}" checks 12
+expect_equal "wait checks: malformed JSON is an error" 5 "$wait_status"
+set_bodies ''; run_wait "${retry_wait[@]}" merge 12
+expect_equal "wait merge: empty response is an error" 5 "$wait_status"
+set_bodies '[{"name":"build","bucket":"mystery"}]'; run_wait "${retry_wait[@]}" checks 12
+expect_equal "wait checks: an unknown bucket is an error, not a pass" 5 "$wait_status"
+set_bodies '{"state":"SOMETHING"}'; run_wait "${retry_wait[@]}" merge 12
+expect_equal "wait merge: an unknown state is an error, not a result" 5 "$wait_status"
+set_bodies "$rate_limit_payload" "$pass_checks"; run_wait "${retry_wait[@]}" checks 12
+expect_equal "wait: one transient error is retried" 0 "$wait_status"
+case "$wait_output" in *ghp_SECRETTOKEN*) fail "wait: a token must never reach the output" ;; *) pass ;; esac
+set_bodies 'not json {'; run_wait "${retry_wait[@]}" checks 12
+case "$wait_output" in *ghp_SECRETTOKEN* | *"not json"*) fail "wait: raw gh output must never reach the output" ;; *) pass ;; esac
+expect_equal "wait: exactly one verdict line" 1 "$(printf '%s\n' "$wait_output" | wc -l | tr -d ' ')"
+
+# Merge mode.
+set_bodies '{"state":"MERGED","mergeCommit":{"oid":"abc1234"}}'; run_wait "${fast_wait[@]}" merge 12
+expect_equal "wait merge: merged exit" 0 "$wait_status"; expect_contains "wait merge: merged verdict" "MERGED: PR 12" "$wait_output"
+set_bodies '{"state":"CLOSED","mergeCommit":null}'; run_wait "${fast_wait[@]}" merge 12
+expect_equal "wait merge: closed without merge exit" 1 "$wait_status"; expect_contains "wait merge: closed verdict" "PR CLOSED NOT MERGED" "$wait_output"
+set_bodies '{"state":"OPEN","mergeCommit":null}'; run_wait "${fast_wait[@]}" merge 12
+expect_equal "wait merge: open until timeout" 4 "$wait_status"
+set_bodies '{"state":"OPEN"}' '{"state":"MERGED"}'; run_wait "${retry_wait[@]}" merge 12
+expect_equal "wait merge: open then merged" 0 "$wait_status"
+
+# Unauthenticated: a planned owner action, and no API call is ever made.
+set_bodies "$pass_checks"; FAKE_GH_AUTH=1 run_wait "${fast_wait[@]}" checks 12
+expect_equal "wait: unauthenticated exit" 3 "$wait_status"; expect_contains "wait: unauthenticated verdict" "NOT AUTHENTICATED" "$wait_output"
+expect_equal "wait: unauthenticated makes no call beyond auth status" 0 "$(grep -vc '^auth status' "$fake_gh_directory/log")"
+wait_output="$(PATH="/usr/bin:/bin" FAKE_GH_LOG="$fake_gh_directory/log" "$wait_helper" "${fast_wait[@]}" merge 12 2>&1)"; wait_status=$?
+case "$(command -v gh 2>/dev/null)" in /usr/bin/gh | /bin/gh) pass ;; *) expect_equal "wait: missing gh is NOT AUTHENTICATED" 3 "$wait_status" ;; esac
+
+# Usage errors, including injection-shaped targets.
+# shellcheck disable=SC2016 # the literal text $(id) is an injection-shaped argument under test
+for bad_arguments in "checks" "bogus 12" "merge abc1234" "checks 12;id" 'checks $(id)' "merge 12 extra" "--timeout x checks 12" "--nope checks 12" "checks abc123abc123abc123abc123abc123abc123abc12"; do
+  # shellcheck disable=SC2086 # intentional word splitting of the table entry
+  run_wait "${fast_wait[@]}" $bad_arguments
+  expect_equal "wait: usage error for '$bad_arguments'" 2 "$wait_status"
+done
+
 # ---------------------------------------------------------------- inject-standards
 output="$(CLAUDE_PLUGIN_ROOT="$repository_directory/plugins/ai-engineering" "$scripts/inject-standards.sh")"
 expect_contains "inject-standards: includes standards body" "# Engineering Standards" "$output"
