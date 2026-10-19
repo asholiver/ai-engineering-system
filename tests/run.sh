@@ -3995,6 +3995,549 @@ else
   expect_contains "release check: the read failure is explained" "grep failed" "$version_output"
 fi
 
+# ---------------------------------------------------------------- WORK-002 B1: workstate.sh
+# The transition script for work-item state. State is a workflow record, not security authority:
+# these tests also prove that the guard does not read it.
+workstate="$scripts/workstate.sh"
+ws_directory="$work_directory/workstate-specs"
+mkdir -p "$ws_directory"
+ws_counter=0
+ws_id=""
+ws_output=""
+ws_status=0
+
+ws() { "$workstate" --dir "$ws_directory" "$@"; }
+run_ws() { ws_output="$(ws "$@" 2>&1)"; ws_status=$?; }
+state_path() { printf '%s/%s.state.json' "$ws_directory" "${1:-$ws_id}"; }
+state_value() { jq -r "$1" "$(state_path "${2:-}")"; }
+state_checksum() { cksum <"$(state_path "${1:-}")"; }
+file_sha256() { if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | cut -d' ' -f1; else sha256sum "$1" | cut -d' ' -f1; fi; }
+expect_ws() { # label expected-exit
+  expect_equal "$1: exit code" "$2" "$ws_status"
+}
+write_spec() { printf '# %s test spec\n## Status\nDraft\n## Objective\nTest.\n%s' "$1" "${2:-}" >"$ws_directory/$1.md"; }
+
+# Creates a fresh work item driven to the given status, with one increment (I1, tier 1).
+new_item() { # status [spec text appended, e.g. a delivery policy section]
+  ws_counter=$((ws_counter + 1))
+  ws_id="WORK-$((100 + ws_counter))"
+  write_spec "$ws_id" "${2:-}"
+  ws create "$ws_id" >/dev/null || fail "setup: create $ws_id"
+  ws increment-add "$ws_id" --inc I1 --title One --tier 1 >/dev/null || fail "setup: increment-add $ws_id"
+  [ "$1" = proposed ] && return 0
+  ws approve "$ws_id" spec --owner-command approve >/dev/null || fail "setup: approve $ws_id"
+  [ "$1" = approved ] && return 0
+  ws deliver "$ws_id" --owner-command deliver >/dev/null || fail "setup: deliver $ws_id"
+  case "$1" in
+    delivering) ;;
+    blocked) ws block "$ws_id" --trigger 2 --question "which?" --options a,b >/dev/null || fail "setup: block $ws_id" ;;
+    paused) ws pause "$ws_id" >/dev/null || fail "setup: pause $ws_id" ;;
+    done | archived)
+      ws increment-set "$ws_id" --inc I1 --status active >/dev/null || fail "setup: increment active"
+      ws increment-set "$ws_id" --inc I1 --status ready >/dev/null || fail "setup: increment ready"
+      ws increment-set "$ws_id" --inc I1 --status merged --merge-sha abc1234 >/dev/null || fail "setup: increment merged"
+      ws "done" "$ws_id" >/dev/null || fail "setup: done"
+      [ "$1" = archived ] && { ws archive "$ws_id" >/dev/null || fail "setup: archive"; }
+      ;;
+  esac
+  return 0
+}
+
+# --- create and basic validation
+write_spec WORK-090
+run_ws create WORK-090
+expect_ws "workstate create" 0
+expect_equal "workstate create: status proposed" proposed "$(state_value .status WORK-090)"
+expect_equal "workstate create: schemaVersion" 1 "$(state_value .schemaVersion WORK-090)"
+expect_equal "workstate create: spec hash is the SHA-256 of the spec file" "$(file_sha256 "$ws_directory/WORK-090.md")" "$(state_value .spec.contentSha256 WORK-090)"
+expect_equal "workstate create: no approval and no delivery" "null null" "$(state_value '[.approval, .delivery] | map(tostring) | join(" ")' WORK-090)"
+expect_equal "workstate create: history records it with a timestamp" "create->proposed true" "$(state_value '.history[0] | "\(.transition) \(.at | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$"))"' WORK-090)"
+run_ws create WORK-090
+expect_ws "workstate create twice is an invalid transition" 3
+run_ws create WORK-091
+expect_ws "workstate create without a spec is refused" 3
+run_ws create work-1
+expect_ws "workstate: a malformed work id is a usage error" 2
+run_ws frobnicate WORK-090
+expect_ws "workstate: an unknown command is a usage error" 2
+run_ws show WORK-090 --bogus x
+expect_ws "workstate: an unknown option is a usage error" 2
+run_ws approve WORK-090 spec --owner-command approve --by "$(printf 'a\001b')"
+expect_ws "workstate: control characters in text are refused" 2
+run_ws show WORK-090
+expect_ws "workstate show" 0
+expect_equal "workstate show prints the state as JSON" WORK-090 "$(jq -r .id <<<"$ws_output")"
+run_ws status WORK-090
+expect_equal "workstate status: summary reports the spec hash still matches" "proposed" "$(jq -r .status <<<"$ws_output")"
+run_ws show WORK-199
+expect_ws "workstate show: no state is a schema-class error" 5
+
+# --- transition table: allowed transitions, actors and approvals
+new_item proposed
+run_ws approve "$ws_id" spec --owner-command approve --by Tester
+expect_ws "allowed: proposed -> approved" 0
+expect_equal "approved: status" approved "$(state_value .status)"
+expect_equal "approved: owner-command source, command, approver" "owner-command approve Tester" "$(state_value '"\(.approval.source) \(.approval.command) \(.approval.by)"')"
+expect_equal "approved: records the spec hash" "$(file_sha256 "$ws_directory/$ws_id.md")" "$(state_value .approval.specSha256)"
+expect_equal "approved: records the time" true "$(state_value '.approval.at | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$")')"
+run_ws deliver "$ws_id" --owner-command deliver --by Tester
+expect_ws "allowed: approved -> authorised -> delivering" 0
+expect_equal "delivering: status" delivering "$(state_value .status)"
+expect_equal "delivering: owner-command delivery record" "owner-command deliver Tester" "$(state_value '"\(.delivery.source) \(.delivery.command) \(.delivery.by)"')"
+expect_equal "delivering: delivery spec hash equals the approved hash" "$(state_value .approval.specSha256)" "$(state_value .delivery.specSha256)"
+expect_equal "delivering: both delivery steps are in history" "approved->authorised authorised->delivering" "$(state_value '.history[-2:] | map(.transition) | join(" ")')"
+run_ws block "$ws_id" --trigger 2 --question "pick a library" --options "a,b"
+expect_ws "allowed: delivering -> blocked" 0
+expect_equal "blocked: decision has trigger, options, asked time and no answer" "2 2 true null" "$(state_value '.decisions[0] | "\(.trigger) \(.options | length) \(.askedAt != null) \(.answeredAt)"')"
+run_ws answer "$ws_id" --decision D1 --answer "use a"
+expect_ws "allowed: blocked -> delivering by a conversation answer (trigger 2)" 0
+expect_equal "answered: source is conversation and the answer is recorded verbatim" "conversation use a delivering" "$(state_value '"\(.decisions[0].source) \(.decisions[0].answer) \(.status)"')"
+run_ws pause "$ws_id" --actor owner
+expect_ws "allowed: delivering -> paused" 0
+expect_equal "paused: remembers where it was paused from" "paused delivering" "$(state_value '"\(.status) \(.pausedFrom)"')"
+run_ws deliver "$ws_id" --owner-command deliver
+expect_ws "allowed: paused -> delivering by resume" 0
+expect_equal "resumed: back to the paused-from status" "delivering null" "$(state_value '"\(.status) \(.pausedFrom)"')"
+run_ws increment-set "$ws_id" --inc I1 --status active
+run_ws increment-set "$ws_id" --inc I1 --status ready
+run_ws "done" "$ws_id"
+expect_ws "done is refused while an increment is not merged" 3
+run_ws increment-set "$ws_id" --inc I1 --status merged
+expect_ws "merged without a merge sha is refused" 3
+run_ws increment-set "$ws_id" --inc I1 --status merged --merge-sha abc1234
+run_ws "done" "$ws_id"
+expect_ws "allowed: delivering -> done (every increment merged)" 0
+run_ws archive "$ws_id"
+expect_ws "allowed: done -> archived" 0
+expect_equal "archived: status" archived "$(state_value .status)"
+
+new_item blocked
+run_ws pause "$ws_id"
+expect_ws "allowed: blocked -> paused" 0
+run_ws deliver "$ws_id" --owner-command deliver
+expect_ws "resume a paused-from-blocked item" 0
+expect_equal "resume returns to blocked, not delivering" blocked "$(state_value .status)"
+
+# Disallowed transitions: every one fails with exit 3 and changes nothing.
+while IFS='|' read -r target command_line; do
+  [ -n "$target" ] || continue
+  new_item "$target"
+  before="$(state_checksum)"
+  read -r command_word command_rest <<<"$command_line"
+  # shellcheck disable=SC2086 # command_rest is a deliberate word-split argument list
+  run_ws "$command_word" "$ws_id" $command_rest
+  expect_ws "disallowed from $target: $command_line" 3
+  expect_equal "disallowed from $target leaves state unchanged: $command_line" "$before" "$(state_checksum)"
+done <<'CASES'
+proposed|deliver --owner-command deliver
+proposed|block --trigger 1 --question q
+proposed|answer --decision D1 --answer x
+proposed|pause
+proposed|done
+proposed|archive
+proposed|approve revoke --owner-command approve
+proposed|raise-tier --inc I1 --tier 2
+proposed|finding-add --finding F1 --source qa --severity low --summary s
+proposed|increment-set --inc I1 --status active
+approved|approve spec --owner-command approve
+approved|block --trigger 1 --question q
+approved|pause
+approved|done
+approved|archive
+approved|increment-add --inc I2 --title Two --tier 0
+approved|finding-add --finding F1 --source qa --severity low --summary s
+delivering|approve spec --owner-command approve
+delivering|deliver --owner-command deliver
+delivering|answer --decision D1 --answer x
+delivering|archive
+delivering|increment-add --inc I2 --title Two --tier 0
+blocked|deliver --owner-command deliver
+blocked|block --trigger 1 --question q
+blocked|done
+blocked|approve spec --owner-command approve
+paused|approve spec --owner-command approve
+paused|block --trigger 1 --question q
+paused|pause
+paused|done
+paused|answer --decision D1 --answer x
+done|approve spec --owner-command approve
+done|deliver --owner-command deliver
+done|block --trigger 1 --question q
+done|pause
+done|done
+done|finding-add --finding F1 --source qa --severity low --summary s
+archived|archive
+archived|done
+archived|deliver --owner-command deliver
+archived|approve revoke --owner-command approve
+CASES
+
+# --- owner commands
+# Owner-only transitions without the marker are refused with exit 4 and never change state.
+while IFS='|' read -r target command_line; do
+  [ -n "$target" ] || continue
+  new_item "$target"
+  ws finding-add "$ws_id" --finding F1 --source qa --severity low --summary s >/dev/null 2>&1
+  before="$(state_checksum)"
+  read -r command_word command_rest <<<"$command_line"
+  # shellcheck disable=SC2086 # command_rest is a deliberate word-split argument list
+  run_ws "$command_word" "$ws_id" $command_rest
+  expect_ws "no owner command: $target $command_line" 4
+  expect_contains "no owner command: the message says it is not security authority" "not security authority" "$ws_output"
+  expect_equal "no owner command leaves state unchanged: $target $command_line" "$before" "$(state_checksum)"
+done <<'CASES'
+proposed|approve spec
+approved|deliver
+paused|deliver
+delivering|approve accept F1
+delivering|approve defer F1
+delivering|approve tier I1 0
+delivering|approve revoke
+blocked|approve revoke
+delivering|approve accept F1 --owner-command deliver
+delivering|approve tier I1 0 --owner-command deliver
+delivering|approve revoke --owner-command deliver
+proposed|approve spec --owner-command deliver
+approved|deliver --owner-command approve
+paused|deliver --owner-command approve
+approved|deliver --owner-command bogus
+CASES
+
+new_item delivering
+run_ws show "$ws_id" --owner-command approve
+expect_ws "the owner marker is refused on non-owner commands" 2
+
+# Every approve sub-action maps to its owner-only transition and records the owner command.
+new_item delivering
+ws finding-add "$ws_id" --finding F1 --source qa --severity high --summary one >/dev/null
+ws finding-add "$ws_id" --finding F2 --source qa --severity low --summary two >/dev/null
+run_ws approve "$ws_id" accept F1 --owner-command approve --note "accepted: cosmetic"
+expect_ws "approve accept" 0
+# shellcheck disable=SC2016 # `$d` and `$x` are jq variables inside the single-quoted program
+expect_equal "approve accept: finding disposition links an owner-command decision" "owner accept D1 owner-command 3" "$(state_value '.findings[0].disposition as $d | .decisions[0] as $x | "\($d.state) \($d.action) \($d.decisionId) \($x.source) \($x.trigger)"')"
+run_ws approve "$ws_id" defer F2 --owner-command approve
+expect_ws "approve defer" 0
+expect_equal "approve defer: disposition action" "owner defer" "$(state_value '.findings[1].disposition | "\(.state) \(.action)"')"
+run_ws approve "$ws_id" accept F1 --owner-command approve
+expect_ws "approve accept on a finding that is no longer open is refused" 3
+run_ws approve "$ws_id" tier I1 2 --owner-command approve
+expect_ws "approve tier cannot raise a tier" 3
+run_ws approve "$ws_id" tier I1 0 --owner-command approve
+expect_ws "approve tier lowers a tier" 0
+expect_equal "approve tier: tier lowered, proposed tier kept" "0 1" "$(state_value '.increments[0] | "\(.tier) \(.proposedTier)"')"
+run_ws raise-tier "$ws_id" --inc I1 --tier 2
+expect_ws "raise-tier (coordinator) raises a tier with no marker" 0
+run_ws raise-tier "$ws_id" --inc I1 --tier 1
+expect_ws "raise-tier cannot lower a tier" 3
+run_ws approve "$ws_id" revoke --owner-command approve
+expect_ws "approve revoke" 0
+expect_equal "approve revoke: back to proposed with no approval or delivery" "proposed null null" "$(state_value '"\(.status) \(.approval) \(.delivery)"')"
+expect_equal "approve revoke is recorded in history as an owner-command transition" "owner-command:approve" "$(state_value '.history[-1].actor')"
+run_ws approve "$ws_id" revoke --owner-command approve
+expect_ws "approve revoke on a proposed item is refused" 3
+
+# A trigger-3 decision needs the owner's approve command before delivery resumes.
+new_item delivering
+ws finding-add "$ws_id" --finding F1 --source qa --severity high --summary one >/dev/null
+run_ws block "$ws_id" --trigger 3 --question "accept the risk?"
+run_ws answer "$ws_id" --decision D1 --answer yes
+expect_ws "a trigger-3 decision cannot be answered from conversation" 4
+expect_equal "refused answer leaves the item blocked" blocked "$(state_value .status)"
+run_ws approve "$ws_id" accept F1 --decision D1 --owner-command approve
+expect_ws "approve accept resolves the open trigger-3 decision" 0
+expect_equal "the item is still blocked until the answer step" "blocked owner-command" "$(state_value '"\(.status) \(.decisions[0].source)"')"
+run_ws answer "$ws_id" --decision D1
+expect_ws "answer resumes after the owner decided" 0
+expect_equal "answer: delivering again" delivering "$(state_value .status)"
+run_ws decision "$ws_id" --trigger 3 --question q --answer a
+expect_ws "a trigger-3 decision cannot be recorded from conversation" 4
+run_ws decision "$ws_id" --trigger 1 --question "also update the README?" --answer "not in approved scope; continuing"
+expect_ws "a trigger-1 conversation decision is recorded without a status change" 0
+expect_equal "decision: recorded as conversation, status unchanged" "conversation delivering" "$(state_value '"\(.decisions[-1].source) \(.status)"')"
+
+# approve can never authorise or resume delivery; pausing does not let approve resume either.
+new_item paused
+run_ws approve "$ws_id" spec --owner-command approve
+expect_ws "approve cannot resume a paused item" 3
+new_item approved
+run_ws approve "$ws_id" revoke --owner-command deliver
+expect_ws "deliver cannot revoke" 4
+expect_equal "refused deliver-as-revoke leaves the item approved" approved "$(state_value .status)"
+
+# --- intent / implementation boundary
+# (a) Words in a conversation create no approval: nothing but the owner command moves a proposed item.
+new_item proposed
+printf '\nWe also need to update the README.\n' >>"$ws_directory/$ws_id.md"
+run_ws check "$ws_id"
+expect_ws "boundary (a): a spec edit on a proposed item is not an error" 0
+expect_equal "boundary (a): the item stays proposed with no approval" "proposed null" "$(state_value '"\(.status) \(.approval)"')"
+run_ws deliver "$ws_id" --owner-command deliver
+expect_ws "boundary (a): deliver preconditions refuse a proposed item" 3
+expect_equal "boundary (a): still proposed after the refused deliver" proposed "$(state_value .status)"
+# (b) During delivering, a spec edit changes the hash; the next transition returns to proposed.
+new_item delivering
+approved_hash="$(state_value .approval.specSha256)"
+printf '\nAdd a README requirement.\n' >>"$ws_directory/$ws_id.md"
+expect_equal "boundary (b): the edit changes the spec hash" "different" "$([ "$approved_hash" = "$(file_sha256 "$ws_directory/$ws_id.md")" ] && echo same || echo different)"
+run_ws status "$ws_id"
+expect_equal "boundary (b): status (read-only) reports the mismatch and does not write" "false delivering" "$(jq -r '"\(.specMatchesApproval) \(.status)"' <<<"$ws_output")"
+run_ws finding-add "$ws_id" --finding F1 --source qa --severity low --summary s
+expect_ws "boundary (b): the next transition detects the spec change (exit 6)" 6
+expect_equal "boundary (b): the item is back to proposed with approval and delivery cleared" "proposed null null" "$(state_value '"\(.status) \(.approval) \(.delivery)"')"
+expect_equal "boundary (b): history records the spec change" "delivering->proposed (spec changed)" "$(state_value '.history[-1].transition')"
+run_ws block "$ws_id" --trigger 1 --question q
+expect_ws "boundary (b): delivery stays stopped" 3
+new_item approved
+printf '\nChanged.\n' >>"$ws_directory/$ws_id.md"
+run_ws deliver "$ws_id" --owner-command deliver
+expect_ws "boundary: deliver after a spec change is refused with the spec-hash exit code" 6
+expect_equal "boundary: and the item is proposed again" proposed "$(state_value .status)"
+new_item paused
+printf '\nChanged.\n' >>"$ws_directory/$ws_id.md"
+run_ws deliver "$ws_id" --owner-command deliver
+expect_ws "boundary: resuming a paused item after a spec change is refused" 6
+expect_equal "boundary: the paused item is proposed" proposed "$(state_value .status)"
+new_item delivering
+rm -f "$ws_directory/$ws_id.md"
+run_ws check "$ws_id"
+expect_ws "boundary: a missing spec stops delivery (exit 6) without rewriting state" 6
+
+# --- policy validation
+policy_case() { # label expected-exit policy-text [expected substring]
+  new_item proposed "$3"
+  run_ws approve "$ws_id" spec --owner-command approve
+  expect_ws "policy: $1" "$2"
+  if [ "$2" != 0 ]; then
+    expect_equal "policy: $1 leaves the item proposed" proposed "$(state_value .status)"
+    [ -z "${4:-}" ] || expect_contains "policy: $1 message" "$4" "$ws_output"
+  fi
+}
+policy_case "ephemeralDeploy is rejected with a pointer to WORK-004" 7 $'## Delivery policy\n- ephemeralDeploy: true\n' "WORK-004"
+policy_case "persistentEnvironments is rejected with a pointer to WORK-004" 7 $'## Delivery policy\npersistentEnvironments: staging\n' "WORK-004"
+policy_case "a production deploy entry is rejected" 7 $'## Delivery policy\n- productionDeploy: true\n' "WORK-004"
+policy_case "a deploy entry naming production is rejected" 7 $'## Delivery policy\n- deploy: production\n' "WORK-004"
+policy_case "a release entry is rejected" 7 $'## Delivery policy\n- `release`: true\n' "WORK-004"
+policy_case "an unknown field is rejected" 7 $'## Delivery policy\n- retries: 3\n' "unknown delivery policy field"
+policy_case "an invalid boolean is rejected" 7 $'## Delivery policy\n- pushWorkBranch: maybe\n' "pushWorkBranch must be true or false"
+policy_case "an invalid pull request mode is rejected" 7 $'## Delivery policy\n- openPullRequest: merge\n' "openPullRequest must be"
+policy_case "a duplicate field is rejected" 7 $'## Delivery policy\n- pushWorkBranch: true\n- pushWorkBranch: false\n' "twice"
+policy_case "a pull request without a pushed branch is rejected" 7 $'## Delivery policy\n- pushWorkBranch: false\n' "requires pushWorkBranch"
+policy_case "a deployment field after other sections is still found" 7 $'## Delivery policy\n- pushWorkBranch: true\n\n## Other\nx\n## Delivery policy\n- ephemeralDeploy: true\n' "WORK-004"
+policy_case "no policy section means defaults" 0 ""
+policy_case "prose in the policy section is ignored" 0 $'## Delivery policy\nNothing is deployed from this work item.\n'
+policy_case "policy fields outside the policy section are not read" 0 $'## Notes\n- ephemeralDeploy: true\n'
+new_item proposed
+ws approve "$ws_id" spec --owner-command approve >/dev/null
+ws deliver "$ws_id" --owner-command deliver >/dev/null
+expect_equal "policy defaults copied at delivery" "true true ready" "$(state_value '.delivery.policy | "\(.pushWorkBranch) \(.openPullRequest) \(.pullRequestMode)"')"
+new_item delivering $'## Delivery policy\n- `pushWorkBranch`: true\n- `openPullRequest`: draft\n'
+expect_equal "policy: a draft pull request is copied at delivery" "true true draft" "$(state_value '.delivery.policy | "\(.pushWorkBranch) \(.openPullRequest) \(.pullRequestMode)"')"
+new_item delivering $'## Delivery policy\n- pushWorkBranch: false\n- openPullRequest: false\n'
+expect_equal "policy: pushing and pull requests can be switched off" "false false null" "$(state_value '.delivery.policy | "\(.pushWorkBranch) \(.openPullRequest) \(.pullRequestMode)"')"
+
+# --- records and metrics
+new_item delivering
+run_ws increment-set "$ws_id" --inc I1 --status ready
+expect_ws "an increment cannot skip from planned to ready" 3
+run_ws increment-set "$ws_id" --inc I1 --status active --branch feature/x --base-sha abc1234
+expect_ws "increment planned -> active" 0
+run_ws increment-recovery "$ws_id" --inc I1
+run_ws increment-recovery "$ws_id" --inc I1
+expect_equal "recoveries are counted" 2 "$(state_value '.increments[0].recoveries')"
+run_ws evidence "$ws_id" --inc I1 --kind gate --result pass --note "fast gate"
+expect_ws "gate evidence is recorded" 0
+run_ws evidence "$ws_id" --inc I1 --kind review --result fail
+expect_equal "evidence entries are kept" "gate pass review fail" "$(state_value '.increments[0].evidence | map("\(.kind) \(.result)") | join(" ")')"
+run_ws evidence "$ws_id" --inc I1 --kind nonsense --result pass
+expect_ws "evidence kind is validated" 2
+run_ws owner-action-add "$ws_id" --action-id A1 --description "gh auth login" --increment I1
+expect_ws "an owner action is declared" 0
+run_ws owner-action-done "$ws_id" --action-id A1
+expect_ws "an owner action is completed" 0
+run_ws owner-action-done "$ws_id" --action-id A1
+expect_ws "an owner action cannot be completed twice" 3
+run_ws finding-add "$ws_id" --finding F1 --source qa --severity medium --summary "non-security"
+run_ws finding-add "$ws_id" --finding F2 --source security-reviewer --severity high --summary "security" --security
+run_ws finding-invalid "$ws_id" --finding F1 --evidence "reproduced: not an issue"
+expect_ws "a non-security finding can be recorded invalid with evidence" 0
+run_ws finding-invalid "$ws_id" --finding F2 --evidence "looks fine"
+expect_ws "a security finding cannot be recorded invalid without the reviewer's confirmation" 3
+run_ws finding-invalid "$ws_id" --finding F2 --evidence "retested" --confirmed-by security-reviewer
+expect_ws "a security finding can be recorded invalid with the raising reviewer's confirmation" 0
+run_ws finding-fixed "$ws_id" --finding F1 --sha abc1234
+expect_ws "a finding that is not open cannot be fixed" 3
+run_ws finding-add "$ws_id" --finding F3 --source qa --severity critical --summary "fix me" --security
+run_ws finding-fixed "$ws_id" --finding F3 --sha abc1234
+expect_ws "a security finding can be fixed inside intent at any severity" 0
+expect_equal "finding fixed carries the sha" "fixed abc1234" "$(state_value '.findings[2].disposition | "\(.state) \(.sha)"')"
+run_ws increment-set "$ws_id" --inc I1 --status ready --head-sha def5678
+run_ws increment-set "$ws_id" --inc I1 --status merged --merge-sha 0123abc --pr 12
+expect_equal "metrics: increment active, ready and merged timestamps" "true true true" "$(state_value '.increments[0] | "\(.activeAt != null) \(.readyAt != null) \(.mergedAt != null)"')"
+expect_equal "metrics: owner action requested and done times" "true true" "$(state_value '.ownerActions[0] | "\(.requestedAt != null) \(.doneAt != null)"')"
+expect_equal "metrics: every history entry has a time, transition and actor" "true" "$(state_value '.history | all(.at != null and .transition != null and .actor != null)')"
+
+# --- atomic, validated writes; corrupt state is never repaired
+new_item proposed
+printf '{ not json' >"$(state_path)"
+before="$(state_checksum)"
+run_ws approve "$ws_id" spec --owner-command approve
+expect_ws "corrupt state: refused with the schema exit code" 5
+expect_contains "corrupt state: the message says it is not repaired" "not valid JSON" "$ws_output"
+expect_equal "corrupt state is left exactly as found" "$before" "$(state_checksum)"
+run_ws show "$ws_id"
+expect_ws "corrupt state: show also reports the schema error" 5
+new_item proposed
+jq '.status = "levitating"' "$(state_path)" >"$work_directory/bad-status.json"
+cp "$work_directory/bad-status.json" "$(state_path)"
+run_ws pause "$ws_id"
+expect_ws "an unknown status fails schema validation" 5
+new_item proposed
+jq '.approval = {"by": "x"}' "$(state_path)" >"$work_directory/bad-approval.json"
+cp "$work_directory/bad-approval.json" "$(state_path)"
+run_ws show "$ws_id"
+expect_ws "an approval on a proposed item fails schema validation" 5
+new_item proposed
+jq '.id = "WORK-777"' "$(state_path)" >"$work_directory/bad-id.json"
+cp "$work_directory/bad-id.json" "$(state_path)"
+run_ws show "$ws_id"
+expect_ws "a state file naming a different work item is refused" 5
+new_item proposed
+chmod 000 "$(state_path)"
+if [ "$(id -u)" = "0" ]; then
+  echo "note: skipping the unreadable-state check (running as root)"
+else
+  run_ws show "$ws_id"
+  expect_ws "unreadable state is a schema-class failure" 5
+fi
+chmod 644 "$(state_path)"
+leftovers="$(find "$ws_directory" -name '.WORK-*' | wc -l | tr -d ' ')"
+expect_equal "no temp or lock files are left behind" 0 "$leftovers"
+new_item proposed
+mkdir "$ws_directory/.$ws_id.lock"
+lock_probe_status=0
+"$workstate" --dir "$ws_directory" check "$ws_id" >/dev/null 2>&1 || lock_probe_status=$?
+rm -rf "$ws_directory/.$ws_id.lock"
+expect_equal "a held lock is a bounded wait that ends in an environment error" 1 "$lock_probe_status"
+
+# --- v0.2 import
+import_directory="$work_directory/import-specs"
+mkdir -p "$import_directory"
+import_ws() { "$workstate" --dir "$import_directory" "$@"; }
+legacy_sections=$'## Implementation state\n- T1 done: tests pass\n## Review state\n- reviewed: no findings\n'
+printf '# Draft item\n## Status\nDraft\n## Objective\nx\n%s' "$legacy_sections" >"$import_directory/WORK-010.md"
+printf '# Approved item\n## Status\nApproved (by Ashley Oliver, 2026-10-06), in principle.\n## Objective\nx\n%s' "$legacy_sections" >"$import_directory/WORK-011.md"
+printf '# Partial item\n## Status\n**Approved** (by Ashley Oliver, 2026-09-01)\n## Objective\nx\n%s' "$legacy_sections" >"$import_directory/WORK-012.md"
+printf '# Bare approved\n## Status\nApproved\n## Objective\nx\n' >"$import_directory/WORK-013.md"
+printf '# In progress\n## Status\nIn progress\n## Objective\nx\n' >"$import_directory/WORK-014.md"
+printf '# No status\n## Objective\nx\n' >"$import_directory/WORK-015.md"
+import_state() { jq -r "$1" "$import_directory/$2.state.json"; }
+
+spec_before="$(file_sha256 "$import_directory/WORK-010.md")"
+output="$(import_ws import WORK-010 2>&1)"; status_code=$?
+expect_equal "import Draft: exit code" 0 "$status_code"
+expect_equal "import Draft: becomes proposed with no approval" "proposed null null" "$(import_state '"\(.status) \(.approval) \(.delivery)"' WORK-010)"
+expect_equal "import Draft: the spec file is untouched, legacy sections included" "$spec_before" "$(file_sha256 "$import_directory/WORK-010.md")"
+
+spec_before="$(file_sha256 "$import_directory/WORK-011.md")"
+output="$(import_ws import WORK-011 2>&1)"; status_code=$?
+expect_equal "import Approved: exit code" 0 "$status_code"
+expect_equal "import Approved: status approved, never authorised or delivering" approved "$(import_state .status WORK-011)"
+expect_equal "import Approved: approval is imported, with approver and date from the Status line" "imported Ashley Oliver 2026-10-06T00:00:00Z" "$(import_state '"\(.approval.source) \(.approval.by) \(.approval.at)"' WORK-011)"
+expect_equal "import Approved: the approval records the current spec hash" "$(file_sha256 "$import_directory/WORK-011.md")" "$(import_state .approval.specSha256 WORK-011)"
+expect_equal "import Approved: no delivery record" null "$(import_state .delivery WORK-011)"
+expect_equal "import Approved: legacy sections and the spec are untouched" "$spec_before" "$(file_sha256 "$import_directory/WORK-011.md")"
+expect_contains "import Approved: legacy Implementation state still in the spec" "## Implementation state" "$(cat "$import_directory/WORK-011.md")"
+state_before="$(cksum <"$import_directory/WORK-011.state.json")"
+output="$(import_ws import WORK-011 2>&1)"; status_code=$?
+expect_equal "import is idempotent: second run exit code" 0 "$status_code"
+expect_equal "import is idempotent: state is byte-identical" "$state_before" "$(cksum <"$import_directory/WORK-011.state.json")"
+output="$(import_ws deliver WORK-011 2>&1)"; status_code=$?
+expect_equal "an imported approval needs the owner command to deliver" 4 "$status_code"
+output="$(import_ws deliver WORK-011 --owner-command deliver 2>&1)"; status_code=$?
+expect_equal "an imported approved item can be delivered by the owner command" 0 "$status_code"
+expect_equal "delivery after import is recorded as an owner-command delivery" "owner-command" "$(import_state .delivery.source WORK-011)"
+
+output="$(import_ws import WORK-012 --merged "F0-S0|Foundation|1|abc1234def" --merged "F0-S1|Auth|2|def5678abc|1" 2>&1)"; status_code=$?
+expect_equal "import with merged history: exit code" 0 "$status_code"
+expect_equal "import with merged history: increments recorded as merged, unknown tier is the highest" "F0-S0 merged 1 abc1234def 2|F0-S1 merged 2 def5678abc 1" "$(import_state '.increments | map("\(.id) \(.status) \(.pr) \(.mergeSha) \(.tier)") | join("|")' WORK-012)"
+expect_equal "import with merged history: still approved, not delivering" approved "$(import_state .status WORK-012)"
+state_before="$(cksum <"$import_directory/WORK-012.state.json")"
+output="$(import_ws import WORK-012 --merged "F0-S0|Foundation|1|abc1234def" --merged "F0-S1|Auth|2|def5678abc|1" 2>&1)"; status_code=$?
+expect_equal "import with merged history is idempotent" "0 $state_before" "$status_code $(cksum <"$import_directory/WORK-012.state.json")"
+output="$(import_ws import WORK-012 --merged "F0-S9|Bad|1|nothex" 2>&1)"; status_code=$?
+expect_equal "import rejects a merge sha that is not hexadecimal" 2 "$status_code"
+
+output="$(import_ws import WORK-013 2>&1)"; status_code=$?
+expect_equal "import refuses Approved with no approver and date (no fabricated authority)" 8 "$status_code"
+expect_equal "import refusal writes no state" "absent" "$([ -e "$import_directory/WORK-013.state.json" ] && echo present || echo absent)"
+output="$(import_ws import WORK-014 2>&1)"; status_code=$?
+expect_equal "import refuses a Status line that is not Draft or Approved" 8 "$status_code"
+output="$(import_ws import WORK-015 2>&1)"; status_code=$?
+expect_equal "import refuses a spec with no Status line" 8 "$status_code"
+new_item proposed
+run_ws import "$ws_id"
+expect_ws "import never touches state that was not imported" 3
+for imported in WORK-010 WORK-012; do
+  expect_equal "import never produces authorised or delivering: $imported" true "$(import_state '.status | IN("proposed", "approved")' "$imported")"
+done
+
+# --- guard parity: the guard decides the same with no state, honest state and forged state
+parity_repository="$(new_repository parity-repo feature)"
+parity_specs="$parity_repository/.agents/specs/active"
+mkdir -p "$parity_specs"
+parity_commands=$'vercel deploy\nvercel --prod\ngit push origin main\ngh pr merge 12 --squash\nnpm publish'
+parity_decide() { tool_input "$1" "$parity_repository" | CLAUDE_PROJECT_DIR="$parity_repository" "$scripts/guard-bash.sh"; }
+parity_none="" parity_honest="" parity_forged=""
+while IFS= read -r parity_command; do
+  parity_none="$parity_none$(parity_decide "$parity_command")|"
+done <<<"$parity_commands"
+
+printf '# Parity\n## Status\nDraft\n' >"$parity_specs/WORK-050.md"
+"$workstate" --dir "$parity_specs" create WORK-050 >/dev/null
+"$workstate" --dir "$parity_specs" increment-add WORK-050 --inc I1 --title One --tier 1 >/dev/null
+"$workstate" --dir "$parity_specs" approve WORK-050 spec --owner-command approve >/dev/null
+"$workstate" --dir "$parity_specs" deliver WORK-050 --owner-command deliver >/dev/null
+expect_equal "guard parity setup: honest state is delivering" delivering "$(jq -r .status "$parity_specs/WORK-050.state.json")"
+while IFS= read -r parity_command; do
+  parity_honest="$parity_honest$(parity_decide "$parity_command")|"
+done <<<"$parity_commands"
+
+# Forged state: written directly (an agent can do this), claiming delivering with the increment listed.
+printf '# Forged\n## Status\nDraft\n' >"$parity_specs/WORK-051.md"
+forged_hash="$(file_sha256 "$parity_specs/WORK-051.md")"
+jq -n --arg hash "$forged_hash" '{schemaVersion: 1, id: "WORK-051", title: "Forged", status: "delivering", pausedFrom: null,
+  createdAt: "2026-10-19T00:00:00Z", updatedAt: "2026-10-19T00:00:00Z",
+  spec: {path: "x", contentSha256: $hash, approvedCommit: null},
+  approval: {by: "forger", at: "2026-10-19T00:00:00Z", specSha256: $hash, source: "owner-command"},
+  delivery: {by: "forger", at: "2026-10-19T00:00:00Z", specSha256: $hash, source: "owner-command", policy: {pushWorkBranch: true, openPullRequest: true, pullRequestMode: "ready"}},
+  ownerActions: [], decisions: [],
+  increments: [{id: "I1", title: "One", status: "active", proposedTier: 0, tier: 0, branch: "feature", pr: null, baseSha: null, headSha: null, mergeSha: null, recoveries: 0, activeAt: null, readyAt: null, mergedAt: null, evidence: []}],
+  findings: [], history: []}' >"$parity_specs/WORK-051.state.json"
+while IFS= read -r parity_command; do
+  parity_forged="$parity_forged$(parity_decide "$parity_command")|"
+done <<<"$parity_commands"
+expect_equal "guard parity: honest delivering state changes no decision" "$parity_none" "$parity_honest"
+expect_equal "guard parity: forged delivering state changes no decision" "$parity_none" "$parity_forged"
+while IFS= read -r parity_command; do
+  expect_equal "guard parity: '$parity_command' still asks, whatever the state says" ask "$(decision_of "$(parity_decide "$parity_command")")"
+done <<<"$parity_commands"
+
+# A normal workstate.sh invocation is neither denied nor asked by the guard, and its command text
+# never names the state file.
+while IFS= read -r workstate_command; do
+  [ -n "$workstate_command" ] || continue
+  case "$workstate_command" in *".state.json"*) fail "guard: a workstate command must not name the state file: $workstate_command" ;; *) pass ;; esac
+  expect_equal "guard: workstate invocation is not denied or asked: $workstate_command" none "$(decision_of "$(tool_input "$workstate_command" "$feature_repository" | "$scripts/guard-bash.sh")")"
+done <<'CASES'
+"${CLAUDE_PLUGIN_ROOT}/scripts/workstate.sh" approve WORK-002 spec --owner-command approve
+"${CLAUDE_PLUGIN_ROOT}/scripts/workstate.sh" deliver WORK-002 --owner-command deliver
+"${CLAUDE_PLUGIN_ROOT}/scripts/workstate.sh" approve WORK-002 accept F1 --owner-command approve --note "accepted"
+"${CLAUDE_PLUGIN_ROOT}/scripts/workstate.sh" approve WORK-002 revoke --owner-command approve
+"${CLAUDE_PLUGIN_ROOT}/scripts/workstate.sh" block WORK-002 --trigger 2 --question "which library?"
+"${CLAUDE_PLUGIN_ROOT}/scripts/workstate.sh" show WORK-002
+"${CLAUDE_PLUGIN_ROOT}/scripts/workstate.sh" import WORK-002 --merged "I1|One|1|abc1234"
+CASES
+
 # ---------------------------------------------------------------- inject-standards
 output="$(CLAUDE_PLUGIN_ROOT="$repository_directory/plugins/ai-engineering" "$scripts/inject-standards.sh")"
 expect_contains "inject-standards: includes standards body" "# Engineering Standards" "$output"
