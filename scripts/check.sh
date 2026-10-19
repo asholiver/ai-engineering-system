@@ -19,13 +19,13 @@ claude plugin validate --strict "$plugin_directory" || check_failed "plugin vali
 claude plugin validate --strict "$repository_directory" || check_failed "marketplace validation"
 
 step "Script syntax"
-for script in "$plugin_directory"/scripts/*.sh "$plugin_directory"/scripts/guard/*.sh tests/run.sh scripts/check.sh; do
+for script in "$plugin_directory"/scripts/*.sh "$plugin_directory"/scripts/guard/*.sh tests/run.sh scripts/check.sh scripts/check-doc-versions.sh; do
   bash -n "$script" || check_failed "syntax: $script"
 done
 if command -v shellcheck >/dev/null 2>&1; then
   # --source-path=SCRIPTDIR: resolve `source ./lib.sh` and `source guard/hook-git.sh` relative to the
   # script that sources them (as the scripts do at run time), not to this directory.
-  shellcheck -x --source-path=SCRIPTDIR "$plugin_directory"/scripts/*.sh "$plugin_directory"/scripts/guard/*.sh tests/run.sh scripts/check.sh || check_failed "shellcheck"
+  shellcheck -x --source-path=SCRIPTDIR "$plugin_directory"/scripts/*.sh "$plugin_directory"/scripts/guard/*.sh tests/run.sh scripts/check.sh scripts/check-doc-versions.sh || check_failed "shellcheck"
 else
   echo "shellcheck not installed; skipped"
 fi
@@ -51,6 +51,9 @@ if [ "$plugin_version" = "$changelog_version" ]; then
 else
   check_failed "plugin.json version $plugin_version does not match latest changelog entry $changelog_version"
 fi
+
+step "Documented version references"
+bash scripts/check-doc-versions.sh "$repository_directory" || check_failed "documentation references a version with no changelog entry"
 
 step "Context budget"
 frontmatter_value() { awk -v key="$2" 'NR == 1 && $0 == "---" { inside = 1; next } inside && $0 == "---" { exit } inside && index($0, key ": ") == 1 { print substr($0, length(key) + 3) }' "$1"; }

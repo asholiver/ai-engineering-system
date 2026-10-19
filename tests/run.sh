@@ -3697,6 +3697,44 @@ classify_git "$classifier_repository" config --unset diff.evil.textconv
 classify_git "$classifier_repository" checkout -q -f main
 rm -f "$classifier_repository/.gitattributes"
 
+# ---------------------------------------------------------------- WORK-003 C1: release consistency check
+version_check() { bash "$repository_directory/scripts/check-doc-versions.sh" "$@"; }
+new_version_fixture() {
+  local directory="$work_directory/versions-$1"
+  mkdir -p "$directory/versions" "$directory/docs/nested"
+  printf '# Changelog\n\n## 0.3.0\nUnreleased.\n\n## 0.2.0\nReleased.\n' >"$directory/versions/CHANGELOG.md"
+  printf '%s\n' "$directory"
+}
+
+fixture="$(new_version_fixture none)"
+printf 'No pinned versions here.\n' >"$fixture/README.md"
+version_output="$(version_check "$fixture" 2>&1)"; version_status=$?
+expect_equal "release check: no references passes" 0 "$version_status"
+
+fixture="$(new_version_fixture known)"
+printf 'claude plugin marketplace add asholiver/ai-engineering-system@v0.2.0\n' >"$fixture/README.md"
+printf '{"source": {"ref": "v0.3.0"}}\n' >"$fixture/docs/nested/setup.md"
+version_output="$(version_check "$fixture" 2>&1)"; version_status=$?
+expect_equal "release check: known versions in both shapes pass" 0 "$version_status"
+
+fixture="$(new_version_fixture unknown-at)"
+printf 'line one\nasholiver/ai-engineering-system@v9.9.9\n' >"$fixture/README.md"
+version_output="$(version_check "$fixture" 2>&1)"; version_status=$?
+expect_equal "release check: unknown @ reference fails" 1 "$version_status"
+expect_contains "release check: reports file, line and version" "README.md:2: version 9.9.9" "$version_output"
+
+fixture="$(new_version_fixture unknown-ref)"
+printf '{"ref": "v1.2.3"}\n' >"$fixture/README.md"
+version_output="$(version_check "$fixture" 2>&1)"; version_status=$?
+expect_equal "release check: unknown ref reference fails" 1 "$version_status"
+
+fixture="$(new_version_fixture unknown-nested)"
+printf 'clean\n' >"$fixture/README.md"
+printf 'text\n{"ref": "v4.0.0"}\n' >"$fixture/docs/nested/guide.md"
+version_output="$(version_check "$fixture" 2>&1)"; version_status=$?
+expect_equal "release check: unknown version in nested docs file fails" 1 "$version_status"
+expect_contains "release check: reports nested path" "docs/nested/guide.md:2: version 4.0.0" "$version_output"
+
 # ---------------------------------------------------------------- inject-standards
 output="$(CLAUDE_PLUGIN_ROOT="$repository_directory/plugins/ai-engineering" "$scripts/inject-standards.sh")"
 expect_contains "inject-standards: includes standards body" "# Engineering Standards" "$output"

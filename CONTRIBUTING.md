@@ -25,6 +25,8 @@ A release is a human action.
 1. Bump `version` in `plugins/ai-engineering/.claude-plugin/plugin.json` (consumers keep their cached copy until it changes) and add the matching `versions/CHANGELOG.md` entry; `scripts/check.sh` verifies they agree.
 2. Merge to `main` after review.
 3. Create the tag `v<version>` on that commit and never move it; consuming projects pin to it.
+4. Write release notes in the `versions/CHANGELOG.md` entry, including behaviour changes. `scripts/check.sh` also verifies that every pinned version in `README.md` and `docs/` has a changelog entry.
+5. Verify the upgrade: update a consuming project to the new tag and confirm the session banner reports the new plugin version.
 
 ## Checks
 Run `scripts/check.sh`. It validates the plugin and marketplace, runs the hook tests and enforces context budgets.

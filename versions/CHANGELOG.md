@@ -15,6 +15,10 @@ Guard v2: structured action classification (WORK-001, ADR-0003).
 - Local guard log of decisions (classes, parse mode, command hash, never command text) for measuring false positives.
 - Implementation-agent instructions: Git is the coordinator's job; edit files with Edit/Write, not the shell. Shell edits get a non-blocking hint.
 
+Change classifier and release consistency (WORK-003 C1).
+- `classify-change.sh`: deterministic classification of a change by the paths it touches, so review scope does not depend on model judgement.
+- `scripts/check.sh` now fails when `README.md` or `docs/**` pins a version (`ai-engineering-system@vX.Y.Z`, `"ref": "vX.Y.Z"`) that has no `versions/CHANGELOG.md` entry (`scripts/check-doc-versions.sh`). `CONTRIBUTING.md` "Releasing" gains release-notes and upgrade-verification steps.
+
 ## 0.2.0
 Claude Code native architecture (ADR-0001).
 - Repository is now a Claude Code marketplace publishing the `ai-engineering` plugin.
