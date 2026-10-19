@@ -3948,6 +3948,25 @@ printf '{"ref": "v1.2.3"}\n' >"$fixture/README.md"
 version_output="$(version_check "$fixture" 2>&1)"; version_status=$?
 expect_equal "release check: unknown ref reference fails" 1 "$version_status"
 
+# check.sh wiring: an unknown pin must fail the gate. check.sh runs this suite, so its
+# documentation version step is run in isolation instead of running check.sh recursively.
+doc_versions_step="$(grep -E '^bash scripts/check-doc-versions\.sh ' "$repository_directory/scripts/check.sh")"
+expect_equal "check.sh: exactly one documentation version step" 1 "$(printf '%s\n' "$doc_versions_step" | grep -c .)"
+# shellcheck disable=SC2016 # `$repository_directory` and `$doc_versions_fixture` are names inside the step text
+step_root_text='$repository_directory' fixture_root_text='$doc_versions_fixture'
+fixture_step="${doc_versions_step//"$step_root_text"/$fixture_root_text}"
+gate_failures="$(
+  cd "$repository_directory" || exit 1
+  failures=0
+  # shellcheck disable=SC2329 # invoked by the evaluated check.sh step
+  check_failed() { failures=$((failures + 1)); }
+  # shellcheck disable=SC2034 # read by the evaluated check.sh step
+  doc_versions_fixture="$fixture"
+  eval "$fixture_step" >/dev/null 2>&1
+  echo "$failures"
+)"
+expect_equal "check.sh: an unknown pinned version fails the gate" 1 "$gate_failures"
+
 fixture="$(new_version_fixture unknown-nested)"
 printf 'clean\n' >"$fixture/README.md"
 printf 'text\n{"ref": "v4.0.0"}\n' >"$fixture/docs/nested/guide.md"
