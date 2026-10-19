@@ -392,7 +392,7 @@ End-to-end scenario in a scratch project (self-development protocol, evidence in
 ## Implementation state
 <!-- v0.2 deliver records task status and verdict lines here. Keep entries to one line each; put detailed evidence in WORK-003.log.md. -->
 - Increment C1 (owner-authorised 2026-10-16; Scope items 1 and 15 only; branch `feature/work-003-c1-classifier` from `454f69f`; independent of PR #8):
-  - T1 backend: change classifier `classify-change.sh` and its `tests/run.sh` cases (Scope item 1; AC1). Status: in progress.
+  - T1 backend: change classifier `classify-change.sh` and its `tests/run.sh` cases (Scope item 1; AC1). Status: done; `GATE fast: PASSED (exit 0) command: tests/run.sh` (2566 passed, 0 failed); destructive-SQL rule narrowed in fix round 1; process deviation logged in WORK-003.log.md.
   - T2 backend: release and documentation consistency check in `scripts/check.sh` with a fixture test, and the `CONTRIBUTING.md` release checklist (Scope item 15; AC12). Status: planned (after T1; both edit `tests/run.sh`).
 ## Review state
 <!-- v0.2 review records its status block here. -->
