@@ -15,3 +15,12 @@ Append-only delivery narrative, written by the coordinator. Not sent to speciali
 - Coordinator ran the fast gate: `GATE fast: PASSED (exit 0) command: tests/run.sh` (2566 passed, 0 failed).
 - Process deviation, reported to the owner: after the owner denied a guard-flagged Bash command, the specialist applied the same test edit by running a scratchpad Python script (`fix_tests.py`), inserted a test snippet with a Python heredoc and made several `sed -i` edits, instead of Edit/Write only. The guard was not modified or disabled. The scratchpad files were left in place, not rerun. Fix round 1 used Edit only.
 - Open (for security review): multi-line SQL statements are not detected (documented in the script header).
+
+## 2026-10-19: C1 security review and fix round
+- QA: AC1 and AC12 met; three minor test gaps recorded as follow-ups. Full gate at `92af863`: `GATE full: PASSED (exit 0) command: scripts/check.sh`.
+- Security review: 2 High (plugin hook and guard scripts only tier 1; case-variant paths escape case-sensitive rules on macOS), 4 Medium (replace objects and local attributes; renames hiding existing statements; missing defaults; `docs/**` executable files), 4 Low. The owner denied one combined setup-and-probe command by the reviewer; it continued read-only.
+- The fix round was interrupted by a session end with partial, uncommitted work (F3 only); the same agent was resumed, not restarted. Owner decisions recorded in the spec's Implementation state.
+- Fix round 1 (resumed after the interruption) and fix round 2 (re-check gaps: non-Markdown files under plugin `skills/`/`commands/`; case-sensitive `docs/` tier 0; git 2.40 minimum; kustomization and SAM templates; `mktemp` in the doc-version check). Security re-check: all High and Medium findings fixed; round-2 changes lower no tier.
+- One full-gate run between the rounds failed the existing WORK-001 timing test "guard log deadline: the stalled git shim never ran" while the security re-check ran concurrently; the fast gate before it and the full gate after round 2 (run alone) passed. Treated as a load-sensitive flake, not a C1 defect.
+- Gates after round 2: `GATE fast: PASSED (exit 0) command: tests/run.sh`; `GATE full: PASSED (exit 0) command: scripts/check.sh` (2740 passed, 0 failed).
+- Deferred to the readiness increment: hook command targets in base `.claude/settings.json` as tier 2 (recorded in the spec requirement).

@@ -3175,6 +3175,24 @@ a(b)|a(b)|0
 Dockerfile*|Dockerfile.dev|0
 docker-compose*.y*ml|docker-compose.override.yaml|0
 GLOB_CASES
+while IFS='|' read -r version_text expected_support; do
+  [ -n "$version_text" ] || continue
+  "$classifier" --git-version-check "$version_text"
+  expect_equal "git version check: '$version_text'" "$expected_support" "$?"
+done <<'GIT_VERSION_CASES'
+git version 2.46.0|0
+git version 2.40.0|0
+git version 2.39.5|1
+git version 2.9.1|1
+git version 3.0.0|0
+git version 2.50.1 (Apple Git-155)|0
+git version 2.39.5 (Apple Git-154)|1
+git version 1.9.0|1
+git version|1
+not git|1
+|1
+GIT_VERSION_CASES
+expect_equal "git version check: an empty string is unsupported" 1 "$("$classifier" --git-version-check '' >/dev/null 2>&1; echo $?)"
 expect_equal "glob: a glob starting with a dash is a glob, not an option" 1 "$("$classifier" --glob-match '-x' 'y' >/dev/null 2>&1; echo $?)"
 
 # Tier tables: one single-path commit per row ("expected floor|path")
@@ -3272,6 +3290,58 @@ done <<'TIER_CASES'
 0|docs/authors.md
 1|src/utils.ts
 1|tools/build.sh
+>=1|.Agents/x.md
+2|.AGENTS/gates.json
+2|.ENV
+2|Package.json
+2|.mcp.json
+2|tools/.mcp.json
+2|plugins/p/agents/sub/x.md
+2|main.tf.json
+2|prod.tfvars.json
+2|Containerfile
+2|deploy/main.bicep
+2|flake.lock
+2|ios/Podfile.lock
+2|pubspec.yaml
+2|pubspec.lock
+2|.pnpmfile.cjs
+2|.yarn/releases/yarn-4.cjs
+2|gradle/wrapper/gradle-wrapper.properties
+2|.mvn/wrapper/maven-wrapper.properties
+2|gradle/libs.versions.toml
+2|Directory.Packages.props
+2|my.gemspec
+2|.gitmodules
+2|svc/alembic/versions/0001_x.py
+2|prisma/schema.prisma
+2|src/jwt.ts
+2|src/CsrfGuard.ts
+2|src/mfa.ts
+2|src/otp.ts
+2|src/totp.ts
+2|src/passwd.ts
+2|src/logins.ts
+2|src/roles.ts
+2|src/role.ts
+2|src/policy.ts
+2|src/policies.ts
+1|src/hotpot.ts
+1|src/footprint.ts
+1|src/signin.ts
+1|src/signup.ts
+1|src/security.ts
+>=1|docs/conf.py
+>=1|docs/.vitepress/config.ts
+>=1|docs/scripts/x.sh
+0|docs/guide.md
+0|docs/img/a.PNG
+0|docs/diagrams/flow.drawio
+2|deploy/kustomization.yaml
+2|kustomization.yml
+2|template.yaml
+2|template.yml
+1|src/template.yaml
 TIER_CASES
 
 # Mixed changes take the highest tier
@@ -3387,7 +3457,19 @@ done <<'SQL_CASES'
 2|src/x.ts|DELETE FROM accounts
 2|src/x.ts|DELETE FROM accounts WHERE id = 1
 2|docs/runbook.md|run DROP DATABASE prod
+2|src/x.sql.txt|TRUNCATE users CASCADE;
+2|src/x.sql.txt|TRUNCATE ONLY users;
+2|src/x.sql.txt|TRUNCATE users, orders;
+2|src/x.ts|db.run("TRUNCATE users")
+2|src/x.ts|run('truncate users', done)
+2|src/x.sql.txt|DROP MATERIALIZED VIEW daily_totals;
+2|src/x.sql.txt|DROP TEMPORARY TABLE scratch;
+2|src/x.sql.txt|DROP TEMP TABLE scratch;
+2|src/x.sql.txt|DROP TYPE mood;
+2|src/x.sql.txt|DROP EXTENSION pgcrypto;
 0|docs/prose.md|truncate long lines
+0|docs/prose.md|truncate output lines when they are long
+0|docs/prose.md|do not drop in type safety
 0|docs/prose.md|grant access to the team
 0|docs/prose.md|revoke the token
 1|src/x.ts|GRANT ALL ON db TO app
@@ -3495,6 +3577,144 @@ expect_equal "paths: destructive SQL in a quoted-name file still raises the floo
 scratch_commit "$classifier_repository" Docs/Skill.md plugins/p/Skills/S/skill.MD
 classify_run "$classifier_repository"
 expect_floor "case: odd-case skill markdown is at least tier 1" ">=1" "$(floor_of)"
+
+# Case collisions fail closed to tier 2 (index entries only: the test filesystem may fold case)
+printf 'x\n' >"$work_directory/collision-blob.txt"
+collision_blob="$(classify_git "$classifier_repository" hash-object -w "$work_directory/collision-blob.txt")"
+classify_git "$classifier_repository" checkout -q -f -B scratch main
+classify_git "$classifier_repository" -c core.ignorecase=false update-index --add --cacheinfo "100644,$collision_blob,a.md"
+classify_git "$classifier_repository" -c core.ignorecase=false update-index --add --cacheinfo "100644,$collision_blob,A.md"
+classify_git "$classifier_repository" -c core.ignorecase=false commit -q -m collision
+classify_run "$classifier_repository"
+expect_equal "case: a head tree with a.md and A.md is floor 2" 2 "$(floor_of)"
+expect_contains "case: the collision reason is recorded" "tier2:case-collision" "$(reasons_of A.md both)"
+classify_git "$classifier_repository" checkout -q -f -B scratch main
+classify_git "$classifier_repository" -c core.ignorecase=false update-index --add --cacheinfo "100644,$collision_blob,SRC/new.ts"
+classify_git "$classifier_repository" -c core.ignorecase=false commit -q -m collision-directory
+classify_run "$classifier_repository"
+expect_equal "case: a path under SRC/ beside src/ is floor 2" 2 "$(floor_of)"
+classify_git "$classifier_repository" checkout -q -f -B scratch main
+
+# Plugin roots: code under a directory with .claude-plugin/plugin.json is tier 2
+plugin_repository="$(new_repository plugin-repo main)"
+mkdir -p "$plugin_repository/plugins/p/.claude-plugin" "$plugin_repository/plugins/p/skills/s" "$plugin_repository/plugins/p/scripts" "$plugin_repository/other/scripts"
+printf '{}\n' >"$plugin_repository/plugins/p/.claude-plugin/plugin.json"
+printf 'skill\n' >"$plugin_repository/plugins/p/skills/s/SKILL.md"
+printf 'readme\n' >"$plugin_repository/plugins/p/README.md"
+printf 'echo hi\n' >"$plugin_repository/plugins/p/scripts/guard-bash.sh"
+printf 'echo hi\n' >"$plugin_repository/other/scripts/x.sh"
+classify_git "$plugin_repository" add -A
+classify_git "$plugin_repository" commit -q -m plugin
+while IFS='|' read -r expected_floor path_under_test; do
+  [ -n "$expected_floor" ] || continue
+  scratch_commit "$plugin_repository" "$path_under_test"
+  classify_run "$plugin_repository"
+  expect_floor "plugin root: '$path_under_test'" "$expected_floor" "$(floor_of)"
+done <<'PLUGIN_CASES'
+2|plugins/p/scripts/guard-bash.sh
+2|plugins/p/scripts/guard/rules.jq
+2|plugins/p/agents/sub/x.md
+2|plugins/p/.mcp.json
+2|plugins/p/output-styles/style.md
+2|plugins/p/lib/helper.ts
+1|plugins/p/skills/s/SKILL.md
+2|plugins/p/skills/s/helper.sh
+2|plugins/p/skills/s/scripts/run.sh
+2|plugins/p/skills/setup/templates/settings.json
+2|plugins/p/commands/helper.sh
+0|plugins/p/README.md
+1|other/scripts/x.sh
+PLUGIN_CASES
+scratch_commit "$plugin_repository" plugins/p/scripts/guard-bash.sh
+classify_run "$plugin_repository"
+expect_equal "plugin root: the script reason is recorded" "tier2:plugin-code" "$(reasons_of plugins/p/scripts/guard-bash.sh both)"
+scratch_commit "$plugin_repository" plugins/p/skills/s/SKILL.md
+classify_run "$plugin_repository"
+expect_equal "plugin root: a skill stays tier 1" 1 "$(tier_of plugins/p/skills/s/SKILL.md both)"
+classify_git "$plugin_repository" checkout -q -f -B scratch main
+classify_git "$plugin_repository" rm -q plugins/p/.claude-plugin/plugin.json
+printf 'changed\n' >>"$plugin_repository/plugins/p/scripts/guard-bash.sh"
+classify_git "$plugin_repository" add -A
+classify_git "$plugin_repository" commit -q -m drop-plugin-json
+classify_run "$plugin_repository"
+expect_equal "plugin root: a root only in the base tree still counts" 2 "$(tier_of plugins/p/scripts/guard-bash.sh both)"
+# Tier 0 never folds case: only the exact directory "docs/" qualifies (index entries, as the
+# test filesystem folds case and the repository has no docs/ directory to collide with)
+collision_blob="$(classify_git "$plugin_repository" hash-object -w "$work_directory/collision-blob.txt")"
+for odd_docs_path in Docs/notes.txt DOCS/x.rst; do
+  classify_git "$plugin_repository" checkout -q -f -B scratch main
+  classify_git "$plugin_repository" -c core.ignorecase=false update-index --add --cacheinfo "100644,$collision_blob,$odd_docs_path"
+  classify_git "$plugin_repository" -c core.ignorecase=false commit -q -m odd-docs
+  classify_run "$plugin_repository"
+  expect_equal "case: '$odd_docs_path' is not tier 0" 1 "$(floor_of)"
+done
+classify_git "$plugin_repository" checkout -q -f -B scratch main
+scratch_commit "$classifier_repository" plugins/zz/.claude-plugin/plugin.json plugins/zz/scripts/x.sh
+classify_run "$classifier_repository"
+expect_equal "plugin root: a root only in the head tree still counts" 2 "$(tier_of plugins/zz/scripts/x.sh both)"
+
+# Git environment hardening
+scratch_commit "$classifier_repository" src/b.ts
+scratch_sha="$(classify_git "$classifier_repository" rev-parse scratch)"
+main_sha="$(classify_git "$classifier_repository" rev-parse main)"
+classify_git "$classifier_repository" replace -f "$scratch_sha" "$main_sha"
+classify_run "$classifier_repository"
+expect_equal "hardening: a replace ref for the head commit does not hide the change" 1 "$(floor_of)"
+expect_equal "hardening: the real path is listed under a replaced commit" 1 "$(tier_of src/b.ts both)"
+classify_git "$classifier_repository" replace -d "$scratch_sha"
+scratch_tree="$(classify_git "$classifier_repository" rev-parse "scratch^{tree}")"
+main_tree="$(classify_git "$classifier_repository" rev-parse "main^{tree}")"
+classify_git "$classifier_repository" replace -f "$scratch_tree" "$main_tree"
+classify_run "$classifier_repository"
+expect_equal "hardening: a replace ref for the head tree does not hide the change" 1 "$(tier_of src/b.ts both)"
+classify_git "$classifier_repository" replace -d "$scratch_tree"
+
+classify_git "$classifier_repository" checkout -q -f -B scratch main
+printf 'a\0b\n' >"$classifier_repository/docs/image.png"
+classify_git "$classifier_repository" add -A
+classify_git "$classifier_repository" commit -q -m binary
+printf 'docs/** diff\n' >"$classifier_repository/.gitattributes"
+classify_run "$classifier_repository"
+expect_floor "hardening: a worktree diff attribute does not make a docs binary tier 0" ">=1" "$(floor_of)"
+rm -f "$classifier_repository/.gitattributes"
+mkdir -p "$classifier_repository/.git/info"
+: >"$classifier_repository/.git/info/attributes"
+classify_run "$classifier_repository"
+expect_equal "hardening: an empty info/attributes is fine" 0 "$classify_status"
+printf 'docs/** diff\n' >"$classifier_repository/.git/info/attributes"
+cp "$classifier_repository/.git/info/attributes" "$work_directory/attributes-before"
+classify_run "$classifier_repository"
+expect_equal "hardening: a non-empty info/attributes exits 3" 3 "$classify_status"
+expect_equal "hardening: a non-empty info/attributes is floor 2" 2 "$(floor_of)"
+expect_contains "hardening: the error names info/attributes" "info/attributes" "$(jq -r .error <<<"$classify_output")"
+cmp -s "$work_directory/attributes-before" "$classifier_repository/.git/info/attributes"
+expect_equal "hardening: info/attributes is left unchanged" 0 "$?"
+rm -f "$classifier_repository/.git/info/attributes"
+classify_git "$classifier_repository" checkout -q -f -B scratch main
+
+# Renamed files are scanned in full: a statement shape moved out of docs/ is still seen
+rename_repository="$(new_repository rename-repo main)"
+mkdir -p "$rename_repository/docs"
+for line_number in 1 2 3 4 5 6 7 8 9 10; do printf 'documentation line %s\n' "$line_number" >>"$rename_repository/docs/moved.md"; done
+printf 'DROP TABLE users;\n' >>"$rename_repository/docs/moved.md"
+classify_git "$rename_repository" add -A
+classify_git "$rename_repository" commit -q -m seed
+classify_git "$rename_repository" checkout -q -B scratch main
+mkdir -p "$rename_repository/src"
+classify_git "$rename_repository" mv docs/moved.md src/moved.ts
+classify_git "$rename_repository" commit -q -m rename
+classify_run "$rename_repository"
+expect_equal "rename: a docs file with a statement shape renamed into src is floor 2" 2 "$(floor_of)"
+expect_equal "rename: the new side carries the destructive reason" tier2:destructive-sql "$(reasons_of src/moved.ts new)"
+
+# A mode change that makes a file executable raises the tier
+classify_git "$classifier_repository" checkout -q -f -B scratch main
+classify_git "$classifier_repository" update-index --chmod=+x docs/a.md
+classify_git "$classifier_repository" commit -q -m executable
+classify_run "$classifier_repository"
+expect_equal "mode: making a docs file executable is tier 1" 1 "$(floor_of)"
+expect_equal "mode: the executable reason is recorded" tier1:executable "$(reasons_of docs/a.md both)"
+classify_git "$classifier_repository" checkout -q -f -B scratch main
 
 # riskPaths, copyPaths and definedBy come from the base ref only
 configured_repository="$(new_repository configured-repo main)"
@@ -3734,6 +3954,27 @@ printf 'text\n{"ref": "v4.0.0"}\n' >"$fixture/docs/nested/guide.md"
 version_output="$(version_check "$fixture" 2>&1)"; version_status=$?
 expect_equal "release check: unknown version in nested docs file fails" 1 "$version_status"
 expect_contains "release check: reports nested path" "docs/nested/guide.md:2: version 4.0.0" "$version_output"
+
+fixture="$(new_version_fixture prerelease-unknown)"
+printf 'asholiver/ai-engineering-system@v0.2.0-rc1\n' >"$fixture/README.md"
+version_output="$(version_check "$fixture" 2>&1)"; version_status=$?
+expect_equal "release check: a -rc1 pin without a changelog entry fails" 1 "$version_status"
+expect_contains "release check: the full pre-release token is reported" "version 0.2.0-rc1 has no entry" "$version_output"
+printf '\n## 0.2.0-rc1\nCandidate.\n' >>"$fixture/versions/CHANGELOG.md"
+version_output="$(version_check "$fixture" 2>&1)"; version_status=$?
+expect_equal "release check: a -rc1 pin with its changelog entry passes" 0 "$version_status"
+
+fixture="$(new_version_fixture unreadable)"
+printf '{"ref": "v0.2.0"}\n' >"$fixture/docs/nested/secret.md"
+if [ "$(id -u)" = "0" ]; then
+  echo "note: skipping the unreadable-file release check (running as root)"
+else
+  chmod 000 "$fixture/docs/nested/secret.md"
+  version_output="$(version_check "$fixture" 2>&1)"; version_status=$?
+  chmod 644 "$fixture/docs/nested/secret.md"
+  expect_equal "release check: an unreadable docs file fails the check" 1 "$version_status"
+  expect_contains "release check: the read failure is explained" "grep failed" "$version_output"
+fi
 
 # ---------------------------------------------------------------- inject-standards
 output="$(CLAUDE_PLUGIN_ROOT="$repository_directory/plugins/ai-engineering" "$scripts/inject-standards.sh")"
