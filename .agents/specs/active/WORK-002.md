@@ -1,6 +1,8 @@
 # Work Specification
 ## Status
-**Current status (2026-10-16): Path B split, proposed, pending owner review.** The owner chose Path B on 2026-10-16: this spec keeps the lifecycle, state, `/deliver` rewrite and the rest of the delivery workflow, with an interim owner-command mechanism for owner-only transitions (Scope item 3). Signed owner approvals, replay protection, the trust anchor and autonomous deployment move unchanged to [WORK-004](WORK-004.md). The interim mechanism grants no new guard permission, no autonomous deployment right and no security authority. Implementation and delivery are not authorised until the owner accepts this amendment and the ADR-0004 interim mechanism, and separately authorises delivery. G1 stays OPEN (WORK-004).
+**Current status (2026-10-19): delivery authorised.** The owner accepted the Path B amendment (PR #8 at `43afbdc`, merged as `164d821`) and authorised delivery of the v0.3.0 lifecycle scope on 2026-10-19, within this spec and ADR-0004. Merge and deployment still need explicit owner approval. G1 stays OPEN; signed approvals and autonomous deployment remain WORK-004.
+
+Previous status (2026-10-16, history): Path B split, proposed, pending owner review. The owner chose Path B on 2026-10-16: this spec keeps the lifecycle, state, `/deliver` rewrite and the rest of the delivery workflow, with an interim owner-command mechanism for owner-only transitions (Scope item 3). Signed owner approvals, replay protection, the trust anchor and autonomous deployment move unchanged to [WORK-004](WORK-004.md). The interim mechanism grants no new guard permission, no autonomous deployment right and no security authority. Implementation and delivery are not authorised until the owner accepts this amendment and the ADR-0004 interim mechanism, and separately authorises delivery. G1 stays OPEN (WORK-004).
 
 Previous status (2026-10-13, history): approved in principle for design. The revised authority mechanism (signed owner approvals, Scope items 3 and 7) is pending security review and G1 closure. It replaces `UserPromptExpansion` tokens after the spike showed that agents can trigger the event (D1 superseded). G1 (trusted approval path) is OPEN. G1-b (separate macOS approver account) is the provisional architecture for investigation, not an approved implementation. The trust anchor (O3) is deferred. Implementation and delivery are not authorised.
 
@@ -297,7 +299,10 @@ End-to-end scenarios run deliberately in a scratch project, using unreleased sou
 D2, D3 and D5 remain resolved (see `WORK-001-planning.md`); D1 is superseded.
 ## Implementation state
 <!-- v0.2 deliver records task status and verdict lines here. Keep entries to one line each; put detailed evidence in WORK-002.log.md. -->
--
+- Delivery (owner-authorised 2026-10-19; branch `feature/work-002-lifecycle` from `f71b540`; v0.2 deliver, sequential in the main checkout; playbook: feature; Opus security review required):
+  - B1 backend: state schema, transition script, owner-command source, policy validation, v0.2 import, guard-parity tests (Scope 1–3, 6, 7, 18; AC1, 3, 7, 12, 13). Status: in progress.
+  - B2 backend: `/approve` skill, `/deliver` rewrite, `/plan` template, `/setup` (baseRef, import, banner), agent wording, wait helper, recovery (Scope 4, 5, 8–17; AC2, 4–6, 8–11, 14, 16). Status: planned (after B1).
+  - B3 coordinator: docs, CHANGELOG, E1–E3 evidence in a scratch project, gates, reviews. Status: planned.
 ## Review state
 <!-- v0.2 review records its status block here. -->
 -
