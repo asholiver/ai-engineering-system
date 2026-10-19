@@ -4324,7 +4324,13 @@ policy_case "a duplicate field is rejected" 7 $'## Delivery policy\n- pushWorkBr
 policy_case "a pull request without a pushed branch is rejected" 7 $'## Delivery policy\n- pushWorkBranch: false\n' "requires pushWorkBranch"
 policy_case "a deployment field after other sections is still found" 7 $'## Delivery policy\n- pushWorkBranch: true\n\n## Other\nx\n## Delivery policy\n- ephemeralDeploy: true\n' "WORK-004"
 policy_case "no policy section means defaults" 0 ""
-policy_case "prose in the policy section is ignored" 0 $'## Delivery policy\nNothing is deployed from this work item.\n'
+policy_case "a prose line in the policy section is rejected" 7 $'## Delivery policy\nPush the branch and then relax.\n' "unrecognised line"
+policy_case "a prose line naming deploy is rejected" 7 $'## Delivery policy\nNothing is deployed from this work item.\n' "WORK-004"
+policy_case "bold deployment key is rejected (L4)" 7 $'## Delivery policy\n- **ephemeralDeploy**: true\n' "WORK-004"
+policy_case "hyphenated environments key is rejected (L4)" 7 $'## Delivery policy\n- persistent-environments: staging\n' "WORK-004"
+policy_case "free-text production deploy line is rejected (L4)" 7 $'## Delivery policy\n- Production deploy: allowed\n' "WORK-004"
+policy_case "comments in the policy section are allowed" 0 $'## Delivery policy\n<!-- deployment fields are rejected -->\n- pushWorkBranch: true\n'
+policy_case "a multi-line comment is allowed" 0 $'## Delivery policy\n<!-- one\ndeploy two -->\n- openPullRequest: draft\n'
 policy_case "policy fields outside the policy section are not read" 0 $'## Notes\n- ephemeralDeploy: true\n'
 new_item proposed
 ws approve "$ws_id" spec --owner-command approve >/dev/null
@@ -4454,7 +4460,11 @@ expect_equal "import is idempotent: state is byte-identical" "$state_before" "$(
 output="$(import_ws deliver WORK-011 2>&1)"; status_code=$?
 expect_equal "an imported approval needs the owner command to deliver" 4 "$status_code"
 output="$(import_ws deliver WORK-011 --owner-command deliver 2>&1)"; status_code=$?
-expect_equal "an imported approved item can be delivered by the owner command" 0 "$status_code"
+expect_equal "an imported approval cannot be delivered (L3)" 3 "$status_code"
+output="$(import_ws approve WORK-011 spec --owner-command approve 2>&1)"; status_code=$?
+expect_equal "approve spec re-approves an imported approval" 0 "$status_code"
+output="$(import_ws deliver WORK-011 --owner-command deliver 2>&1)"; status_code=$?
+expect_equal "after a fresh owner approval the item can be delivered by the owner command" 0 "$status_code"
 expect_equal "delivery after import is recorded as an owner-command delivery" "owner-command" "$(import_state .delivery.source WORK-011)"
 
 output="$(import_ws import WORK-012 --merged "F0-S0|Foundation|1|abc1234def" --merged "F0-S1|Auth|2|def5678abc|1" 2>&1)"; status_code=$?
@@ -4480,6 +4490,137 @@ expect_ws "import never touches state that was not imported" 3
 for imported in WORK-010 WORK-012; do
   expect_equal "import never produces authorised or delivering: $imported" true "$(import_state '.status | IN("proposed", "approved")' "$imported")"
 done
+
+# --- security fix round 1 (M1, L1, L2, L3)
+# M1: values are validated as whole strings; a trailing newline cannot slip past a line-based match.
+new_item delivering
+before="$(state_checksum)"
+run_ws decision "$ws_id" --trigger $'3\n' --question q --answer a
+expect_ws "M1: decision --trigger '3<newline>' is refused (invalid value)" 2
+expect_equal "M1: the refused trigger-3 decision leaves state unchanged" "$before" "$(state_checksum)"
+run_ws decision "$ws_id" --trigger $'1\n' --question q --answer a
+expect_ws "M1: decision --trigger '1<newline>' is a usage error" 2
+run_ws decision "$ws_id" --trigger $'1\n3' --question q --answer a
+expect_ws "M1: a multi-line trigger is a usage error" 2
+run_ws decision "$ws_id" --trigger 3 --question q --answer a
+expect_ws "M1: a plain trigger 3 is still refused as needing the owner command" 4
+run_ws block "$ws_id" --trigger $'3\n' --question q
+expect_ws "M1: block --trigger '3<newline>' is a usage error" 2
+run_ws raise-tier "$ws_id" --inc I1 --tier $'2\n'
+expect_ws "M1: a tier with a trailing newline is a usage error" 2
+run_ws approve "$ws_id" tier I1 $'0\n' --owner-command approve
+expect_ws "M1: approve tier with a trailing newline is a usage error" 2
+expect_equal "M1: nothing changed after the refused values" "$before" "$(state_checksum)"
+
+# L1: identifiers and SHAs are whole-string matches; nothing is created outside the specs directory.
+lock_listing_before="$(find "$work_directory" -maxdepth 1 -name '.*' | wc -l | tr -d ' ')"
+for bad_id in $'WORK-1\n' $'../outside\nWORK-1' $'WORK-1\nx' 'WORK-' 'WORK-1/../x' $'\nWORK-1' 'WORK-12345678901'; do
+  run_ws show "$bad_id"
+  expect_ws "L1: work id $(printf '%q' "$bad_id") is a usage error" 2
+  run_ws create "$bad_id"
+  expect_ws "L1: create with work id $(printf '%q' "$bad_id") is a usage error" 2
+done
+expect_equal "L1: no lock or temp file was created outside the specs directory" "$lock_listing_before" "$(find "$work_directory" -maxdepth 1 -name '.*' | wc -l | tr -d ' ')"
+run_ws finding-add "$ws_id" --finding $'F1\n' --source qa --severity low --summary s
+expect_ws "L1: --finding with a newline is a usage error" 2
+run_ws increment-set "$ws_id" --inc $'I1\n' --status active
+expect_ws "L1: --inc with a newline is a usage error" 2
+run_ws owner-action-add "$ws_id" --action-id $'A1\n' --description d
+expect_ws "L1: --action-id with a newline is a usage error" 2
+run_ws finding-add "$ws_id" --finding F9 --source qa --severity low --summary s
+run_ws finding-fixed "$ws_id" --finding F9 --sha $'abc1234\n'
+expect_ws "L1: a SHA with a newline is a usage error" 2
+run_ws finding-fixed "$ws_id" --finding F9 --sha "$(printf 'a%.0s' $(seq 1 65))"
+expect_ws "L1: a SHA longer than 64 characters is a usage error" 2
+run_ws finding-fixed "$ws_id" --finding F9 --sha abc12
+expect_ws "L1: a SHA shorter than 7 characters is a usage error" 2
+printf '# Merge fixture\n## Status\nDraft\n' >"$import_directory/WORK-016.md"
+output="$(import_ws import WORK-016 --merged $'I1|One|1|abc1234\n' 2>&1)"; status_code=$?
+expect_equal "L1: --merged with a newline in the SHA is a usage error" 2 "$status_code"
+output="$(import_ws import WORK-016 --merged $'I2|Two|1|abc1234|1\n' 2>&1)"; status_code=$?
+expect_equal "L1: --merged with a newline in the tier is a usage error" 2 "$status_code"
+output="$(import_ws import WORK-016 --merged $'I3\n|Three|1|abc1234' 2>&1)"; status_code=$?
+expect_equal "L1: --merged with a newline in the id is a usage error" 2 "$status_code"
+expect_equal "L1: no refused --merged entry was recorded" 0 "$(import_state '.increments | length' WORK-016)"
+
+# L2: an interrupted waiter must not delete the lock it never held.
+new_item proposed
+mkdir "$ws_directory/.$ws_id.lock"
+printf '%s\n' "$$" >"$ws_directory/.$ws_id.lock/pid"
+"$workstate" --dir "$ws_directory" check "$ws_id" >/dev/null 2>&1 &
+waiter_pid=$!
+sleep 1
+kill -TERM "$waiter_pid" 2>/dev/null
+wait "$waiter_pid" 2>/dev/null
+expect_equal "L2: the holder's lock survives an interrupted waiter" present "$([ -d "$ws_directory/.$ws_id.lock" ] && echo present || echo absent)"
+expect_equal "L2: and its pid file is intact" "$$" "$(cat "$ws_directory/.$ws_id.lock/pid" 2>/dev/null)"
+rm -rf "$ws_directory/.$ws_id.lock"
+run_ws check "$ws_id"
+expect_ws "L2: a normal run still takes and releases its own lock" 0
+expect_equal "L2: the lock is released after a normal run" absent "$([ -d "$ws_directory/.$ws_id.lock" ] && echo present || echo absent)"
+
+# L3: an imported approval is never delivery authority; the owner must approve the spec afresh.
+printf '# Imported approved\n## Status\nApproved (by Ashley Oliver, 2026-10-06)\n## Objective\nx\n' >"$import_directory/WORK-017.md"
+import_ws import WORK-017 >/dev/null 2>&1
+output="$(import_ws deliver WORK-017 --owner-command deliver 2>&1)"; status_code=$?
+expect_equal "L3: deliver on an imported approval is refused" 3 "$status_code"
+expect_contains "L3: the refusal points to the approve command" "approve WORK-017 spec" "$output"
+expect_equal "L3: the item stays approved (imported)" "approved imported" "$(import_state '"\(.status) \(.approval.source)"' WORK-017)"
+output="$(import_ws approve WORK-017 spec --owner-command approve 2>&1)"; status_code=$?
+expect_equal "L3: approve spec on an imported approval records a fresh owner approval" "0 owner-command" "$status_code $(import_state .approval.source WORK-017)"
+output="$(import_ws deliver WORK-017 --owner-command deliver 2>&1)"; status_code=$?
+expect_equal "L3: deliver then succeeds" "0 delivering" "$status_code $(import_state .status WORK-017)"
+output="$(import_ws approve WORK-017 spec --owner-command approve 2>&1)"; status_code=$?
+expect_equal "L3: approve spec on an owner-approved delivering item is still refused" 3 "$status_code"
+
+# --- readiness listing (AC6): read-only, deterministic
+new_item delivering
+ws finding-add "$ws_id" --finding F1 --source qa --severity high --summary "high one" >/dev/null
+ws finding-add "$ws_id" --finding F2 --source security-reviewer --severity critical --security --summary "critical two" >/dev/null
+ws finding-add "$ws_id" --finding F3 --source qa --severity low --summary "low open three" >/dev/null
+ws finding-add "$ws_id" --finding F4 --source qa --severity medium --summary "medium four" >/dev/null
+ws finding-fixed "$ws_id" --finding F1 --sha abc1234 >/dev/null
+ws approve "$ws_id" accept F2 --owner-command approve --note "risk accepted" >/dev/null
+ws approve "$ws_id" defer F4 --owner-command approve >/dev/null
+ws approve "$ws_id" tier I1 0 --owner-command approve >/dev/null
+ws decision "$ws_id" --trigger 1 --question "also README?" --answer "no, not in scope" >/dev/null
+ws owner-action-add "$ws_id" --action-id A1 --description "gh auth login" --increment I1 >/dev/null
+ws owner-action-add "$ws_id" --action-id A2 --description "already done" >/dev/null
+ws owner-action-add "$ws_id" --action-id A3 --description "global step" >/dev/null
+ws owner-action-done "$ws_id" --action-id A2 >/dev/null
+before="$(state_checksum)"
+run_ws readiness "$ws_id"
+readiness_output="$ws_output"
+expect_ws "readiness" 0
+expect_equal "readiness: state is byte-identical afterwards" "$before" "$(state_checksum)"
+expect_equal "readiness: high and critical findings with dispositions and the fix sha" "F1 high fixed abc1234|F2 critical owner" "$(jq -r '.highFindings | map("\(.id) \(.severity) \(.disposition.state)\(if .disposition.sha then " " + .disposition.sha else "" end)") | join("|")' <<<"$readiness_output")"
+expect_equal "readiness: owner-command decisions for accept, defer and tier carry time and spec hash" "3 true $(state_value .approval.specSha256)" "$(jq -r '"\(.ownerDecisions | length) \(.ownerDecisions | all(.at != null)) \(.ownerDecisions | map(.specSha256) | unique | join(","))"' <<<"$readiness_output")"
+expect_contains "readiness: the accepted risk is listed" "accept or waive the risk of finding F2" "$readiness_output"
+expect_contains "readiness: the deferred finding is listed" "defer finding F4" "$readiness_output"
+expect_contains "readiness: the lowered tier is listed" "lower the tier of increment I1 to 0" "$readiness_output"
+expect_equal "readiness: conversation decisions" "also README?" "$(jq -r '.conversationDecisions | map(.question) | join("|")' <<<"$readiness_output")"
+expect_equal "readiness: open findings" "F3" "$(jq -r '.openFindings | map(.id) | join("|")' <<<"$readiness_output")"
+expect_equal "readiness: pending owner actions exclude done ones" "A1|A3" "$(jq -r '.pendingOwnerActions | map(.id) | join("|")' <<<"$readiness_output")"
+run_ws readiness "$ws_id" --inc I1
+expect_equal "readiness --inc: only that increment's pending actions, with the increment" "A1 I1" "$(jq -r '"\(.pendingOwnerActions | map(.id) | join("|")) \(.increment.id)"' <<<"$ws_output")"
+run_ws readiness "$ws_id"
+expect_equal "readiness is deterministic" "$readiness_output" "$ws_output"
+run_ws readiness "$ws_id" --inc $'I1\n'
+expect_ws "readiness: a malformed --inc is a usage error" 2
+expect_equal "readiness: still byte-identical after every call" "$before" "$(state_checksum)"
+printf '{ broken' >"$work_directory/readiness-corrupt.json"
+new_item proposed
+cp "$work_directory/readiness-corrupt.json" "$(state_path)"
+run_ws readiness "$ws_id"
+expect_ws "readiness: corrupt state is a schema error" 5
+
+# Trigger 4 stays answerable from conversation: delivery resumes and the source is recorded.
+new_item delivering
+run_ws block "$ws_id" --trigger 4 --question "run the reserved operation?"
+expect_ws "trigger 4: block" 0
+run_ws answer "$ws_id" --decision D1 --answer "owner will run it"
+expect_ws "trigger 4: answered from conversation" 0
+expect_equal "trigger 4: delivery resumed and source is conversation" "delivering conversation 4" "$(state_value '"\(.status) \(.decisions[0].source) \(.decisions[0].trigger)"')"
 
 # --- guard parity: the guard decides the same with no state, honest state and forged state
 parity_repository="$(new_repository parity-repo feature)"
@@ -4599,6 +4740,9 @@ case "$deliver_text" in *[Pp]laybook*) fail "skill deliver: playbook selection i
 case "$deliver_text" in *"goes to the user"*) fail "skill deliver: 'goes to the user' is removed" ;; *) pass ;; esac
 case "$deliver_text" in *"Record the task list under"*) fail "skill deliver: must not write the legacy Implementation state" ;; *) pass ;; esac
 case "$deliver_text" in *[Ss]igned* | *"autonomous deploy"*" is "*) fail "skill deliver: must not claim signing or autonomous deployment" ;; *) pass ;; esac
+# AC9: the increment start is one guard confirmation only with this exact sequence.
+expect_contains "skill deliver: increment start fetches the default branch" 'git fetch origin <default>' "$deliver_text"
+expect_contains "skill deliver: increment start is one switch from the remote default" 'git switch -c <work-branch> origin/<default>' "$deliver_text"
 # A review that wrote into the spec would change its hash and stop delivery.
 review_text="$(cat "$plugin_directory/skills/review/SKILL.md")"
 expect_contains "skill review: items with state are recorded as evidence, not in the spec" "never edit the spec" "$review_text"
@@ -4675,8 +4819,8 @@ run_wait() { # bodies-and-env are set by the caller; args are passed to the help
   wait_status=$?
 }
 set_bodies() { rm -f "$fake_gh_directory/bodies"/*; : >"$fake_gh_directory/log"; local number=0 body; for body in "$@"; do number=$((number + 1)); printf '%s' "$body" >"$fake_gh_directory/bodies/$number.json"; done; }
-fast_wait=(--timeout 0 --interval 0)
-retry_wait=(--timeout 5 --interval 0)
+fast_wait=(--timeout 0 --interval 1)
+retry_wait=(--timeout 10 --interval 1 --max-interval 1)
 rate_limit_payload='{"message":"API rate limit exceeded for user ID 1.","documentation_url":"https://docs.github.com/rest"}'
 pass_checks='[{"name":"build","bucket":"pass"},{"name":"lint","bucket":"skipping"}]'
 pending_checks='[{"name":"build","bucket":"pass"},{"name":"test","bucket":"pending"}]'
@@ -4698,6 +4842,18 @@ set_bodies '{"total_count":2,"check_runs":[{"name":"build","status":"completed",
 expect_equal "wait checks sha: failure exit" 1 "$wait_status"
 set_bodies '{"total_count":1,"check_runs":[{"name":"build","status":"in_progress","conclusion":null}]}'; run_wait "${fast_wait[@]}" checks abc1234
 expect_equal "wait checks sha: in progress times out" 4 "$wait_status"
+# L5: a truncated first page (total_count above the runs returned) is never a pass.
+truncated_runs="$(jq -nc '{total_count: 150, check_runs: [range(100) | {name: "run\(.)", status: "completed", conclusion: "success"}]}')"
+set_bodies "$truncated_runs"; run_wait "${fast_wait[@]}" checks abc1234
+expect_equal "wait checks sha: total_count 150 with 100 runs is not a pass" true "$([ "$wait_status" != 0 ] && echo true || echo false)"
+set_bodies "$truncated_runs"; run_wait "${retry_wait[@]}" checks abc1234
+expect_equal "wait checks sha: a truncated page ends in the error verdict" 5 "$wait_status"
+run_wait --timeout 5 --interval 0 checks 12
+expect_equal "wait: --interval 0 is a usage error" 2 "$wait_status"
+run_wait --timeout 5 --max-interval 0 checks 12
+expect_equal "wait: --max-interval 0 is a usage error" 2 "$wait_status"
+run_wait --timeout 5 checks $'abc1234\n'
+expect_equal "wait: a sha with a trailing newline is a usage error" 2 "$wait_status"
 
 # Error payloads and malformed data are never data.
 set_bodies "$rate_limit_payload"; run_wait "${retry_wait[@]}" checks 12

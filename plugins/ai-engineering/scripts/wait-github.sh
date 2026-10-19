@@ -40,7 +40,10 @@ is_number() { case "$1" in '' | *[!0-9]*) return 1 ;; *) return 0 ;; esac; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --timeout | --interval | --max-interval)
-      if [ $# -lt 2 ] || ! is_number "$2"; then usage; fi
+      if [ $# -lt 2 ] || ! is_number "$2" || [ "${#2}" -gt 6 ]; then usage; fi
+      case "$1" in
+        --interval | --max-interval) [ "$2" -ge 1 ] || usage ;;
+      esac
       case "$1" in
         --timeout) timeout_seconds="$2" ;;
         --interval) interval_seconds="$2" ;;
@@ -61,7 +64,7 @@ case "$mode" in
   checks)
     if is_number "$target" && [ "${#target}" -le 6 ]; then
       target_kind="pr"
-    elif printf '%s' "$target" | grep -Eq '^[0-9a-fA-F]{7,40}$'; then
+    elif [[ $target =~ ^[0-9a-fA-F]{7,40}$ ]]; then
       target_kind="sha"
     else
       usage
@@ -104,6 +107,7 @@ classify_checks() {
         else null end)
      else
        (if type == "object" and (.check_runs | type == "array")
+           and (.total_count | type == "number") and .total_count == (.check_runs | length)
            and all(.check_runs[]; type == "object" and (.name | type == "string") and (.status | type == "string"))
         then .check_runs | map({name: .name, state: (if .status != "completed" then "pending"
                                        elif (.conclusion | IN("success", "neutral", "skipped")) then "pass"

@@ -48,7 +48,7 @@ Draft <!-- the lifecycle status lives in WORK-NNN.state.json; approval happens o
 <!-- One line per increment: id, title, proposed tier (0, 1 or 2) and the reasons. Delivery lowers nothing; only the owner lowers a tier through /ai-engineering:approve. -->
 - I1: <title> (proposed tier <0|1|2>: <reasons>)
 ## Delivery policy
-<!-- Read by workstate.sh: lines of the form "key: value". Only these two keys exist; deployment fields are rejected. -->
+<!-- Read by workstate.sh: lines of the form "key: value". Only these two keys exist; deployment fields are rejected, and so is any other line that is not a recognised key: value entry. -->
 - pushWorkBranch: true
 - openPullRequest: true
 ## Owner actions

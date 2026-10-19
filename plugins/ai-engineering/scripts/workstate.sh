@@ -52,13 +52,18 @@
 #                      authorised or delivering. Idempotent. [--merged "id|title|pr|mergeSha[|tier]"]
 #   show            read-only: the full state as JSON
 #   status          read-only: a compact JSON summary, including whether the spec hash still matches
+#   readiness       read-only: JSON listing for the readiness report [--inc <id>]: high or critical
+#                   findings and dispositions, owner-command risk and tier decisions (time, spec
+#                   hash), conversation decisions, open findings, pending owner actions
 #
 # Spec-hash check: every mutating command except create, import and approve spec first compares
 # the SHA-256 of the spec file with the approved hash. A difference returns the item to proposed
 # (history records it) and exits 6, so delivery stops at its next transition check.
 #
 # Delivery policy: read from the spec's "## Delivery policy" section, lines of the form
-# "key: value" (optionally bulleted, backticks allowed). Prose lines are ignored. Fields:
+# "key: value" (optionally bulleted, backticks allowed). Blank lines and HTML comments are
+# allowed; any other line that is not a recognised key: value entry is rejected, and any line
+# naming production, deploy, environment, release or publish is rejected. Fields:
 #   pushWorkBranch: true|false          (default true)
 #   openPullRequest: true|false|draft|ready   (default true; true means ready; never merges)
 # Deployment fields (ephemeralDeploy, persistentEnvironments) and any production, deploy,
@@ -144,7 +149,10 @@ status=""
 
 cleanup() {
   [ -n "$temporary_file" ] && rm -f "$temporary_file"
-  [ -n "$lock_directory" ] && rm -rf "$lock_directory"
+  [ -n "$spec_snapshot" ] && rm -f "$spec_snapshot"
+  if [ -n "$lock_directory" ] && [ "$(cat "$lock_directory/pid" 2>/dev/null || true)" = "$$" ]; then
+    rm -rf "$lock_directory"
+  fi
 }
 trap cleanup EXIT
 
@@ -226,30 +234,39 @@ need_text() { # option-name value
 
 need_identifier() { # option-name value
   [ -n "$2" ] || fail "$EXIT_USAGE" "$1 is required"
-  printf '%s' "$2" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' || fail "$EXIT_USAGE" "$1 must be 1-64 letters, digits, dot, dash or underscore"
+  [[ $2 =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || fail "$EXIT_USAGE" "$1 must be 1-64 letters, digits, dot, dash or underscore"
 }
 
 need_sha() { # option-name value (optional: empty allowed)
-  [ -z "$2" ] || printf '%s' "$2" | grep -Eq '^[0-9a-fA-F]{7,64}$' || fail "$EXIT_USAGE" "$1 must be a hexadecimal commit id"
+  [ -z "$2" ] || [[ $2 =~ ^[0-9a-fA-F]{7,64}$ ]] || fail "$EXIT_USAGE" "$1 must be a hexadecimal commit id"
 }
 
 actor_name() { printf '%s' "${opt_by:-${USER:-unknown}}"; }
 
 # ------------------------------------------------------------------ state access
-spec_hash() { sha256_of "$spec_file"; }
+# The hash and the delivery policy of one transition come from the same snapshot of the spec
+# (taken by snapshot_spec), so a concurrent edit cannot make them disagree.
+spec_snapshot=""
+spec_hash() { sha256_of "${spec_snapshot:-$spec_file}"; }
+snapshot_spec() {
+  [ -f "$spec_file" ] || return 0
+  spec_snapshot="$(mktemp "$specs_directory/.$id.spec.XXXXXX")" || fail "$EXIT_ENVIRONMENT" "cannot snapshot the spec"
+  cp "$spec_file" "$spec_snapshot" || fail "$EXIT_ENVIRONMENT" "cannot snapshot the spec"
+}
 
+# The lock is removed on exit only by the process that created it.
 acquire_lock() {
   local attempts=0 holder
-  lock_directory="$specs_directory/.$id.lock"
-  until mkdir "$lock_directory" 2>/dev/null; do
+  local candidate="$specs_directory/.$id.lock"
+  until mkdir "$candidate" 2>/dev/null; do
     attempts=$((attempts + 1))
     if [ "$attempts" -ge 100 ]; then
-      holder="$(cat "$lock_directory/pid" 2>/dev/null || true)"
-      lock_directory=""
-      fail "$EXIT_ENVIRONMENT" "another transition holds the lock for $id (pid ${holder:-unknown}); if no workstate process is running, remove $specs_directory/.$id.lock"
+      holder="$(cat "$candidate/pid" 2>/dev/null || true)"
+      fail "$EXIT_ENVIRONMENT" "another transition holds the lock for $id (pid ${holder:-unknown}); if no workstate process is running, remove $candidate"
     fi
     sleep 0.1
   done
+  lock_directory="$candidate"
   printf '%s\n' "$$" >"$lock_directory/pid"
 }
 
@@ -334,24 +351,32 @@ transition_check() {
 policy_json=""
 read_policy() {
   local section result errors
-  section="$(awk '/^## /{ in_section = ($0 ~ /^##[[:space:]]+[Dd]elivery [Pp]olicy[[:space:]]*$/); next } in_section { print }' "$spec_file")"
+  section="$(awk '/^## /{ in_section = ($0 ~ /^##[[:space:]]+[Dd]elivery [Pp]olicy[[:space:]]*$/); next } in_section { print }' "${spec_snapshot:-$spec_file}")"
+  # Every non-blank, non-comment line must be a recognised "key: value" entry. Lines naming
+  # production, deploy, environment, release or publish are rejected whatever their form.
   result="$(jq -Rn --arg text "$section" '
-    ($text | split("\n")
-      | map(sub("^\\s*[-*]\\s+"; "") | gsub("`"; "") | sub("\\s+$"; ""))
-      | map(capture("^(?<key>[A-Za-z][A-Za-z0-9]*)\\s*:\\s*(?<value>\\S.*)$"))) as $entries
+    ($text | gsub("(?s)<!--.*?-->"; "") | split("\n")
+      | map(sub("^\\s*[-*]\\s+"; "") | gsub("`"; "") | sub("^\\s+"; "") | sub("\\s+$"; ""))
+      | map(select(. != ""))
+      | map({raw: ., parsed: ([capture("^(?<key>[A-Za-z][A-Za-z0-9]*)\\s*:\\s*(?<value>\\S.*)$")] | first)})) as $lines
+    | ($lines | map(select(.parsed != null) | .parsed)) as $entries
     | ($entries | map(.key)) as $keys
-    | ([ $entries[]
-        | if (.key | IN("ephemeralDeploy", "persistentEnvironments")) then
-            "\(.key) is a deployment field: deployment policy is not available until WORK-004, and every deploy still asks in v0.3.0"
-          elif ((.key + " " + .value) | test("prod|deploy|environment|release|publish"; "i")) then
-            "\(.key): production, deploy, release and publish entries cannot be expressed in delivery policy (see WORK-004); they always need the owner"
-          elif (.key | IN("pushWorkBranch", "openPullRequest") | not) then
+    | ([ $lines[]
+        | (.raw | gsub("[[:cntrl:]]"; "") | .[0:80]) as $shown
+        | if (.parsed != null and (.parsed.key | IN("ephemeralDeploy", "persistentEnvironments"))) then
+            "\(.parsed.key) is a deployment field: deployment policy is not available until WORK-004, and every deploy still asks in v0.3.0"
+          elif (.raw | test("prod|deploy|environment|release|publish"; "i")) then
+            "\($shown): production, deploy, environment, release and publish entries cannot be expressed in delivery policy (see WORK-004); they always need the owner"
+          elif .parsed == null then
+            "unrecognised line in the delivery policy section (expected key: value): \($shown)"
+          else .parsed as $entry | ($entry |
+          if (.key | IN("pushWorkBranch", "openPullRequest") | not) then
             "unknown delivery policy field \(.key); only pushWorkBranch and openPullRequest exist in v0.3.0 (deployment fields are WORK-004)"
           elif (.key == "pushWorkBranch" and (.value | ascii_downcase | IN("true", "false") | not)) then
             "pushWorkBranch must be true or false"
           elif (.key == "openPullRequest" and (.value | ascii_downcase | IN("true", "false", "draft", "ready") | not)) then
             "openPullRequest must be true, false, draft or ready"
-          else empty end ]
+          else empty end) end ]
       + (if ($keys | length) != ($keys | unique | length) then ["a delivery policy field is declared twice"] else [] end)) as $errors
     | ([$entries[] | select(.key == "pushWorkBranch") | .value | ascii_downcase] | first // "true") as $push
     | ([$entries[] | select(.key == "openPullRequest") | .value | ascii_downcase] | first // "true") as $pull_request
@@ -400,6 +425,7 @@ cmd_approve() {
   local sub="${positional[1]:-}"
   [ -n "$sub" ] || fail "$EXIT_USAGE" "approve needs a sub-action: spec | accept <finding> | defer <finding> | tier <increment> <0|1|2> | revoke"
   open_for_update
+  [ "$sub" != spec ] || snapshot_spec
   transition_check
   local actor="owner-command:approve" owner_by
   owner_by="$(actor_name)"
@@ -407,13 +433,18 @@ cmd_approve() {
   check_text "--note" "$opt_note"
   case "$sub" in
     spec)
-      require_status "approve spec" proposed
+      local transition_label="proposed->approved"
+      if [ "$status" = approved ] && [ "$(query '.approval.source')" = imported ]; then
+        transition_label="approved->approved (imported approval replaced by an owner command)"
+      else
+        require_status "approve spec" proposed
+      fi
       [ -f "$spec_file" ] || fail "$EXIT_INVALID_TRANSITION" "the spec file for $id does not exist"
       read_policy
       local hash commit
       hash="$(spec_hash)"
       commit="$(git -C "$specs_directory" rev-parse HEAD 2>/dev/null || true)"
-      mutate "proposed->approved" "$actor" \
+      mutate "$transition_label" "$actor" \
         '.status = "approved" | .spec.contentSha256 = $hash | .spec.approvedCommit = (if $commit == "" then null else $commit end)
          | .approval = {by: $by, at: $now, specSha256: $hash, source: "owner-command", command: "approve"}' \
         --arg hash "$hash" --arg commit "$commit" --arg by "$owner_by"
@@ -430,7 +461,7 @@ cmd_approve() {
       require_status "approve tier" delivering blocked paused
       local increment="${positional[2]:-}" new_tier="${positional[3]:-}"
       need_identifier "increment id" "$increment"
-      printf '%s' "$new_tier" | grep -Eq '^[012]$' || fail "$EXIT_USAGE" "tier must be 0, 1 or 2"
+      [[ $new_tier =~ ^[012]$ ]] || fail "$EXIT_USAGE" "tier must be 0, 1 or 2"
       holds --arg i "$increment" '.increments | any(.id == $i)' || fail "$EXIT_INVALID_TRANSITION" "increment $increment does not exist"
       holds --arg i "$increment" --argjson t "$new_tier" '.increments | any(.id == $i and .tier > $t)' || fail "$EXIT_INVALID_TRANSITION" "approve tier only lowers a tier; raising is a coordinator record (raise-tier)"
       record_owner_decision "tier" "" "$increment:$new_tier" "$actor" "$owner_by"
@@ -467,15 +498,15 @@ record_owner_decision() { # kind finding tier-spec actor by
   fi
   mutate "$kind (owner decision $decision_id)" "$actor" '
       (if $existing == "yes" then
-         .decisions |= map(if .id == $decision then .answer = $answer | .answeredAt = $now | .source = "owner-command" | .by = $by else . end)
+         .decisions |= map(if .id == $decision then .answer = $answer | .answeredAt = $now | .source = "owner-command" | .by = $by | .specSha256 = $spec_hash else . end)
        else
-         .decisions += [{id: $decision, trigger: 3, question: $question, options: [], askedAt: $now, answeredAt: $now, answer: $answer, source: "owner-command", by: $by}]
+         .decisions += [{id: $decision, trigger: 3, question: $question, options: [], askedAt: $now, answeredAt: $now, answer: $answer, source: "owner-command", by: $by, specSha256: $spec_hash}]
        end)
       | if $finding != "" then .findings |= map(if .id == $finding then .disposition = {state: "owner", decisionId: $decision, action: $kind} else . end) else . end
       | if $kind == "tier" then .increments |= map(if .id == $increment then .tier = $new_tier else . end) else . end' \
     --arg decision "$decision_id" --arg existing "$([ -n "$opt_decision" ] && echo yes || echo no)" \
     --arg answer "$answer" --arg question "$question" --arg by "$owner_by" --arg finding "$finding" --arg kind "$kind" \
-    --arg increment "$increment_id" --argjson new_tier "$new_tier_value"
+    --arg increment "$increment_id" --argjson new_tier "$new_tier_value" --arg spec_hash "$(query '.approval.specSha256')"
   echo "$id: $kind recorded as decision $decision_id (owner-command; a workflow record, not security authority)"
 }
 
@@ -486,7 +517,11 @@ cmd_deliver() {
     approved | paused) ;;
     *) fail "$EXIT_INVALID_TRANSITION" "deliver is refused: $id is $status; deliver applies only to an approved item or a paused item" ;;
   esac
+  snapshot_spec
   transition_check
+  if [ "$status" = approved ] && [ "$(query '.approval.source')" = imported ]; then
+    fail "$EXIT_INVALID_TRANSITION" "deliver is refused: the approval of $id was imported from a v0.2 Status line, and v0.2 authority is never v0.3 authority. Approve the current spec first with /ai-engineering:approve $id spec, then deliver."
+  fi
   local actor="owner-command:deliver" owner_by
   owner_by="$(actor_name)"
   check_text "--by" "$owner_by"
@@ -511,7 +546,7 @@ cmd_block() {
   open_for_update
   require_status block delivering
   transition_check
-  printf '%s' "$opt_trigger" | grep -Eq '^[1-5]$' || fail "$EXIT_USAGE" "--trigger must be 1 to 5"
+  [[ $opt_trigger =~ ^[1-5]$ ]] || fail "$EXIT_USAGE" "--trigger must be 1 to 5"
   need_text "--question" "$opt_question"
   check_text "--options" "$opt_options"
   mutate "delivering->blocked (trigger $opt_trigger)" "coordinator" '
@@ -553,7 +588,7 @@ cmd_decision() {
   open_for_update
   require_status decision delivering blocked paused
   transition_check
-  printf '%s' "$opt_trigger" | grep -Eq '^[1-5]$' || fail "$EXIT_USAGE" "--trigger must be 1 to 5"
+  [[ $opt_trigger =~ ^[1-5]$ ]] || fail "$EXIT_USAGE" "--trigger must be 1 to 5"
   need_text "--question" "$opt_question"
   need_text "--answer" "$opt_answer"
   [ "$opt_trigger" != "3" ] || fail "$EXIT_MISSING_OWNER_COMMAND" "a trigger-3 decision (risk) cannot be recorded from conversation; the owner uses the approve command"
@@ -603,7 +638,7 @@ cmd_increment_add() {
   require_status increment-add proposed
   need_identifier "--inc" "$opt_inc"
   need_text "--title" "$opt_title"
-  printf '%s' "$opt_tier" | grep -Eq '^[012]$' || fail "$EXIT_USAGE" "--tier must be 0, 1 or 2"
+  [[ $opt_tier =~ ^[012]$ ]] || fail "$EXIT_USAGE" "--tier must be 0, 1 or 2"
   check_text "--branch" "$opt_branch"
   holds --arg i "$opt_inc" '.increments | any(.id == $i) | not' || fail "$EXIT_INVALID_TRANSITION" "increment $opt_inc already exists"
   mutate "increment $opt_inc added" "coordinator" '
@@ -671,7 +706,7 @@ cmd_raise_tier() {
   transition_check
   need_identifier "--inc" "$opt_inc"
   require_increment
-  printf '%s' "$opt_tier" | grep -Eq '^[012]$' || fail "$EXIT_USAGE" "--tier must be 0, 1 or 2"
+  [[ $opt_tier =~ ^[012]$ ]] || fail "$EXIT_USAGE" "--tier must be 0, 1 or 2"
   holds --arg i "$opt_inc" --argjson t "$opt_tier" '.increments | any(.id == $i and .tier < $t)' || fail "$EXIT_INVALID_TRANSITION" "raise-tier only raises: tier $opt_tier is not above the current tier of $opt_inc (lowering needs the owner's approve tier)"
   mutate "tier of $opt_inc raised to $opt_tier" "coordinator" '.increments |= map(if .id == $i then .tier = $t else . end)' --arg i "$opt_inc" --argjson t "$opt_tier"
   echo "tier of $opt_inc is now $opt_tier"
@@ -768,6 +803,24 @@ cmd_show() {
   jq . <<<"$state_json"
 }
 
+cmd_readiness() {
+  load_state
+  [ -z "$opt_inc" ] || need_identifier "--inc" "$opt_inc"
+  jq --arg inc "$opt_inc" '
+    . as $state
+    | { id, status,
+      highFindings: [.findings[] | select(.severity | IN("high", "critical"))
+                     | {id, severity, security, summary, disposition}],
+      ownerDecisions: [.decisions[] | select(.trigger == 3 and .source == "owner-command")
+                       | {id, question, answer, at: .answeredAt, specSha256, by}],
+      conversationDecisions: [.decisions[] | select(.source == "conversation")
+                              | {id, trigger, question, answer, at: .answeredAt, by}],
+      openFindings: [.findings[] | select(.disposition.state == "open") | {id, severity, summary}],
+      pendingOwnerActions: [.ownerActions[] | select(.status == "requested" and ($inc == "" or .increment == $inc))
+                            | {id, description, increment, requestedAt}] }
+    | if $inc != "" then .increment = ($state.increments | map(select(.id == $inc)) | first) else . end' <<<"$state_json"
+}
+
 cmd_status() {
   load_state
   local current="null"
@@ -855,7 +908,7 @@ add_imported_increments() {
     check_text "--merged pr" "$pull_request"
     [ -n "$merge_sha" ] || fail "$EXIT_USAGE" "--merged needs id|title|pr|mergeSha"
     need_sha "--merged mergeSha" "$merge_sha"
-    printf '%s' "$tier_value" | grep -Eq '^[012]$' || fail "$EXIT_USAGE" "--merged tier must be 0, 1 or 2 (default 2, unknown, treated as highest)"
+    [[ $tier_value =~ ^[012]$ ]] || fail "$EXIT_USAGE" "--merged tier must be 0, 1 or 2 (default 2, unknown, treated as highest)"
     holds --arg i "$increment_id" '.increments | any(.id == $i)' && continue
     mutate "increment $increment_id imported as merged" "workstate-import" '
         .increments += [{id: $i, title: $title, status: "merged", proposedTier: $tier, tier: $tier, branch: null,
@@ -883,7 +936,7 @@ case "$command_name" in -h | --help | help) usage ;; esac
 [ $# -ge 1 ] || fail "$EXIT_USAGE" "$command_name needs a work id (WORK-NNN)"
 id="$1"
 shift
-printf '%s' "$id" | grep -Eq '^WORK-[0-9]+$' || fail "$EXIT_USAGE" "work id must look like WORK-NNN"
+[[ $id =~ ^WORK-[0-9]{1,9}$ ]] || fail "$EXIT_USAGE" "work id must look like WORK-NNN"
 positional=("$id")
 parse_options "$@"
 
@@ -927,5 +980,6 @@ case "$command_name" in
   import) cmd_import ;;
   show) cmd_show ;;
   status) cmd_status ;;
+  readiness) cmd_readiness ;;
   *) fail "$EXIT_USAGE" "unknown command '$command_name'" ;;
 esac

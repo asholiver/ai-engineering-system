@@ -222,6 +222,8 @@ End-to-end scenarios run deliberately in a scratch project, using unreleased sou
 - **Interim mechanism (2026-10-16):** owner commands can be triggered by an agent (Security). Mitigated by keeping every guard and platform control unchanged and listing owner-command decisions in readiness for the owner's merge review.
 - **Owner friction:** every deploy and reserved operation still asks in v0.3.0; autonomous preview deploys wait for WORK-004.
 - **Parallel worktrees** need dependencies installed (`.worktreeinclude`). Document; fall back to sequential when installation fails, recording why.
+- **Self-attested records (security review, 2026-10-19):** `finding-invalid --confirmed-by` and `increment-set --status merged` are recorded as the coordinator states them, not verified against the reviewer or Git. Accepted under the threat model (state is a workflow record); readiness and the owner's merge review remain the control.
+- **Effective tier (WORK-003):** `approve tier` records any tier; nothing in WORK-002 reads `.tier`. WORK-003 must compute the effective tier as the maximum of the state tier and the classifier floor, with a test that a state tier of 0 cannot go below a floor of 2.
 - **Background merge waits across long gaps.** Bounded; an expired wait records "waiting for owner merge" as a planned owner action, not an interruption.
 ## Acceptance criteria
 1. The transition script is the only supported state-transition interface. Owner-only transitions require the interim owner command and are recorded with `source: "owner-command"`. No guard decision or protected operation reads state as authority (amended 2026-10-16).
@@ -244,7 +246,7 @@ End-to-end scenarios run deliberately in a scratch project, using unreleased sou
 - Implementation complete; deterministic tests pass; E1–E3 evidence recorded
 - `scripts/check.sh` passes
 - Internal security review of the state, transition script, owner-command mechanism and guard parity (Opus) with no unresolved findings (amended 2026-10-16)
-- Independent external review passes
+- Independent review passes (amended 2026-10-19: Opus security review, QA review and CI; see Independent review)
 - Human acceptance complete
 ## Compatibility and migration
 - **v0.2 projects:** existing specs keep working as documents. `deliver` refuses items without state and points to `/ai-engineering:setup` import.
@@ -270,7 +272,7 @@ End-to-end scenarios run deliberately in a scratch project, using unreleased sou
 - `versions/CHANGELOG.md`.
 ## Independent review
 - **Internal review.** Opus security review of the transition script, the owner-command mechanism and guard parity (amended 2026-10-16).
-- **External review.** CodeRabbit on the PR at its head SHA, with no unresolved actionable findings (D5 arrangement while v0.2.0 governs).
+- **External review.** ~~CodeRabbit on the PR at its head SHA~~ (amended 2026-10-19, owner decision: CodeRabbit is unavailable). For v0.3.0 the review process is the independent Opus security review, the QA specialist review and the required CI check (`check (ubuntu, ShellCheck 0.11.0)`) on the PR head, with every review thread resolved (repository ruleset) and the owner's merge.
 - **Gate scripts.** Under v0.2 the gate commands come from the base ref, but `tests/run.sh` and `scripts/check.sh` are executed from the change itself. Reviewers must check every diff to those two files, and a weakened or removed check is a blocking finding.
 - **Owner acceptance.** The owner checks the transition table and the Business rules list.
 ## Dependencies
@@ -291,7 +293,7 @@ End-to-end scenarios run deliberately in a scratch project, using unreleased sou
 - **Path B (2026-10-16):** split signed approvals and autonomous deployment into WORK-004; ship the lifecycle in v0.3.0 with interim owner-command transitions that grant no security authority.
 - D2: the human-only `/ai-engineering:approve` command exists, and approval stays distinct from delivery authorisation.
 - D3: no main-session model requirement.
-- D5: the gate-bootstrap PR is merged before this work starts, and CodeRabbit is the external reviewer for this PR.
+- D5: the gate-bootstrap PR is merged before this work starts, and CodeRabbit is the external reviewer for this PR. **Amended 2026-10-19:** CodeRabbit is unavailable; see Independent review.
 ## Open decisions
 - G1, rollback-resistant nonce tracking, delivery-permission design, O3, the approver repository update source and guard rule scope moved to WORK-004 (2026-10-16).
 - None remain for this spec beyond the owner's acceptance of the Path B amendment.
@@ -302,7 +304,7 @@ D2, D3 and D5 remain resolved (see `WORK-001-planning.md`); D1 is superseded.
 - Delivery (owner-authorised 2026-10-19; branch `feature/work-002-lifecycle` from `f71b540`; v0.2 deliver, sequential in the main checkout; playbook: feature; Opus security review required):
   - B1 backend: state schema, transition script, owner-command source, policy validation, v0.2 import, guard-parity tests (Scope 1–3, 6, 7, 18; AC1, 3, 7, 12, 13). Status: done; `workstate.sh`; `GATE fast: PASSED (exit 0) command: tests/run.sh` (3069 passed, 0 failed); guard and hook files unchanged.
   - B2 backend: `/approve` skill, `/deliver` rewrite, `/plan` template, `/setup` (baseRef, import, banner), agent wording, wait helper, recovery (Scope 4, 5, 8–17; AC2, 4–6, 8–11, 14, 16). Status: B2a done (approve skill, deliver entry transition, plan template, setup, banner, agent wording, `wait-github.sh`); `GATE full: PASSED (exit 0) command: scripts/check.sh` (3160 passed, 0 failed). B2b done (`/deliver` rewrite; `review` records evidence for items with state); `GATE full: PASSED (exit 0) command: scripts/check.sh` (3196 passed, 0 failed).
-  - B3 coordinator: docs, CHANGELOG, E1–E3 evidence in a scratch project, gates, reviews. Status: docs and CHANGELOG done with B2b; QA and Opus security review in progress; E1–E3 planned (owner action: type `/approve` and `/deliver` in a scratch project).
+  - B3 coordinator: docs, CHANGELOG, E1–E3 evidence in a scratch project, gates, reviews. Status: docs and CHANGELOG done with B2b; QA (AC1–3, 7, 8, 10, 12–14, 16 met; AC4, 5, 9, 11 pending E2E) and Opus security review (no Critical/High; M1, L1–L6 fixed) done; `GATE full: PASSED (exit 0) command: scripts/check.sh` (3283 passed, 0 failed) after fixes; security re-check of fixes pending; E1–E3 planned (owner action: type `/approve` and `/deliver` in a scratch project).
 ## Review state
 <!-- v0.2 review records its status block here. -->
 -
