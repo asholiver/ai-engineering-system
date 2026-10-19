@@ -10,6 +10,10 @@ Accepted (by Ashley Oliver, 2026-10-06) as part of the v0.3 architecture. Implem
 - **Proposed amendment, not accepted:** user-presence owner signatures replace the token mechanism. The amendment is approved in principle for design only. It needs a security review, G1 closure (the trusted approval path, currently OPEN, with a separate macOS approver account (G1-b) as the provisional architecture) and the owner's separate, explicit acceptance before implementation. Completing the security review does not by itself accept it. The trust anchor (O3) is deferred.
 - **v0.3.0 release:** "Takes effect on release of v0.3.0" applies only to the parts of this ADR that are accepted and implemented by then. Neither the superseded token mechanism nor an unaccepted signed-approval implementation ships automatically with v0.3.0. Owner-only transitions do not ship without an accepted mechanism.
 - The superseded 2026-10-06 text is kept below, marked as superseded.
+
+**Proposed amendment (2026-10-16), pending the owner's acceptance: Path B.**
+- v0.3.0 ships the lifecycle with the **interim owner-command mechanism** (Decision, below) as the mechanism for owner-only transitions, once the owner accepts this amendment. It is a workflow record, not security authority.
+- The signed-approval amendment, replay protection, the trust anchor and autonomous deployment move to `WORK-004`. Their status is unchanged: proposed, not accepted, and G1 is OPEN.
 ## Context
 In the Landra F0 dogfood, authority was inferred from conversation:
 - about 25 of 36 human prompts were approve, decide or continue;
@@ -35,7 +39,15 @@ Governing principle: agents have autonomy over implementation, not authority ove
   - Approving and authorising are owner-only transitions.
   - So are accepting or waiving risk, lowering a tier, extending scope and revoking.
   - Approval binds a spec content hash. Any change to the spec returns the item to `proposed`.
-- **Verifiable owner transitions by owner signature** (proposed amendment, 2026-10-13; not accepted; see Status).
+- **Interim owner-command transitions (v0.3.0; proposed 2026-10-16, see Status).**
+  - Owner-only transitions are performed by the human-only commands `/ai-engineering:approve` and `/ai-engineering:deliver` (`disable-model-invocation: true`) through the transition script, which records `source: "owner-command"`.
+  - **Not security authority.** An agent can trigger these commands (2026-10-13 spike) and can forge state, so an owner-command record never proves owner intent. It is never imported or treated as a signed approval.
+  - **May affect** only the plugin's own workflow instructions, such as whether `/deliver` asks "continue", "approve fix" or "approve work-branch push". Those prompts were instructions, not controls.
+  - **Never affects** the guard or any hook decision (no guard code reads state), deploy classes (every deploy asks), reserved operations, Claude Code permission prompts, branch protection or the owner's merge. It grants no new guard permission and no deployment right.
+  - Decisions recorded this way that accept, waive or defer risk, or lower a tier, are listed in the readiness report; the owner's review and merge of the PR ratifies them. A tier override below the classifier floor is not available through it.
+  - Accepted limitation: an agent could move an item through `approved`, `authorised` and `delivering` without the owner and then skip skill-level questions. Every change still reaches the default branch only through an owner-reviewed, owner-merged PR, and every protected operation still asks.
+  - Replaced by signed owner approvals when `WORK-004` ships.
+- **Verifiable owner transitions by owner signature** (proposed amendment, 2026-10-13; not accepted; moved to `WORK-004` on 2026-10-16; see Status).
   - Owner authority is a signature by a user-presence key over an exact approval record (repository, work item, action and scope, spec commit and hash, expiry, and a nonce for transition approvals). The owner makes it through a trusted approval path; it is verified unattended against a trust anchor outside the agent's write reach.
   - There are two kinds. A **transition approval** is intended to be single-use and authorises one owner-only lifecycle transition; single use is not yet rollback-resistant (see the replay limitation in Consequences). A **delivery permission** is short-lived, names one increment and an explicit list of permitted actions, and may be reused until it expires; every use is verified afresh. Agent-writable state never expands authority, and no security property depends on agent-writable revocation state. Longer-lived permissions are open, and so is durable revocation: early revocation of an unexpired permission is not cryptographically enforceable today (see Consequences). When a permission is absent or expired, protected operations pause for fresh owner approval.
   - Provisional key placement: the private signing key isolated in a separate approver account (G1-b), with a root-owned verification anchor in the Claude-running account (installation deferred).
@@ -114,6 +126,7 @@ Acceptable only as defence in depth, not as authority: an agent with Bash can ev
 ### A custom orchestration runtime, Agent Teams or MCP
 Rejected. They are unnecessary given native subagents, worktrees, background commands and hooks ([ADR-0001](ADR-0001-claude-native-architecture.md)).
 ## Consequences
+- **v0.3.0 (Path B, proposed 2026-10-16):** the owner types explicit lifecycle commands; there is no signing step; every deploy and reserved operation keeps asking; owner-command records are workflow records only. The signed-approval consequences below apply when `WORK-004` ships.
 - The owner types explicit lifecycle commands instead of conversational approvals, and signs each approval through the trusted approval path.
 - Owner set-up is needed: Secretive and an approval key, the trust anchor (sudo), and the approver account and signer if G1-b is adopted.
 - **Revocation limitation (open security requirement):** early revocation of an unexpired, otherwise valid signed delivery permission is NOT cryptographically enforceable in the current design. Agent-writable state is not a revocation authority, and `revoke` does not invalidate a valid signature; a permission stays usable until it expires. Durable trusted revocation is an open security requirement.

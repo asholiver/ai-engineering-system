@@ -1,6 +1,8 @@
 # Work Specification
 ## Status
-Approved (by Ashley Oliver, 2026-10-06), in principle, with owner decisions D1–D6 incorporated as recorded in `WORK-001-planning.md`. Delivery is not authorised; it may start only after the gate-bootstrap PR (D5) is merged and the owner explicitly authorises it.
+**Current status (2026-10-16): partial delivery authorised.** The gate-bootstrap PR (D5) is merged. On 2026-10-16 the owner authorised implementation of the components that do not depend on WORK-002's state schema or owner-only transitions: Scope items 1 (classifier), 3 (gate configuration v2), 4 (gate trust states), 5 (bootstrap structural checks and canaries), 6 (certification), 7 (gate ledger, except the cause recorded through the transition script), 9 (external evidence adapters), 10 (coverage evaluation), 15 (release and documentation consistency) and 16 (removals), subject to the repository workflow and review gates. Items 2, 8, 11–14 and the transition-script parts of 7 wait for WORK-002's state schema and the owner's acceptance of the Path B amendment.
+
+Original status (history): Approved (by Ashley Oliver, 2026-10-06), in principle, with owner decisions D1–D6 incorporated as recorded in `WORK-001-planning.md`. Delivery is not authorised; it may start only after the gate-bootstrap PR (D5) is merged and the owner explicitly authorises it.
 ## Work ID
 WORK-003: Risk-tiered assurance, gate trust and review evidence (v0.3 PR C)
 ## Objective
@@ -45,7 +47,8 @@ Included:
    - The action floor is tier 2 when guard-log events of a reserved class occurred during the increment, or when a new dependency or external service was recorded.
    - The coordinator recomputes it after each task commit and in readiness.
    - When it rises, the reason is recorded in state without interrupting the owner (unless the cause is itself an escalation trigger).
-   - Only the owner lowers a tier, through the WORK-002 token transition. An owner-lowered tier is still floored by the classifier unless the owner explicitly records an override for named paths, which the readiness report shows.
+   - Only the owner lowers a tier, through the owner-only `approve tier` transition of WORK-002. In v0.3.0 that is the interim owner command, which records the decision but is not security authority; the readiness report lists it for the owner's merge review. Signed approvals replace it in WORK-004 (amended 2026-10-16; previously "the WORK-002 token transition", a mechanism superseded on 2026-10-13).
+   - An owner-lowered tier is still floored by the classifier. An override below the floor for named paths is available only with a signed owner approval (WORK-004), never with the interim owner command; the readiness report shows any override (amended 2026-10-16).
 3. **Gate configuration v2.** `.agents/gates.json` stays backward compatible with v0.2:
    - `fast` and `full` accept a string (as in v0.2) or an array of explicit steps.
    - Optional `prelude`: deterministic toolchain activation run in the same shell before each step, for example sourcing a Node version manager and selecting the pinned version.
@@ -374,7 +377,7 @@ End-to-end scenario in a scratch project (self-development protocol, evidence in
 - **Gate scripts.** Under v0.2 the gate commands come from the base ref, but `tests/run.sh` and `scripts/check.sh` are executed from the change itself. Reviewers must check every diff to those two files, and a weakened or removed check is a blocking finding.
 - **Owner acceptance.** The owner reviews the tier tables, tier-0 exclusions and readiness block text.
 ## Dependencies
-- Requires WORK-002's state model, transition script and decision/finding records. Develop after WORK-002's state schema is merged, or at least stable.
+- Requires WORK-002's state model, transition script and decision/finding records. Develop after WORK-002's state schema is merged, or at least stable. The independent components listed in Status can be developed before then (amended 2026-10-16).
 - Uses WORK-001's classification interface for refusing high-impact configured commands and guard-log events.
 - Ships together with WORK-001 and WORK-002 as v0.3.0.
 ## Settled owner decisions
