@@ -723,8 +723,12 @@ cmd_increment_set() {
     || fail "$EXIT_USAGE" "increment-set needs --status or at least one of --branch, --pr, --base-sha, --head-sha, --merge-sha"
   local current
   current="$(query --arg i "$opt_inc" '.increments[] | select(.id == $i) | .status')"
+  # A merged increment's record is final, and a merge SHA is recorded only with the move to merged.
+  [ "$current" != merged ] || fail "$EXIT_INVALID_TRANSITION" "increment $opt_inc is merged; its record is final"
+  [ -z "$opt_merge_sha" ] || [ "$opt_status" = merged ] \
+    || fail "$EXIT_INVALID_TRANSITION" "--merge-sha is recorded only with --status merged"
   # Repeating the current status records fields only (for example a new head SHA while active);
-  # it changes no status or timestamp. merged -> merged stays refused.
+  # it changes no status or timestamp.
   if [ -n "$opt_status" ] && [ "$opt_status" = "$current" ] && [ "$current" != merged ]; then
     opt_status=""
   fi

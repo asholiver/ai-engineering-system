@@ -4237,6 +4237,28 @@ expect_equal "head sha: ready -> ready keeps readyAt" "0 $ready_at_before ready"
 ws increment-set "$ws_id" --inc I1 --status merged --merge-sha abc1234 >/dev/null
 run_ws increment-set "$ws_id" --inc I1 --status merged --merge-sha def5678
 expect_ws "head sha: merged -> merged stays refused" 3
+# Security re-check L-A: a merged record is final; a merge SHA comes only with the move to merged.
+merged_before="$(state_checksum)"
+run_ws increment-set "$ws_id" --inc I1 --merge-sha def5678
+expect_ws "L-A: a merged increment's merge sha cannot be rewritten" 3
+run_ws increment-set "$ws_id" --inc I1 --head-sha def5678
+expect_ws "L-A: a merged increment's head sha cannot be rewritten" 3
+run_ws increment-set "$ws_id" --inc I1 --pr 99 --branch other
+expect_ws "L-A: a merged increment's pr and branch cannot be rewritten" 3
+expect_equal "L-A: refused updates leave the merged record unchanged" "$merged_before" "$(state_checksum)"
+new_item delivering
+ws increment-set "$ws_id" --inc I1 --status active >/dev/null
+run_ws increment-set "$ws_id" --inc I1 --merge-sha abc1234
+expect_ws "L-A: a merge sha cannot be recorded on an active increment" 3
+ws increment-set "$ws_id" --inc I1 --status ready >/dev/null
+run_ws increment-set "$ws_id" --inc I1 --status ready --merge-sha abc1234
+expect_ws "L-A: a merge sha cannot be recorded on a ready increment" 3
+expect_equal "L-A: no merge sha recorded before the merge" null "$(state_value '.increments[0].mergeSha')"
+run_ws increment-set "$ws_id" --inc I1 --status merged
+expect_ws "L-A: merged still needs a merge sha" 3
+run_ws increment-set "$ws_id" --inc I1 --status merged --merge-sha abc1234
+expect_ws "L-A: the merge sha is recorded with the move to merged" 0
+expect_equal "L-A: merged with its sha" "merged abc1234" "$(state_value '.increments[0] | "\(.status) \(.mergeSha)"')"
 
 # Security re-check I1: decisions without a blocking field count as blocking, never as proposals.
 new_item delivering
