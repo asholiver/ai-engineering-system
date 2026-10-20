@@ -27,6 +27,9 @@ Work-item lifecycle and delivery (WORK-002, ADR-0004).
 - `/setup` writes `worktree.baseRef: "head"` by default (opt-out documented; it also affects your own `claude --worktree` sessions) and gains v0.2 work-item import. The session banner shows the plugin version and root; check it after upgrading.
 - Spec template drops "Implementation state" and "Review state" and gains Increments, Delivery policy and Owner actions; specialist handoffs exclude the log and legacy sections.
 
+Security reviewer execution limits.
+- `security-reviewer` follows default execution limits: one simple command per Bash call, bounded inputs (no stress or oversized runs), probes only in an isolated scratch directory, no deletes, no running base or known-vulnerable versions without explicit authorisation, and no retrying a declined command in another form. `/ai-engineering:review` briefs the reviewer with them; exceptions need the owner's authorisation. These are procedural instructions, not a sandbox; the guard and hooks are unchanged.
+
 ## 0.2.0
 Claude Code native architecture (ADR-0001).
 - Repository is now a Claude Code marketplace publishing the `ai-engineering` plugin.

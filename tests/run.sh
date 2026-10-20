@@ -4965,6 +4965,31 @@ for specialist in frontend backend platform; do
   expect_contains "agent $specialist: ignores log and legacy sections" 'ignore its log and any legacy "Implementation state" and "Review state" sections' "$specialist_text"
 done
 
+# Security reviewer execution limits (WORK-002 E1 and WORK-003 C1 breaches): procedural, not a sandbox.
+reviewer_file="$plugin_directory/agents/security-reviewer.md"
+reviewer_text="$(cat "$reviewer_file")"
+expect_equal "agent security-reviewer: has one Execution limits section" 1 "$(grep -cxF "## Execution limits" "$reviewer_file")"
+expect_contains "agent security-reviewer: limits are procedural, not a sandbox" "These are procedural instructions, not a sandbox" "$reviewer_text"
+expect_contains "agent security-reviewer: guard behaviour unchanged" "the guard still asks or denies exactly as before" "$reviewer_text"
+expect_contains "agent security-reviewer: only owner-authorised exceptions" "unless the brief states that the owner authorised a specific exception for this review" "$reviewer_text"
+expect_contains "agent security-reviewer: one simple command per call" "One simple command per Bash call" "$reviewer_text"
+# shellcheck disable=SC2016 # the literal backticks are what the agent file must contain
+expect_contains "agent security-reviewer: no chaining" 'Do not chain commands with `&&`, `||`, `;`, `&` or pipes' "$reviewer_text"
+expect_contains "agent security-reviewer: bounded inputs" "Bounded inputs only: no input larger than 10 KB" "$reviewer_text"
+expect_contains "agent security-reviewer: no stress or oversized runs" "no stress, fuzz, load or oversized-input runs" "$reviewer_text"
+expect_contains "agent security-reviewer: isolated scratch probes" "Probe only in a fresh, isolated scratch directory" "$reviewer_text"
+expect_contains "agent security-reviewer: never writes to the repository" "Never write to the repository" "$reviewer_text"
+# shellcheck disable=SC2016 # the literal backticks are what the agent file must contain
+expect_contains "agent security-reviewer: no deletes" 'No deletes: no `rm`, `find -delete` or `git clean`' "$reviewer_text"
+expect_contains "agent security-reviewer: no vulnerable base versions without authorisation" "Never run the base, original or a known-vulnerable version of the code" "$reviewer_text"
+expect_contains "agent security-reviewer: authorisation must be explicit" "without explicit authorisation in the brief" "$reviewer_text"
+expect_contains "agent security-reviewer: no retry of declined commands" "do not retry it, split it or rephrase it to reach the same effect" "$reviewer_text"
+expect_contains "agent security-reviewer: lists executed commands" "List every command you executed in the report" "$reviewer_text"
+expect_equal "agent security-reviewer: still has no Edit or Write tool" "tools: Read, Grep, Glob, Bash" "$(grep -m1 '^tools: ' "$reviewer_file")"
+expect_contains "skill review: briefs the reviewer with the execution limits" "follow the Execution limits in its agent definition" "$review_text"
+expect_contains "skill review: exceptions only when the owner authorised them" "name any exception only when the owner authorised it for this review" "$review_text"
+expect_contains "skill review: limits are procedural, not a sandbox" "The limits are procedural, not a sandbox." "$review_text"
+
 # ---- wait-github.sh with a fake gh on PATH
 wait_helper="$scripts/wait-github.sh"
 fake_gh_directory="$work_directory/fake-gh"
