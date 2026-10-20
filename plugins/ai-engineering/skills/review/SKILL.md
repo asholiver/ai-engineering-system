@@ -10,6 +10,8 @@ Arguments: `$ARGUMENTS` - the work ID, then optionally the increment ID. Without
 
 Readiness is decided by one deterministic script, `"${CLAUDE_PLUGIN_ROOT}/scripts/readiness.sh" <WORK-ID> --inc <increment-id>`. It runs the full gate itself (configuration from the base commit) in a fresh clone of `HEAD`, the external review, the change classifier and the guard-log action floor, reads the work-item records and prints a `READINESS` block. Never replace any of its lines with your own judgement, and never report a check as passed that it did not report as passed.
 
+A run can take up to 50 minutes (the gate is limited to 30, the external review to 15). Run the script as a background Bash command, wait for its completion notification, then read its whole output: the exit code (0 ready, 1 not ready, 3 not certifiable, 2 usage or environment error, 4 stopped) and the `READINESS` block. Never report a verdict before the run has completed, and never treat a missing block, a timeout or a stopped run as anything but not ready.
+
 ## Steps
 1. Commit the change. Read the work spec `.agents/specs/active/<WORK-ID>.md` and run the readiness script once to learn the effective tier and the missing assurance. The gate executes the change's code with your privileges; if the change comes from an untrusted source, stop and ask the user to run the review in an isolated environment instead.
 2. Dispatch the internal checks the block reports as missing for that tier: `ai-engineering:qa` always; `ai-engineering:security-reviewer` at tier 2. Give each the spec path and the base and head commits. These are internal checks by Claude; they never count as the independent review. Tell the security reviewer to follow the Execution limits in its agent definition, and name any exception only when the owner authorised it for this review. The limits are procedural, not a sandbox. At tier 2, also write the residual-risk list for the owner.
@@ -21,5 +23,7 @@ Readiness is decided by one deterministic script, `"${CLAUDE_PLUGIN_ROOT}/script
 - External review is required at tiers 1 and 2: `EXTERNAL REVIEW: NOT CONFIGURED` is then a non-pass, and READY stays NO. Owner merge approval, Opus or QA reviews never substitute for it. At tier 0 it is optional, but a configured reviewer's `BLOCKING FINDINGS` or `ERROR` is READY: NO at every tier. When it is NOT CONFIGURED, say so plainly and point to `docs/external-review.md` in the ai-engineering system. This does not block implementation, local testing, commits or draft PRs; it only blocks marking the work ready for final acceptance.
 - If the gate line says `THIS CHANGE MODIFIES THE "full" GATE`, list that under open items for the human.
 - The gate runs in a fresh clone of `HEAD`, never in the checkout, so it must install its own dependencies. A gate that fails there is READY: NO; never re-run it in the checkout to get a pass.
+- When readiness is already NOT CERTIFIABLE, the gate and external review lines say `NOT RUN (not certifiable)`: fix the reported reasons first.
+- READY: YES is not proof that the owner approved the increment's start or that its base is the remote's commit: the guard log records that the start command was asked, not that it was approved or ran.
 
 Report findings; do not rewrite the implementation unless the user asks.

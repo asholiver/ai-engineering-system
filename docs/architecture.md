@@ -86,7 +86,7 @@ Decision record: [ADR-0003](decisions/ADR-0003-structured-action-guard.md). Work
 
 The plugin keeps two properties apart:
 
-- **Gate verdict integrity, which the plugin protects.** Implementation checks read `.agents/gates.json` as committed at `HEAD`; uncommitted edits to a committed file are ignored and reported. If nothing is committed at `HEAD` (for example right after setup, or outside git), they fall back to the working-tree file, in the repository or else in `CLAUDE_PROJECT_DIR`, and print a `NOTE`; that verdict can then be defined by uncommitted edits. During `/ai-engineering:review` the full gate is read only from the base ref, with no fallback, so the change cannot define the gate that certifies it. A change that modifies or adds that gate is named in the verdict line, and a gate defined only by the change is `NOT CONFIGURED`. The `externalReview` command is also read from the base ref. Any configured command the approval guard classifies as high-impact is refused.
+- **Gate verdict integrity, which the plugin protects.** Implementation checks read `.agents/gates.json` as committed at `HEAD`; uncommitted edits to a committed file are ignored and reported. If nothing is committed at `HEAD` (for example right after setup, or outside git), they fall back to the working-tree file, in the repository or else in `CLAUDE_PROJECT_DIR`, and print a `NOTE`; that verdict can then be defined by uncommitted edits. During `/ai-engineering:review` readiness reads the full gate only from the increment's recorded base commit, with no fallback, and runs it in a fresh clone of `HEAD`, so the change cannot define the gate that certifies it. A change that modifies or adds that gate is named in the verdict line, and a gate defined only by the change is `NOT CONFIGURED`. The `externalReview` command is also read from the base ref. Any configured command the approval guard classifies as high-impact is refused.
 - **Host execution safety, which the plugin cannot provide.** By default every gate runs through the Claude Code Bash tool, so the user's permission rules and sandbox stay in the execution path, and the plugin adds no unprompted execution route. That keeps the user's chosen boundary; it does not make untrusted code safe. Hooks run outside permissions, the auto-mode classifier and the sandbox, so `gate-fast.sh` executes nothing unless the user sets `AI_ENGINEERING_HOOK_GATES=1`. With it set, each implementation agent's working tree, including uncommitted edits, runs unprompted with the full environment of the Claude Code process. Set it only where the host is itself isolated or the code is trusted, and in your own environment rather than in committed project settings.
 
 Strong isolation of untrusted code needs an appropriately isolated execution environment: CI, a container, a VM or a devcontainer with scoped or no host credentials and appropriate network controls. Hook output (test output, reviewer findings) is untrusted text and may contain instructions; agents treat it as data.
@@ -120,26 +120,39 @@ Current guarantee: reviewers have no file-editing tools and are instructed not t
 `scripts/readiness.sh <WORK-ID> --inc <increment>` is the one readiness procedure. The `review` skill runs it, and `/ai-engineering:deliver` reaches it through `review`. It prints a `READINESS` block ending in `READY: YES | NO`. The script's header documents every rule; in summary:
 
 - **Effective tier** is the maximum of the state tier, the classifier floor and the action floor. Nothing lowers it. It is computed during readiness only; recomputing after each task commit is deferred to v0.3.x.
-- **Base** is the increment's recorded base commit. `workstate.sh` records it only when the increment moves from planned to active. It must be the full commit `origin/<default>` names at that moment (`origin/HEAD` names the default branch), and it never changes: late recording, a different base and re-anchoring are refused. The owner-approved start command names that exact commit (`git switch -c <branch> <commit>`), and readiness needs that exact command as the guard-log anchor. Otherwise the result is `NOT CERTIFIABLE`:
+- **Base** is the increment's recorded base commit. `workstate.sh` records it only when the increment moves from planned to active. It must be the full commit `origin/<default>` names at that moment (`origin/HEAD` names the default branch), and it never changes: late recording, a different base and re-anchoring are refused. The start command names that exact commit (`git switch -c <branch> <commit>`), and readiness needs that exact command as the guard-log anchor. Otherwise the result is `NOT CERTIFIABLE`:
   - the local `origin/<default>` must still equal the recorded base, so a ref moved to HEAD or to a newer commit is rejected. A newer ref is never accepted automatically, and re-anchoring an increment needs a separate owner workflow (not available in v0.3.0);
   - the base must be an ancestor of HEAD;
   - the increment branch's reflog must show the branch created from it, so a renamed and recreated branch does not count.
 
-  **Owner visibility is not authentication.** The ref and the reflog are local records, and remote authenticity is not verified (no `ls-remote`). A ref planted before the start shows in the start prompt as an unfamiliar commit, and only the owner can notice it.
-- **Order:** trust, the classifier and the action floor first, then the external review, then the full gate last, then revalidation. After the gate readiness checks again, and treats any change as `NOT CERTIFIABLE`:
+  **Trust boundary.** The anchor is an `ask` event: it records that the exact start command was asked. It does not show that the owner approved it, that it ran, or that the base is the remote's commit. An agent can plant `origin/<default>` and create the branch with commands the guard does not ask about, even after the owner rejects the start prompt. The ref and the reflog are local records, and remote authenticity is not verified (no `ls-remote`). READY: YES therefore rests on an unproven assumption: that `origin/<default>` named the remote's commit when the increment started. Closing this needs separate guard evidence of approval and execution (proposed in WORK-003).
+- **Order:** trust, the classifier and the action floor first, then the external review, then the full gate last, then revalidation. When readiness is already `NOT CERTIFIABLE`, neither the external review nor the gate runs (`NOT RUN (not certifiable)`). After the gate readiness checks again, and treats any change as `NOT CERTIFIABLE`:
   - the spec and state;
   - HEAD, the checked-out branch and `origin/<default>`;
-  - replace refs and diff configuration;
+  - replace refs;
   - the installed plugin against its tag;
   - the evidence statuses.
 
-  No earlier result is reused.
+  No earlier result is reused. This catches persistent or accidental changes, not a determined hostile gate (see Limits).
+- **Time limits:** the gate is limited to 30 minutes, the external review to 15 and readiness as a whole to 50, clones included. A caller can lower these limits (`READINESS_*_TIMEOUT_SECONDS`) but never raise them.
+  - Each child runs in its own process group. It is stopped on timeout, or when readiness gets INT, TERM or HUP; on a signal readiness exits 4 with no verdict.
+  - A timeout or a missing verdict is a failure.
+  - Temporary files and clones are removed on every exit readiness handles.
+  - Progress lines go to standard error. The `review` skill runs readiness in the background and waits for the completed result.
 - **Fresh clones:**
   - The external review and the full gate each run in their own fresh local clone of the repository at exactly HEAD. Each clone sits in a temporary root separate from readiness's own files.
-  - A clone's objects are copied, with no hard links and no alternates. It is checked out on its own branch, `ai-engineering-readiness-gate`; its remote, every other branch and every replace ref are absent. Git hooks are off for readiness's own clone and checkout steps; a hook template in global configuration could still run when the gate itself calls Git.
-  - Readiness reads Git with `GIT_NO_REPLACE_OBJECTS` and `GIT_NO_LAZY_FETCH` set, and with `LC_ALL=C`. The gate and the external review run without the two variables, because the guard treats the first as one that changes what Git sees, and with the caller's locale. Both still receive explicit commits.
-  - Inherited Git variables that redirect Git or reshape diffs are removed for readiness and every child it runs (for example `GIT_DIR`, `GIT_CONFIG_*`, `GIT_EXTERNAL_DIFF` and `GIT_ATTR_SOURCE`).
-- **External review:** it receives the recorded base and HEAD. Configuration that reshapes diffs makes the result `NOT CERTIFIABLE`; it is rejected, not trusted. That covers `diff.external`, any `diff.<driver>.textconv` or `.command` and `core.attributesFile`, in any configuration scope, and a non-empty `.git/info/attributes`. A user-level `diff.external` (for example a structural diff tool) therefore also blocks readiness.
+  - **Controlled Git for clone and checkout.** No user, system or XDG configuration, no attributes (committed ones included), no template and no hooks, so no filter or end-of-line conversion can change what is checked out.
+  - **Byte-for-byte verification.** Every tracked file must equal HEAD's blob and mode, and nothing untracked or ignored may exist.
+  - A clone's objects are copied, with no hard links and no alternates. It is checked out on its own branch, `ai-engineering-readiness-gate`; its remote, every other branch and every replace ref are absent.
+  - The clone's local configuration neutralises user-level diff settings, because local configuration overrides user and system configuration. That covers the attributes file (including the XDG default), the big-file threshold, path prefixes, relative and submodule-hiding diffs, and hooks.
+  - Readiness reads Git with `GIT_NO_REPLACE_OBJECTS` and `GIT_NO_LAZY_FETCH` set, and with `LC_ALL=C`. The gate and the external review run with the user's environment, without those two variables and with the caller's locale. They don't get the controlled configuration either, because the guard treats `GIT_CONFIG_*` and `GIT_NO_REPLACE_OBJECTS` as variables that change what Git reads, and would refuse their commands. Both still receive explicit commits.
+  - Inherited Git variables that redirect Git or reshape diffs are removed for readiness and every child it runs (for example `GIT_DIR`, `GIT_CONFIG_*`, `GIT_EXTERNAL_DIFF`, `GIT_ATTR_SOURCE` and `GIT_TEMPLATE_DIR`).
+- **External review:** it receives the recorded base and HEAD. It does not run, and the result is `NOT CERTIFIABLE`, when its own diff could not show the change as it is:
+  - an effective `diff.external` (it can't be neutralised: an empty local value breaks `git diff`), so a user-level structural diff tool blocks readiness;
+  - a changed text file with a `-diff` or `binary` attribute, or with a diff driver that has `textconv`, `command` or `binary` configured, including attributes from a committed `.gitattributes`;
+  - any changed file with a configured filter driver.
+
+  The clone has no remote, so a reviewer command must use `REVIEW_BASE_REF` and `REVIEW_HEAD_REF`, not `origin/...`.
 - **Full gate:** readiness runs it itself, with configuration from the base commit. It never runs in, falls back to, or links anything from the development checkout (no `node_modules`, `.env` or other ignored files), so the project's `full` gate must be self-contained, installing its own dependencies. The verdict counts only together with `run-gate.sh`'s exit status. Recorded gate results are never trusted. **Running the project's gate is not a security sandbox:** it runs with the user's privileges and can reach user-level resources and absolute paths unless separately isolated.
 - **Working tree and records:**
   - `git status` (with fsmonitor off) must succeed and show only the active item's state and log.
@@ -161,6 +174,7 @@ Current guarantee: reviewers have no file-editing tools and are instructed not t
   - 1: READY: NO, certifiable.
   - 3: NOT CERTIFIABLE, so READY: NO.
   - 2: a usage or environment error (bad arguments, not a Git repository, no `jq` or `git`, no temporary directory). No block is printed.
+  - 4: stopped by INT, TERM or HUP. No block is printed, and the run is never READY.
 - **Depth:**
   - QA evidence is needed at every tier.
   - A security review and a residual-risk list are needed at tier 2. Security categories (auth, secrets, SQL, migrations) always classify as tier 2.
@@ -170,7 +184,8 @@ Current guarantee: reviewers have no file-editing tools and are instructed not t
   - Evidence and the guard log are workflow records written by the coordinator and the guard. Neither is complete or tamper-proof.
   - A guard-log write that the guard's deadline kills is lost silently.
   - Standalone `/review` without work-item state is always NOT CERTIFIABLE.
-  - Remote authenticity of the default-branch ref is not verified, and owner visibility of the base commit is not authentication.
+  - Remote authenticity of the default-branch ref is not verified, and the guard-log anchor proves neither the owner's approval nor execution (see the trust boundary above).
+  - Revalidation after the gate catches persistent or accidental changes, not a determined hostile gate, which runs with readiness's own privileges. Parsing the whole script before it runs (`main`) is defence in depth.
   - A project gate that assumes installed dependencies fails in the fresh clone, which is READY: NO.
   - Practical limits for consuming projects are listed in [consuming-project.md](consuming-project.md#readiness-and-the-version-pin).
 

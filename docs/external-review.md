@@ -15,12 +15,12 @@ In the project's `.agents/gates.json`, committed to the base branch:
 `null` or a missing key means not configured. The command is read from the file **as committed at the base ref**, so a change under review cannot select or alter its own reviewer; when a change modifies `externalReview`, the report notes that the base command was used. A command that the approval guard classifies as high-impact is refused (`ERROR`).
 
 ## Invocation
-Readiness (`scripts/readiness.sh`, which `/ai-engineering:review` runs) calls `scripts/external-review.sh <base> <head> [spec-path]` with the increment's recorded base commit and `HEAD`, in its own fresh clone of `HEAD`. It controls the Git environment and rejects diff-reshaping configuration (see [readiness](architecture.md#readiness-work-003-c2)). It executes the command with `bash -c` from the repository root and these environment variables:
+Readiness (`scripts/readiness.sh`, which `/ai-engineering:review` runs) calls `scripts/external-review.sh <base> <head> [spec-path]` with the increment's recorded base commit and `HEAD`, in its own fresh clone of `HEAD`, with a 15-minute limit. The clone is verified against `HEAD` byte for byte, and user-level diff settings are neutralised in it. Settings that cannot be neutralised are refused (see [readiness](architecture.md#readiness-work-003-c2)). The clone has no remote, so use `REVIEW_BASE_REF` and `REVIEW_HEAD_REF`, not `origin/...`. It executes the command with `bash -c` from the clone's root and these environment variables:
 
 | Variable | Meaning |
 | :- | :- |
-| `REVIEW_BASE_REF` | Base of the change, for example `main` |
-| `REVIEW_HEAD_REF` | Head of the change, normally `HEAD` |
+| `REVIEW_BASE_REF` | Base of the change: the increment's recorded base commit (a full commit id) |
+| `REVIEW_HEAD_REF` | Head of the change: the full commit id of `HEAD` |
 | `REVIEW_SPEC_PATH` | Work spec path relative to the repository root, or empty |
 
 The command is trusted because it comes from the base ref, but it runs in a clone of the change: a reviewer that executes repository code (for example by running tests) executes the change's code. See the [trust boundary](architecture.md#trust-boundary-for-project-code).

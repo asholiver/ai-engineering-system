@@ -176,4 +176,79 @@ Append-only delivery narrative, written by the coordinator. Not sent to speciali
   - the first "no verdict" gate action used `pkill`, which matched nothing.
 
   Its replacement walked up the process ancestry and killed the outermost `run-gate.sh full`. When the suite ran inside the real full gate, that was the real gate run: it was killed (exit 137), and nothing else was affected. The action now stops at `readiness.sh` and matches only a `run-gate.sh` on readiness's `/gate-tree` clone.
-- `GATE full: PASSED (exit 0) command: scripts/check.sh` (3966 passed, 0 failed).
+- `GATE full: PASSED (exit 0) command: scripts/check.sh` (3966 passed, 0 failed). Committed as `429aae3`.
+
+## 2026-10-20: PR C remediation round 3, local
+- Fresh internal reviews of `a5e7796..429aae3` (not external review evidence):
+  - **Security, High:**
+    - H-1: user-level filters and attributes (`~/.config/git/attributes`, `init.templateDir`) altered the gate clone's checkout, so a failing gate reported PASSED;
+    - H-2: a user-level `core.bigFileThreshold`, attributes or diff prefixes blinded the reviewer.
+
+    Both were reproduced in an isolated scratch HOME, and every command involved gets no Guard decision.
+  - **Security, Medium:**
+    - M-1: a committed `.gitattributes` could hide changes from the reviewer;
+    - M-2: the anchor proves a start was asked, not approved: a rejected start can still be followed by unguarded branch creation;
+    - M-3: a gate could rewrite the running `readiness.sh` (bash reads scripts lazily).
+  - **Security, Low:** further inherited variables, and a locale test that could not fail.
+  - **QA:**
+    - High: no time bound;
+    - Medium: cost, recovery from a moved ref, user-level configuration, the planted-ref test never running readiness, untested cells, test hermeticity, documentation mismatches;
+    - one timing-test failure in QA's run.
+- Owner decisions (conversation, 2026-10-20), verbatim excerpts:
+  - "Verify scratch checkout contents byte-for-byte against the intended HEAD before executing the gate or reviewer. Neutralise inherited Git diff/filter/template configuration in the scratch clones, including relevant HOME/XDG settings, without exporting Guard-conflicting variables into Guard-classified child commands. Reject effective attributes or configuration that can hide or transform changed files."
+  - "Neutralise user-level diff.external and similar settings when safe … If an unsafe effective setting cannot be reliably neutralised, fail closed."
+  - "Wrap readiness execution in a main() structure … defence in depth, not protection against a determined hostile gate."
+  - "Add bounded execution: 30-minute full-gate timeout, 15-minute external-review timeout, and 50-minute overall readiness limit. … A timeout or missing verdict is a failure. Clean up scratch resources on normal exit and handled termination."
+  - "Skip gate and external review when readiness is already NOT CERTIFIABLE. Defer a separate assess mode."
+  - "Investigate the one QA timing-test failure separately. Do not assume it was caused by parallel reviews."
+  - "An ask event does not prove owner approval or command execution. … Identify the exact additional Guard evidence or protocol required to close this gap, but do not implement it without separate approval. Explicitly report whether READY: YES remains reachable and under what assumptions."
+- Implemented:
+  - **Clones:**
+    - clone and checkout use controlled Git: `HOME`, `XDG_CONFIG_HOME` and a template set to empty readiness-owned directories, `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM`, `GIT_ATTR_NOSYSTEM`, `GIT_ATTR_SOURCE` set to the empty tree, attributes file `/dev/null`, hooks off, `core.autocrlf=false`;
+    - these variables are given only to readiness's own Git commands, never to the gate or the reviewer;
+    - every tracked blob and mode is verified, and nothing may be untracked or ignored.
+  - **Neutralised in each clone's local configuration:**
+    - `core.attributesFile=/dev/null` (this also covers the XDG default) and `core.bigFileThreshold`;
+    - the diff prefixes, `noprefix`, `mnemonicPrefix`, `relative` and `ignoreSubmodules`;
+    - hooks and fsmonitor.
+  - **Refused (fail closed):**
+    - an effective `diff.external`: a scratch probe showed an empty local value makes `git diff` fail ("cannot run"), so it cannot be neutralised;
+    - a changed text file with `-diff`, `binary`, or a diff driver that has `textconv`, `command` or `binary` configured;
+    - any changed file with a configured filter driver.
+
+    These are evaluated in the reviewer's own environment with `git check-attr`, so committed and system attributes are included. The development repository's own diff configuration is no longer rejected: it doesn't reach the clones.
+  - **`main()`:** the whole script is one function, called on the last line.
+  - **Time limits:**
+    - `run_bounded` runs each child in its own process group, with a TERM-then-KILL watchdog, and keeps the child's exit status;
+    - the limits are 30, 15 and 50 minutes, and callers can lower them but not raise them;
+    - INT, TERM and HUP stop the active child and exit 4, and the EXIT trap removes every temporary root;
+    - progress lines go to stderr, and the review skill runs readiness in the background and waits for it.
+  - **Skipping:** the external review and the gate don't run once readiness is NOT CERTIFIABLE.
+  - **Tests:**
+    - the hermetic test home (`HOME`/`XDG_CONFIG_HOME` fixtures, Git redirect variables unset);
+    - both reproduced bypasses, with filter and template variants for the gate, and four blinding variants plus `diff.external`, textconv and committed attributes for the reviewer;
+    - `GIT_TEMPLATE_DIR`, and the gate rewriting the running script in place;
+    - timeouts for the gate, the reviewer and the overall limit, TERM cleanup, and skipping;
+    - the missing negative cells, readiness on a planted base (recording the open gap), environment exit 2;
+    - a locale test that can fail, and skipped preconditions reported as SKIP rather than pass.
+  - **Defect found by the first full gate of this round:** a gate stopped by its time limit left `run-gate.sh`'s own temporary file behind, because TERM skips its EXIT trap. Each child now gets a private `TMPDIR` inside its clone root, which readiness removes; this also cleans up the gate's own temporary files. A test asserts the gate's `TMPDIR`.
+  - `GATE full: PASSED (exit 0) command: scripts/check.sh` (4079 passed, 0 failed, 0 skipped).
+- **Timing test (`tests/run.sh` guard-log deadline) investigation:**
+  - A scratch replica (same guard script, stalled-Git stand-in and timing method) ran 70 times idle and 40 times under 12-CPU load. Every run that did not overlap a system sleep took 2.1–2.3 s, against the test's 4 s bound.
+  - Three outliers (29.7 s, 61 s, 1037 s) each coincide exactly with a macOS sleep in `pmset -g log` (22:55:00–22:55:30, 61 s and 1040 s).
+  - QA's 6 s result could not be tied to a specific sleep because its time is unknown. The test measures wall time across any sleep or suspension; no Guard defect or load sensitivity was reproduced.
+  - The timeout is unchanged. Recommendation: treat a lone failure as environmental and re-run, or later measure with a sleep-independent clock (a separate change).
+- **READY: YES remains reachable under these assumptions:**
+  - (A1) the installed plugin's local consistency check is not defeated by a local process (accepted);
+  - (A2) the guard log, state and evidence are not edited directly (accepted; workflow records);
+  - (A3) `origin/<default>` named the remote's commit when the increment started. Nothing proves this: the `ask` anchor shows the start command was asked, not approved or executed, and remote authenticity is not verified. The owner accepted "remote authenticity is not verified" in the H1 decision, but the owner-visibility mitigation previously claimed for it is withdrawn;
+  - (A4) the gate is not deliberately hostile (revalidation is defence in depth).
+
+  If A3 is not acceptable without evidence, readiness must fail closed (no READY: YES) until the guard change below exists. That is an owner decision; this round leaves READY: YES reachable under A3.
+- **Proposed separate guard change** (not implemented; it needs approval because it changes the guard and hooks):
+  1. Execution evidence: a `PostToolUse` hook for Bash appends `{event: "executed", toolUseId, sessionId, commandSha256, exit status}`, and the existing `PreToolUse` `ask` line gains `toolUseId`. Claude Code runs `PostToolUse` only for a tool call that was permitted and ran, so readiness could require the anchor `ask` and a successful `executed` record with the same `toolUseId` and hash. A rejected start produces no `executed` record. Whether the hook input carries a tool-use id must be verified against Claude Code's hook documentation first.
+  2. Approval evidence: an `executed` record shows permission was granted, but under an auto-approving permission mode it would not show a human decision. If Claude Code exposes the permission decision to hooks, record it; otherwise require the owner's `/ai-engineering:deliver` command to record the start (an owner-command record, itself a workflow record).
+  3. Base authenticity: at activation, record the remote's default-branch commit with one `git ls-remote origin refs/heads/<default>` (or the authenticated `gh api` compare), and refuse activation or certification when it differs from the base. This reverses the earlier "no ls-remote" decision, for the start only.
+  4. Ref protection: the guard asks for writes to `refs/remotes/*` (`update-ref`, `fetch` refspecs into `refs/remotes`, `remote set-head`, `symbolic-ref`) and for `git branch -f/-m` of the increment branch, so tampering after the anchor raises the floor.
+
+  With 1 and 3, A3 would rest on recorded execution and a remote check instead of an unproven assumption. Direct edits of the local log files remain the accepted A2 residual.

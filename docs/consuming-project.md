@@ -61,11 +61,11 @@ Readiness (`/ai-engineering:review`, and the end of each delivered increment) is
 
 Without a pin, from a `--plugin-dir` checkout, or with any mismatch, readiness reports `NOT CERTIFIABLE` and `READY: NO`.
 
-It also reads the guard log under the Git directory, so each increment must start with the exact command `/ai-engineering:deliver` uses: `git switch -c <work-branch> <commit>`, naming the full `origin/<default>` commit. That command's confirmation shows you the base commit. Seeing it does not prove it is the remote's commit; readiness doesn't contact the remote. The base is recorded when the increment starts and never changes.
+It also reads the guard log under the Git directory, so each increment must start with the exact command `/ai-engineering:deliver` uses: `git switch -c <work-branch> <commit>`, naming the full `origin/<default>` commit. That command's confirmation shows you the base commit. The guard log records only that the command was asked, not that you approved it or that it ran, and readiness doesn't contact the remote. So `READY: YES` assumes, without proving, that `origin/<default>` named the remote's commit when the increment started. The base is recorded when the increment starts and never changes.
 
 Practical requirements and limits:
 - **`origin/HEAD` must be set.** Repositories created with `git init` and `git remote add` don't set it. Run `git remote set-head origin -a` once.
-- **Don't move `origin/<default>` during an increment.** That means no `git fetch`, `git pull` or IDE auto-fetch (some IDEs fetch in the background by default) until it is merged. A moved default-branch ref makes the increment `NOT CERTIFIABLE`, and v0.3.0 has no way to re-anchor it.
+- **Don't move `origin/<default>` during an increment.** That means no `git fetch`, `git pull` or IDE auto-fetch (some IDEs fetch in the background by default) until it is merged. A moved default-branch ref makes the increment `NOT CERTIFIABLE`, and v0.3.0 has no way to re-anchor it. The way forward is a new increment started from the current default branch, carrying the work over deliberately.
 - **Keep reflogs.** Readiness reads the increment branch's oldest reflog entry. An increment older than `gc.reflogExpire` (90 days by default), a repository with `core.logAllRefUpdates=false`, or a branch created any other way is `NOT CERTIFIABLE`.
 - **Clone compatibility.** The fresh clones don't fetch, so these are `NOT CERTIFIABLE` or fail the gate:
   - partial or blobless clones;
@@ -73,7 +73,12 @@ Practical requirements and limits:
   - sparse checkouts (skip-worktree flags);
   - submodules, unless the gate initialises them;
   - Git LFS content, unless the gate fetches it.
-- **Diff configuration.** `diff.external`, `diff.<driver>.textconv`, `diff.<driver>.command` or `core.attributesFile` in any Git configuration scope, or a non-empty `.git/info/attributes`, is `NOT CERTIFIABLE`.
+- **Diff configuration.** Readiness neutralises most user-level diff settings in its clones, such as an attributes file, the big-file threshold and diff prefixes. Some it cannot neutralise, so these make readiness `NOT CERTIFIABLE`:
+  - `diff.external`, set in your user or system configuration (for example for a structural diff tool);
+  - a changed text file with `-diff`, `binary` or a diff driver that has `textconv` or `command` configured;
+  - a changed file with a configured filter driver.
+- **Time.** A readiness run can take up to 50 minutes: the gate is limited to 30, the external review to 15. A timeout is `READY: NO`.
+- **Reviewer commands** run in a clone with no remote, so use `REVIEW_BASE_REF` and `REVIEW_HEAD_REF` rather than `origin/...` or `gh pr diff`.
 
 Readiness runs the `full` gate in a fresh clone of `HEAD`, never in your checkout. **Make the `full` gate self-contained:** install dependencies inside it (for example `pnpm install --frozen-lockfile && …`), and don't rely on `node_modules`, `.env` or other untracked files. A gate that fails there is `READY: NO`. The gate still runs with your privileges and is not a sandbox. See [readiness](architecture.md#readiness-work-003-c2).
 

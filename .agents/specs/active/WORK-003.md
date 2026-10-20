@@ -400,9 +400,10 @@ End-to-end scenario in a scratch project (self-development protocol, evidence in
 - **External review: option 1.** No independent external reviewer is configured. `NOT CONFIGURED` is a non-pass for tiers 1 and 2, so READY stays NO for them. The owner's merge approval is not external-review evidence. Opus and QA reviews never count as external review, and no passing result is invented. Tier 0 follows the depth table: external review is optional, so a genuinely tier-0 increment may be READY: YES when every other applicable requirement passes.
 - **Effective tier** = max(approved or state tier, trusted classifier floor, action floor). Nothing lowers it below the classifier floor in v0.3.0.
 - **Classifier fallback.** Without a trusted installed classifier, the classifier floor is tier 2 and readiness reports `NOT CERTIFIABLE` (READY: NO). A path outside the repository and the presence of `classify-change.sh` do not prove trust.
-- **Action floor (C2).** Tier 2 when the increment has any trigger-2 decision (new dependency or external service are trigger 2; the category is not finer, so this over-counts), or when the guard log shows any reserved-class `ask` or `deny` in the increment's window, apart from the two exclusions below. Exclusions are exact and deterministic, never command-pattern exemptions:
-  - the increment-start confirmation: the one `ask` event whose command SHA-256 equals that of the exact command `git switch -c <increment branch> <recorded base commit>` for this increment's recorded branch. Amended 2026-10-20 (H1 remediation): the command names the full base commit, so the owner sees it; it was `origin/<default>`;
-  - with parallel worktrees explicitly opted in and recorded in state, `ask` events whose command SHA-256 equals that of the exact worktree merge command for a recorded worktree branch.
+- **Action floor (C2).** Tier 2 when the increment has any trigger-2 decision (new dependency or external service are trigger 2; the category is not finer, so this over-counts), or when the guard log shows any `ask` or `deny` after the increment-start anchor (the first matching `ask` at or before the increment's `activeAt`), from any session, apart from the three exclusions below (amended 2026-10-20 by owner decisions G-5 and G-6). Exclusions are exact and deterministic, never command-pattern exemptions, and apply to `ask` events only, never to a `deny`:
+  - the increment-start confirmation: `ask` events whose command SHA-256 equals that of the exact command `git switch -c <increment branch> <recorded base commit>` for this increment's recorded branch. Amended 2026-10-20 (H1 remediation): the command names the full base commit, so its confirmation shows it; it was `origin/<default>`. An `ask` proves neither approval nor execution (see Implementation state);
+  - the resume of the increment: `ask` events for the exact command `git switch <increment branch>`;
+  - with parallel worktrees explicitly opted in and recorded in state, `ask` events whose command SHA-256 equals that of the exact worktree merge command (`git merge --no-edit <branch>`) for a recorded worktree branch.
 
   Any deviation from those exact commands counts, which raises the tier.
 - **Guard-log evidence (C2).** Readiness reads `guard-log.jsonl` and its one rotated file. Missing, unreadable, symlinked or malformed log files, or insufficient evidence, are never treated as an empty log: readiness reports `NOT CERTIFIABLE` (READY: NO). Insufficient evidence means the increment-start event (the anchor) is not found, so deleting or losing the log is detected. Rotation keeps everything after the anchor while the anchor is present. Residual: a deliberate local process can edit lines after the anchor; the log is a workflow record, as state is.
@@ -442,10 +443,10 @@ End-to-end scenario in a scratch project (self-development protocol, evidence in
   - First implementation: `GATE full: PASSED (exit 0) command: scripts/check.sh` (3636 passed, 0 failed). Internal Opus security and QA reviews of `6f24c6c` (not external review): 1 High, 2 Medium and 6 Low (security); 6 Medium and 5 Low (QA). Remediation decisions are in the log entry of 2026-10-20 ("PR C remediation").
   - C2 resolves the C1 requirement above as follows (owner decisions H1, 2026-10-20). The base is the full `origin/<default>` commit, never a hard-coded `main` and never the current local ref:
     - it is recorded only when the increment moves from planned to active, verified against `origin/<default>` at that moment, and never changed (late recording and re-anchoring are refused);
-    - the owner-approved start command names it (`git switch -c <branch> <commit>`), and that exact command is the guard-log anchor;
+    - the start command names it (`git switch -c <branch> <commit>`), and that exact command is the guard-log anchor;
     - the local ref must still equal it, the base must be an ancestor of HEAD, and the branch reflog must show the branch created from it.
 
-    Owner visibility is not authentication of the remote commit.
+    Trust boundary (owner decision, 2026-10-20): an `ask` event proves neither the owner's approval nor the command's execution, and nothing authenticates the base against the remote. READY: YES therefore rests on the unproven assumption that `origin/<default>` named the remote's commit when the increment started. Closing this needs separate guard evidence; the proposal is in the log entry "PR C remediation round 3".
   - Prerequisite for v0.3.0 adoption in Landra (owner decision M2, 2026-10-20): Landra's `full` gate must become self-contained, installing its own dependencies, because readiness runs it in a fresh clone. Until then, Landra's readiness reports a failed gate (READY: NO). Landra is not changed in PR C; this is addressed in PR E planning or a separately approved Landra change.
   - Deferred to v0.3.x (owner decision 2026-10-20): per-task recomputation of the effective tier (C2 computes it only during readiness), and every item listed in "v0.3.0 scope and C2 design". Not available in v0.3.0: an explicit, auditable workflow to re-anchor an increment whose default-branch ref legitimately moved (owner decision H1).
   - Accepted limitations (owner decisions 2026-10-20):
@@ -455,8 +456,15 @@ End-to-end scenario in a scratch project (self-development protocol, evidence in
     - Standalone `/review` without valid state and an anchor is NOT CERTIFIABLE and READY: NO.
     - Trust is local consistency, not provenance.
     - Readiness runs the full gate on every evaluation, in a fresh clone of HEAD.
-    - The default-branch ref and branch reflog are local records; remote authenticity is not verified (no `ls-remote`). Owner visibility of the base in the start prompt is not authentication: a ref planted before the start is visible, but only the owner can notice it.
-    - Practical limits (documented in `docs/consuming-project.md`): `origin/HEAD` must be set; the default-branch ref must not move during an increment (including IDE auto-fetch); reflog expiry; partial clones, alternates, sparse checkouts, submodules and LFS; any diff-reshaping Git configuration, including user-level, blocks readiness.
+    - The default-branch ref and branch reflog are local records; remote authenticity is not verified (no `ls-remote`). The start command's `ask` record is not evidence of approval or execution: a ref planted before the start, with the branch then created by commands the guard does not ask about, still certifies (a test records this outcome).
+    - Revalidation after the gate, and parsing readiness completely before it runs, are defence in depth: they catch persistent or accidental changes, not a determined hostile gate.
+    - Practical limits (documented in `docs/consuming-project.md`):
+      - `origin/HEAD` must be set;
+      - the default-branch ref must not move during an increment (including IDE auto-fetch);
+      - reflog expiry;
+      - partial clones, alternates, sparse checkouts, submodules and LFS;
+      - user-level diff settings are neutralised in the clones, but an effective `diff.external` and diff or filter drivers on changed files block readiness;
+      - a run can take up to 50 minutes.
     - Running the project's gate is not a security sandbox: it runs with the user's privileges and can reach user-level resources and absolute paths unless separately isolated.
 ## Review state
 <!-- v0.2 review records its status block here. -->

@@ -6,7 +6,10 @@
 # Usage: readiness.sh <WORK-ID> --inc <increment-id> [directory]
 # Exit codes: 0 READY: YES; 1 READY: NO (certifiable); 3 NOT CERTIFIABLE (READY: NO);
 #             2 usage or environment error (bad arguments, not a Git repository, jq or git
-#             missing, no temporary directory): no READINESS block is printed.
+#             missing, no temporary directory): no READINESS block is printed;
+#             4 stopped by a signal (INT, TERM, HUP): no READINESS block, never READY.
+# Progress lines go to standard error; the block goes to standard output. Readiness can take
+# up to its overall limit (50 minutes), so callers run it in the background and wait for it.
 #
 # It prints one READINESS block. NOT CERTIFIABLE means the evidence needed to certify is
 # missing, ambiguous, malformed or untrusted: the effective tier is then 2 and READY is NO.
@@ -16,16 +19,19 @@
 #
 # Base: the increment's recorded baseSha. workstate.sh records it only when the increment moves
 # from planned to active, as the full commit id refs/remotes/origin/<default> names at that
-# moment, and never changes it. The owner-approved start command names that exact commit
+# moment, and never changes it. The start command names that exact commit
 # ("git switch -c <branch> <base>"), and readiness requires the guard-log anchor to be that exact
 # command. The base must still equal the local origin/<default> (origin/HEAD names the default
 # branch), be an ancestor of HEAD, and be the commit the increment branch was created from (the
 # oldest entry of the branch's reflog). A default-branch ref that moved after the increment
 # began, to HEAD or to a newer commit, is NOT CERTIFIABLE: a newer ref is never accepted
-# automatically, and re-anchoring an increment is not available. The ref and the reflog are
-# local records. Owner visibility of the base is not authentication: remote authenticity is not
-# verified (no ls-remote), so a ref planted before the start shows as an unfamiliar commit in
-# the start prompt, and only the owner can notice it.
+# automatically, and re-anchoring an increment is not available.
+# Trust boundary: the anchor is an "ask" event. It shows the exact start command was asked; it
+# does not show the owner approved it or that it ran, and it does not authenticate the base. The
+# ref and the reflog are local records, and remote authenticity is not verified (no ls-remote).
+# READY: YES therefore rests on the assumption that origin/<default> named the remote's commit
+# when the increment started (it is not proven). Closing this needs guard evidence of approval
+# and execution, a separate change.
 #
 # Work-item records: the spec and state are copied once at the start and workstate.sh reads
 # only that snapshot (show, status, readiness). Any read failure is NOT CERTIFIABLE, never an
@@ -33,9 +39,8 @@
 #
 # Working tree: git status (with fsmonitor off) must succeed and show nothing but the active
 # item's state and log, and no tracked file may be marked assume-unchanged or skip-worktree.
-# Replace refs, diff-reshaping configuration (diff.external, diff.<driver>.textconv or .command,
-# core.attributesFile, in any scope) and a non-empty .git/info/attributes are NOT CERTIFIABLE.
-# Inherited Git variables that redirect or reshape Git are unset; readiness parses with LC_ALL=C.
+# Replace refs are NOT CERTIFIABLE. Inherited Git variables that redirect or reshape Git are
+# unset; readiness parses with LC_ALL=C.
 #
 # Trust (local consistency, not cryptographic provenance; signed releases are WORK-004):
 #   1. Claude Code's plugin registry ($CLAUDE_CONFIG_DIR, default ~/.claude, then
@@ -72,34 +77,57 @@
 # a workflow record, not complete or tamper-proof.
 #
 # Order: trust, classifier, action floor, evidence and records, then the external review, then
-# the full gate last, then revalidation of everything the gate could change.
+# the full gate last, then revalidation of everything the gate could change. When readiness is
+# already NOT CERTIFIABLE, the external review and the gate are not run.
 #
 # Fresh clones: the external review and the gate each run in their own fresh local clone of this
 # repository at exactly HEAD, in temporary roots separate from readiness's own files, checked out
 # on the clone's own branch ai-engineering-readiness-gate (objects copied, not linked; the
-# remote, every other branch and every replace ref absent; Git hooks off for readiness's clone
-# and checkout steps). Both run without the GIT_NO_REPLACE_OBJECTS and GIT_NO_LAZY_FETCH
-# protections readiness uses for its own reads (the guard would refuse every gate command with
-# them set), and with the caller's locale.
+# remote, every other branch and every replace ref absent; hooks off). Clone and checkout use
+# controlled Git: no user, system or XDG configuration, no attributes (committed ones included),
+# no template, so no filter or conversion applies; the checkout is then verified byte for byte
+# (every tracked blob and mode, nothing untracked or ignored). The clone's local configuration
+# neutralises user-level diff settings (attributes file, big-file threshold, path prefixes,
+# relative or submodule-hiding diffs). Both children run with the user's environment, without
+# the GIT_NO_REPLACE_OBJECTS and GIT_NO_LAZY_FETCH protections readiness uses for its own reads
+# (the guard would refuse every gate command with them set), and with the caller's locale.
 #
 # External review: external-review.sh with configuration from the base commit and the explicit
-# base and HEAD commits. PASSED is required at tiers 1 and 2. At tier 0 NOT CONFIGURED is
-# allowed, but a configured reviewer's BLOCKING FINDINGS or ERROR is READY: NO at every tier.
+# base and HEAD commits, limited to 15 minutes. It is NOT CERTIFIABLE, not run, when its own diff
+# could not show the change as it is: an effective diff.external (it cannot be neutralised), or
+# a changed text file with -diff, binary, or a diff driver with textconv, command or binary
+# configured, or any changed file with a configured filter driver. PASSED is required at tiers 1
+# and 2. At tier 0 NOT CONFIGURED is allowed, but a configured reviewer's BLOCKING FINDINGS or
+# ERROR (including a timeout) is READY: NO at every tier.
 #
-# Full gate: run-gate.sh full with its configuration from the base commit. It never runs in,
-# falls back to, or links anything from the development checkout, so the project's gate must be
-# self-contained (installing its own dependencies). The verdict counts only with run-gate.sh's
-# exit status. Running the project's gate is not a security sandbox: the gate runs with the
-# user's privileges and can reach user-level resources and absolute paths unless separately
-# isolated. Afterwards readiness checks again the spec and state, HEAD, the checked-out branch,
-# origin/<default>, replace refs, diff configuration, the installed plugin against its tag and
-# the evidence statuses; any change is NOT CERTIFIABLE.
+# Full gate: run-gate.sh full with its configuration from the base commit, limited to 30
+# minutes. It never runs in, falls back to, or links anything from the development checkout, so
+# the project's gate must be self-contained (installing its own dependencies). The verdict
+# counts only with run-gate.sh's exit status; a timeout or a missing verdict fails. Running the
+# project's gate is not a security sandbox: the gate runs with the user's privileges and can
+# reach user-level resources and absolute paths unless separately isolated. Afterwards readiness
+# checks again the spec and state, HEAD, the checked-out branch, origin/<default>, replace refs,
+# the installed plugin against its tag and the evidence statuses; any change is NOT CERTIFIABLE.
+# That catches persistent or accidental changes, not a determined hostile gate.
+#
+# Time limits: 30 minutes for the gate, 15 for the external review, 50 overall (clones
+# included). A caller can lower them with READINESS_GATE_TIMEOUT_SECONDS,
+# READINESS_REVIEW_TIMEOUT_SECONDS and READINESS_TOTAL_TIMEOUT_SECONDS, never raise them. Each
+# child runs in its own process group, stopped on timeout or on INT, TERM or HUP; temporary
+# files and clones are removed on every exit readiness handles.
 #
 # Tier-dependent depth (WORK-003 Scope item 11): QA evidence always; security review and a
 # residual-risk list at tier 2. Review and residual-risk evidence count only when they pass and
 # name a commit that covers HEAD (only the active item's state and log changed since); review
 # evidence must also name its reviewer. Evidence is recorded by the coordinator, not proven.
 set -u
+
+# The whole procedure is one function, which bash parses completely before it runs (the call is
+# the last line). A gate that rewrites this file while it runs therefore cannot change the checks
+# that follow it; the trust check after the gate then finds the changed file. This is defence in
+# depth, not protection against a determined hostile gate, which runs with readiness's privileges.
+# The body is deliberately not indented, to keep it readable as a script.
+main() {
 
 # Readiness parses with a fixed locale (pattern ranges such as [a-z] follow collation in some
 # locales). The gate and the external review get the caller's locale back (child_environment).
@@ -116,6 +144,18 @@ marketplace_name="ai-engineering-system"
 plugin_name="ai-engineering"
 plugin_key="$plugin_name@$marketplace_name"
 minimum_version="0.3.0"
+# Time limits (seconds). A caller may lower them (READINESS_*_TIMEOUT_SECONDS), never raise them.
+gate_limit_seconds=1800
+review_limit_seconds=900
+total_limit_seconds=3000
+lower_limit() { # current-limit override: prints the smaller, ignoring an invalid override
+  if [[ ${2:-} =~ ^[1-9][0-9]{0,6}$ ]] && [ "$2" -lt "$1" ]; then printf '%s' "$2"; else printf '%s' "$1"; fi
+}
+gate_limit_seconds="$(lower_limit "$gate_limit_seconds" "${READINESS_GATE_TIMEOUT_SECONDS:-}")"
+review_limit_seconds="$(lower_limit "$review_limit_seconds" "${READINESS_REVIEW_TIMEOUT_SECONDS:-}")"
+total_limit_seconds="$(lower_limit "$total_limit_seconds" "${READINESS_TOTAL_TIMEOUT_SECONDS:-}")"
+remaining_seconds() { printf '%s' $((total_limit_seconds - SECONDS)); }
+progress() { printf 'readiness: [%02d:%02d] %s\n' $((SECONDS / 60)) $((SECONDS % 60)) "$1" >&2; }
 
 usage() {
   echo "usage: readiness.sh <WORK-ID> --inc <increment-id> [directory]" >&2
@@ -171,11 +211,57 @@ remove_tree() { # a directory inside one of readiness's temporary roots
 }
 # shellcheck disable=SC2329 # invoked by the EXIT trap below
 remove_temporary_roots() {
+  stop_active_child
   remove_tree "$temporary_directory"
   [ -z "$gate_root" ] || remove_tree "$gate_root"
   [ -z "$review_root" ] || remove_tree "$review_root"
 }
+# A bounded child runs in its own process group, which a timeout or a handled signal stops.
+active_child_group=""
+# shellcheck disable=SC2329 # called from remove_temporary_roots (EXIT trap)
+stop_active_child() {
+  [ -n "$active_child_group" ] || return 0
+  kill -TERM -- "-$active_child_group" 2>/dev/null
+  sleep 1
+  kill -KILL -- "-$active_child_group" 2>/dev/null
+  active_child_group=""
+}
+# shellcheck disable=SC2329 # invoked by the signal traps below
+terminated() { # signal name: stop the child, clean up (EXIT trap) and report; never READY
+  trap - INT TERM HUP
+  progress "stopped by SIG$1; no READINESS verdict"
+  exit 4
+}
 trap remove_temporary_roots EXIT
+trap 'terminated INT' INT
+trap 'terminated TERM' TERM
+trap 'terminated HUP' HUP
+
+# run_bounded limit output-file command...: runs the command in its own process group with its
+# output in output-file, stops the whole group after limit seconds (TERM, then KILL), and sets
+# bounded_status (the command's own exit status) and bounded_timed_out (yes or no). Any process
+# the command leaves behind in its group is stopped when it ends.
+bounded_status=""
+bounded_timed_out=""
+run_bounded() {
+  local limit="$1" output="$2" pid watchdog marker
+  shift 2
+  marker="$temporary_directory/timed-out.$RANDOM$RANDOM"
+  set -m
+  "$@" >"$output" 2>&1 </dev/null &
+  pid=$!
+  (sleep "$limit"; : >"$marker"; kill -TERM -- "-$pid"; sleep 5; kill -KILL -- "-$pid") </dev/null >/dev/null 2>&1 &
+  watchdog=$!
+  set +m
+  active_child_group="$pid"
+  wait "$pid"
+  bounded_status=$?
+  active_child_group=""
+  kill -KILL -- "-$watchdog" 2>/dev/null
+  wait "$watchdog" 2>/dev/null
+  kill -KILL -- "-$pid" 2>/dev/null
+  if [ -e "$marker" ]; then bounded_timed_out=yes; else bounded_timed_out=no; fi
+}
 
 sha256_text() { # text: prints the SHA-256 of the exact text (no trailing newline), or nothing
   local digest
@@ -241,7 +327,7 @@ command -v git >/dev/null 2>&1 || { echo "readiness.sh: git is required" >&2; ex
 # attribute sources), are removed for readiness and every child it runs.
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR \
   GIT_REPLACE_REF_BASE GIT_NAMESPACE GIT_CEILING_DIRECTORIES GIT_DISCOVERY_ACROSS_FILESYSTEM \
-  GIT_EXTERNAL_DIFF GIT_DIFF_OPTS GIT_PAGER GIT_ATTR_SOURCE \
+  GIT_EXTERNAL_DIFF GIT_DIFF_OPTS GIT_PAGER GIT_ATTR_SOURCE GIT_ATTR_NOSYSTEM GIT_TEMPLATE_DIR GIT_EXEC_PATH \
   GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_NOSYSTEM
 # Readiness's own Git reads never use replace objects or fetch lazily. The gate and the external
 # review run without these two variables (child_environment): the guard's classification treats
@@ -335,27 +421,22 @@ check_replace_refs() { # [label suffix]
   fi
 }
 check_replace_refs
-# Configuration that reshapes diff output (an external diff program, textconv or diff command
-# drivers, an extra attributes file) is never trusted: it could show the external reviewer, or
-# readiness, something other than the change. It is rejected, not worked around.
-unsafe_git_configuration() { # git -C directory: prints the first unsafe key, if any; fails when unreadable
-  local listing status
-  listing="$(git -C "$1" config --get-regexp '^(diff\.external|diff\..+\.(textconv|command)|core\.attributesfile)$' 2>/dev/null)"
-  status=$?
-  case "$status" in
-    0) printf '%s\n' "$listing" | head -n 1 | cut -d' ' -f1 ;;
-    1) ;;
-    *) return 1 ;;
-  esac
+# Controlled Git for readiness's own clone, checkout and verification steps: no user, system or
+# XDG configuration, no attributes (not even the committed .gitattributes: GIT_ATTR_SOURCE is
+# the empty tree), no template and no hooks, so no filter, end-of-line conversion or template
+# file can change what is checked out. These variables are never exported to the gate or the
+# external review (the guard treats GIT_CONFIG_* as variables that change which configuration
+# Git reads, and would refuse their commands); those run with the user's environment instead,
+# against a clone whose local configuration neutralises diff-reshaping settings.
+controlled_home="$temporary_directory/controlled-home"
+mkdir -p "$controlled_home/config" "$controlled_home/template" || exit 2
+empty_tree="$(git hash-object -t tree /dev/null 2>/dev/null)" || empty_tree=""
+controlled_git() {
+  env HOME="$controlled_home" XDG_CONFIG_HOME="$controlled_home/config" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+    GIT_ATTR_NOSYSTEM=1 GIT_ATTR_SOURCE="$empty_tree" GIT_TEMPLATE_DIR="$controlled_home/template" \
+    git -c core.attributesFile=/dev/null -c core.hooksPath=/dev/null -c core.fsmonitor=false -c core.autocrlf=false "$@"
 }
-if unsafe_key="$(unsafe_git_configuration "$repository_root")"; then
-  [ -z "$unsafe_key" ] || not_certifiable "unsafe Git configuration for review ($unsafe_key)"
-else
-  not_certifiable "the repository's Git configuration cannot be read"
-fi
-if [ -s "$(git rev-parse --git-common-dir 2>/dev/null)/info/attributes" ]; then
-  not_certifiable "the repository has a non-empty .git/info/attributes, which could reshape diffs"
-fi
+[ -n "$empty_tree" ] || not_certifiable "the empty tree id cannot be computed, so attributes cannot be controlled"
 
 # ---------------------------------------------------------------- work-item state (one snapshot)
 # workstate.sh reads only this copy, so the tier, evidence, decisions and findings all come from
@@ -809,111 +890,288 @@ fi
 
 # ---------------------------------------------------------------- fresh clones at HEAD
 # The external review and the gate each run in their own fresh local clone of this repository at
-# exactly HEAD, in temporary roots separate from readiness's own files. A clone is checked out on
-# a branch of its own (gate_branch), never detached and never named like the increment branch:
-# the guard's current-branch lookup succeeds there, and nothing in the clone carries the
-# increment's identity. Directory names are neutral, but nothing depends on them: the guard
-# classifies a command the same way wherever the clone lives. Objects are copied (no hard links,
-# no alternates); the clone's remote, every other branch and every replace ref are absent; Git
-# hooks are off for readiness's own clone and checkout steps.
-prepare_clone() { # directory
-  local clone="$1" local_ref listing="$temporary_directory/clone-refs"
-  git -c core.hooksPath=/dev/null clone --quiet --no-checkout --no-hardlinks --origin ai-engineering-source -- "$repository_root" "$clone" >/dev/null 2>&1 || return 1
-  # Without a remote, nothing in the clone can push or fetch back into the development repository.
-  git -C "$clone" remote remove ai-engineering-source >/dev/null 2>&1 || return 1
-  [ ! -s "$clone/.git/objects/info/alternates" ] || return 1
-  git -C "$clone" -c core.hooksPath=/dev/null checkout --quiet -B "$gate_branch" "$head_sha" >/dev/null 2>&1 || return 1
-  git -C "$clone" for-each-ref --format='%(refname)' refs/heads/ >"$listing" 2>/dev/null || return 1
-  while IFS= read -r local_ref; do
-    [ "$local_ref" = "refs/heads/$gate_branch" ] || git -C "$clone" update-ref -d "$local_ref" >/dev/null 2>&1 || return 1
+# exactly HEAD, in temporary roots separate from readiness's own files. Clone and checkout use
+# controlled Git (above), so user, system or template configuration cannot filter, convert or add
+# files; the checkout is then verified byte for byte against HEAD's index entries before anything
+# runs there. A clone is checked out on a branch of its own (gate_branch), never detached and
+# never named like the increment branch, so the guard's current-branch lookup succeeds there and
+# nothing in the clone carries the increment's identity. The guard classifies a command the same
+# way wherever the clone lives (directory names are neutral, not relied on). Objects are copied
+# (no hard links, no alternates); the clone's remote, every other branch and every replace ref
+# are absent; hooks are off. Its local configuration neutralises user-level settings that would
+# reshape a diff (local configuration overrides user and system configuration).
+clone_settings=(core.attributesFile=/dev/null core.bigFileThreshold=512m core.hooksPath=/dev/null core.fsmonitor=false
+  diff.noprefix=false diff.mnemonicPrefix=false diff.srcPrefix=a/ diff.dstPrefix=b/ diff.relative=false
+  diff.ignoreSubmodules=none)
+# shellcheck disable=SC2329 # passed to run_bounded as the command to run
+in_directory() { # directory command...: runs the command there (used in a background subshell)
+  local directory="$1"
+  shift
+  cd "$directory" || return 125
+  "$@"
+}
+verify_clone_contents() { # clone: every tracked file is exactly HEAD's blob and mode; nothing else exists
+  local clone="$1" entry metadata tracked_path mode blob stage
+  local listing="$temporary_directory/clone-index" paths="$temporary_directory/clone-paths"
+  local expected="$temporary_directory/clone-expected" actual="$temporary_directory/clone-actual"
+  controlled_git -C "$clone" ls-files -s -z >"$listing" 2>/dev/null || return 1
+  : >"$paths"
+  : >"$expected"
+  while IFS= read -r -d '' entry; do
+    metadata="${entry%%$'\t'*}"
+    tracked_path="${entry#*$'\t'}"
+    read -r mode blob stage <<<"$metadata"
+    [ "$stage" = 0 ] || return 1
+    case "$tracked_path" in *$'\n'*) return 1 ;; esac
+    case "$mode" in
+      100644 | 100755)
+        [ -f "$clone/$tracked_path" ] && [ ! -L "$clone/$tracked_path" ] || return 1
+        if [ -x "$clone/$tracked_path" ]; then [ "$mode" = 100755 ] || return 1; else [ "$mode" = 100644 ] || return 1; fi
+        printf '%s\n' "$tracked_path" >>"$paths"
+        printf '%s\n' "$blob" >>"$expected"
+        ;;
+      120000)
+        [ -L "$clone/$tracked_path" ] || return 1
+        [ "$(printf '%s' "$(readlink "$clone/$tracked_path")" | controlled_git -C "$clone" hash-object --stdin 2>/dev/null)" = "$blob" ] || return 1
+        ;;
+      160000) ;; # a submodule is not checked out (documented limit)
+      *) return 1 ;;
+    esac
   done <"$listing"
-  [ "$(git -C "$clone" symbolic-ref --quiet HEAD 2>/dev/null)" = "refs/heads/$gate_branch" ] || return 1
-  [ "$(git -C "$clone" rev-parse --verify HEAD 2>/dev/null)" = "$head_sha" ] || return 1
-  git -C "$clone" cat-file -e "$base_sha^{commit}" 2>/dev/null || return 1
-  [ "$(git -C "$clone" for-each-ref --format='%(refname)' refs/heads/ refs/remotes/ refs/replace/ 2>/dev/null)" = "refs/heads/$gate_branch" ] || return 1
-  [ -z "$(git -C "$clone" remote 2>/dev/null)" ] || return 1
-  git -C "$clone" -c core.fsmonitor=false status --porcelain=v1 --untracked-files=all >"$temporary_directory/clone-status" 2>/dev/null || return 1
+  (cd "$clone" && controlled_git hash-object --no-filters --stdin-paths <"$paths") >"$actual" 2>/dev/null || return 1
+  cmp -s "$expected" "$actual" || return 1
+  # Nothing untracked or ignored either (a filter or template could have added files).
+  controlled_git -C "$clone" status --porcelain=v1 --untracked-files=all --ignored >"$temporary_directory/clone-status" 2>/dev/null || return 1
   [ ! -s "$temporary_directory/clone-status" ]
+}
+prepare_clone() { # directory
+  local clone="$1" local_ref setting limit
+  # The child's private TMPDIR, beside the clone: removed with its root, even when the child is
+  # stopped before its own cleanup runs.
+  mkdir -p "$(dirname "$clone")/tmp" || return 1
+  limit="$(remaining_seconds)"
+  [ "$limit" -gt 0 ] || return 1
+  run_bounded "$limit" "$temporary_directory/clone.out" controlled_git clone --quiet --no-checkout --no-hardlinks \
+    --template="$controlled_home/template" --origin ai-engineering-source -- "$repository_root" "$clone"
+  [ "$bounded_status" = 0 ] && [ "$bounded_timed_out" = no ] || return 1
+  # Without a remote, nothing in the clone can push or fetch back into the development repository.
+  controlled_git -C "$clone" remote remove ai-engineering-source >/dev/null 2>&1 || return 1
+  [ ! -s "$clone/.git/objects/info/alternates" ] || return 1
+  limit="$(remaining_seconds)"
+  [ "$limit" -gt 0 ] || return 1
+  run_bounded "$limit" "$temporary_directory/checkout.out" controlled_git -C "$clone" checkout --quiet -B "$gate_branch" "$head_sha"
+  [ "$bounded_status" = 0 ] && [ "$bounded_timed_out" = no ] || return 1
+  controlled_git -C "$clone" for-each-ref --format='%(refname)' refs/heads/ >"$temporary_directory/clone-refs" 2>/dev/null || return 1
+  while IFS= read -r local_ref; do
+    [ "$local_ref" = "refs/heads/$gate_branch" ] || controlled_git -C "$clone" update-ref -d "$local_ref" >/dev/null 2>&1 || return 1
+  done <"$temporary_directory/clone-refs"
+  [ "$(controlled_git -C "$clone" symbolic-ref --quiet HEAD 2>/dev/null)" = "refs/heads/$gate_branch" ] || return 1
+  [ "$(controlled_git -C "$clone" rev-parse --verify HEAD 2>/dev/null)" = "$head_sha" ] || return 1
+  controlled_git -C "$clone" cat-file -e "$base_sha^{commit}" 2>/dev/null || return 1
+  [ "$(controlled_git -C "$clone" for-each-ref --format='%(refname)' refs/heads/ refs/remotes/ refs/replace/ 2>/dev/null)" = "refs/heads/$gate_branch" ] || return 1
+  [ -z "$(controlled_git -C "$clone" remote 2>/dev/null)" ] || return 1
+  for setting in "${clone_settings[@]}"; do
+    controlled_git -C "$clone" config --local "${setting%%=*}" "${setting#*=}" || return 1
+  done
+  [ ! -s "$clone/.git/info/attributes" ] || return 1
+  verify_clone_contents "$clone"
 }
 new_clone_root() { # prints a new temporary root, separate from readiness's own files
   mktemp -d "${TMPDIR:-/tmp}/readiness-clone.XXXXXX" 2>/dev/null
 }
 
+# Why the external reviewer's own `git diff` (run with the user's environment in the review clone)
+# could not show the change as it is, or nothing. Fails when this cannot be determined.
+review_diff_problem() { # clone
+  local clone="$1" external entry added rest changed_path attribute value driver key found
+  local numstat="$temporary_directory/review-numstat" changed="$temporary_directory/review-changed"
+  local text_paths="$temporary_directory/review-text-paths" attributes="$temporary_directory/review-attributes"
+  external="$(child_environment git -C "$clone" config --get diff.external 2>/dev/null)"
+  if [ -n "$external" ]; then
+    printf 'diff.external is set in the user or system Git configuration and cannot be neutralised'
+    return 0
+  fi
+  # Which changed paths are text, judged by content alone (controlled Git: no attributes).
+  controlled_git -C "$clone" diff --numstat -z --no-renames --no-ext-diff --no-textconv "$base_sha" "$head_sha" -- >"$numstat" 2>/dev/null || return 1
+  controlled_git -C "$clone" diff --name-only -z --no-renames --no-ext-diff "$base_sha" "$head_sha" -- >"$changed" 2>/dev/null || return 1
+  : >"$text_paths"
+  while IFS= read -r -d '' entry; do
+    added="${entry%%$'\t'*}"
+    rest="${entry#*$'\t'}"
+    changed_path="${rest#*$'\t'}"
+    case "$changed_path" in *$'\n'*) return 1 ;; esac
+    [ "$added" = - ] || printf '%s\n' "$changed_path" >>"$text_paths"
+  done <"$numstat"
+  # The attributes the reviewer's Git applies to the changed paths (committed .gitattributes
+  # and system attributes included; the user's attributes file is neutralised).
+  child_environment git -C "$clone" check-attr -z --stdin diff binary filter <"$changed" >"$attributes" 2>/dev/null || return 1
+  while IFS= read -r -d '' changed_path && IFS= read -r -d '' attribute && IFS= read -r -d '' value; do
+    case "$attribute:$value" in
+      *:unspecified | diff:set | binary:unset | filter:unset) continue ;;
+    esac
+    case "$attribute" in
+      filter)
+        # A filter driver does not change a diff between two commits, but any configured one is
+        # refused: the reviewer may read files from the clone, which controlled Git checked out
+        # without it.
+        for key in clean smudge process; do
+          [ -z "$(child_environment git -C "$clone" config --get "filter.$value.$key" 2>/dev/null)" ] \
+            || { printf '%s has filter=%s, a configured filter driver' "$changed_path" "$value"; return 0; }
+        done
+        ;;
+      *)
+        grep -Fxq -- "$changed_path" "$text_paths" || continue
+        case "$attribute:$value" in
+          diff:unset) printf '%s (text) has the -diff attribute, so its change would not be shown' "$changed_path"; return 0 ;;
+          binary:set) printf '%s (text) has the binary attribute, so its change would not be shown' "$changed_path"; return 0 ;;
+          diff:*)
+            driver="$value"
+            for key in textconv command binary; do
+              found="$(child_environment git -C "$clone" config --get "diff.$driver.$key" 2>/dev/null)" || found=""
+              [ -z "$found" ] || [ "$key:$found" = binary:false ] \
+                || { printf '%s uses diff driver %s with diff.%s.%s set' "$changed_path" "$driver" "$driver" "$key"; return 0; }
+            done
+            ;;
+        esac
+        ;;
+    esac
+  done <"$attributes"
+}
+
 # ---------------------------------------------------------------- external review (before the gate)
-# The reviewer runs in its own clone with readiness's controlled Git environment (the overrides
-# unset above). Configuration that would reshape its diff is rejected, not trusted.
+# Gate and external review are skipped when readiness is already NOT CERTIFIABLE: they cannot
+# change that outcome. Neither runs past its time limit or the overall limit; a timeout or a
+# missing verdict is a failure, never a pass.
 external_line="EXTERNAL REVIEW: NOT RUN (no base commit)"
 external_result=error
-if [ -n "$base_sha" ] && [ -n "$head_sha" ]; then
+external_ran=no
+if [ -z "$base_sha" ] || [ -z "$head_sha" ]; then
+  :
+elif [ "${#not_certifiable_reasons[@]}" -gt 0 ]; then
+  external_line="EXTERNAL REVIEW: NOT RUN (not certifiable)"
+elif [ "$(remaining_seconds)" -le 0 ]; then
+  external_line="EXTERNAL REVIEW: NOT RUN (readiness time limit reached)"
+  not_certifiable "the readiness time limit of $total_limit_seconds s was reached before the external review"
+else
+  progress "creating a fresh clone of HEAD for the external review"
   review_root="$(new_clone_root)" || review_root=""
   review_clone="$review_root/review-tree"
   if [ -n "$review_root" ] && prepare_clone "$review_clone"; then
-    if review_unsafe_key="$(unsafe_git_configuration "$review_clone")" && [ -z "$review_unsafe_key" ]; then
-      external_output="$(cd "$review_clone" && child_environment "$scripts/external-review.sh" "$base_sha" "$head_sha" "$spec_path" 2>&1)"
-      external_exit=$?
-      external_first_line="$(printf '%s\n' "$external_output" | head -n 1)"
-      external_last_line="$(printf '%s\n' "$external_output" | tail -n 1)"
-      # A verdict counts only when the exit status and the verdict line agree.
-      case "$external_exit:$external_last_line:$external_first_line" in
-        "0:EXTERNAL REVIEW: PASSED:"*) external_result=passed external_line="$external_last_line" ;;
-        "1:EXTERNAL REVIEW: BLOCKING FINDINGS:"*) external_result=blocking external_line="$external_last_line" ;;
-        "3:"*":EXTERNAL REVIEW: NOT CONFIGURED") external_result=not-configured external_line="$external_first_line" ;;
-        "2:EXTERNAL REVIEW: ERROR"*) external_line="$external_last_line" ;;
-        *) external_line="EXTERNAL REVIEW: ERROR (no consistent verdict; external-review.sh exit $external_exit)" ;;
-      esac
+    if review_problem="$(review_diff_problem "$review_clone")"; then
+      review_limit="$review_limit_seconds"
+      [ "$(remaining_seconds)" -ge "$review_limit" ] || review_limit="$(remaining_seconds)"
+      if [ -n "$review_problem" ]; then
+        external_line="EXTERNAL REVIEW: NOT RUN (the reviewer's diff cannot be trusted)"
+        not_certifiable "the external review cannot be trusted here: $review_problem"
+      elif [ "$review_limit" -le 0 ]; then
+        external_line="EXTERNAL REVIEW: NOT RUN (readiness time limit reached)"
+        not_certifiable "the readiness time limit of $total_limit_seconds s was reached before the external review"
+      else
+        progress "running the external review (limit $((review_limit / 60)) min $((review_limit % 60)) s)"
+        run_bounded "$review_limit" "$temporary_directory/external.out" \
+          in_directory "$review_clone" child_environment env TMPDIR="$review_root/tmp" "$scripts/external-review.sh" "$base_sha" "$head_sha" "$spec_path"
+        external_ran=yes
+        external_exit="$bounded_status"
+        external_first_line="$(head -n 1 "$temporary_directory/external.out")"
+        external_last_line="$(tail -n 1 "$temporary_directory/external.out")"
+        # A verdict counts only when the exit status and the verdict line agree.
+        if [ "$bounded_timed_out" = yes ]; then
+          external_line="EXTERNAL REVIEW: ERROR (timed out after $review_limit s; stopped, exit $external_exit)"
+        else
+          case "$external_exit:$external_last_line:$external_first_line" in
+            "0:EXTERNAL REVIEW: PASSED:"*) external_result=passed external_line="$external_last_line" ;;
+            "1:EXTERNAL REVIEW: BLOCKING FINDINGS:"*) external_result=blocking external_line="$external_last_line" ;;
+            "3:"*":EXTERNAL REVIEW: NOT CONFIGURED") external_result=not-configured external_line="$external_first_line" ;;
+            "2:EXTERNAL REVIEW: ERROR"*) external_line="$external_last_line" ;;
+            *) external_line="EXTERNAL REVIEW: ERROR (no consistent verdict; external-review.sh exit $external_exit)" ;;
+          esac
+        fi
+      fi
     else
-      external_line="EXTERNAL REVIEW: NOT RUN (unsafe or unreadable Git diff configuration${review_unsafe_key:+: $review_unsafe_key})"
-      not_certifiable "the external review could not run safely: unsafe or unreadable Git diff configuration${review_unsafe_key:+ ($review_unsafe_key)}"
+      external_line="EXTERNAL REVIEW: NOT RUN (the reviewer's diff settings cannot be read)"
+      not_certifiable "the external review's Git attributes or configuration cannot be read"
     fi
   else
-    external_line="EXTERNAL REVIEW: NOT RUN (a fresh clone of HEAD could not be created)"
-    not_certifiable "the external review could not run: a fresh clone of HEAD could not be created"
+    external_line="EXTERNAL REVIEW: NOT RUN (a fresh clone of HEAD could not be created and verified)"
+    not_certifiable "the external review could not run: a fresh clone of HEAD could not be created and verified"
   fi
   [ -z "$review_root" ] || remove_tree "$review_root"
 fi
-if [ "$effective_tier" -ge 1 ]; then
-  external_requirement="required at tier $effective_tier"
-  [ "$external_result" = passed ] || not_ready "external review is required at tier $effective_tier and did not pass (${external_line#EXTERNAL REVIEW: })"
-else
-  external_requirement="optional at tier 0"
-  case "$external_result" in
-    passed | not-configured) ;;
-    *) not_ready "the configured external review did not pass (${external_line#EXTERNAL REVIEW: })" ;;
-  esac
+external_requirement="optional at tier 0"
+[ "$effective_tier" -lt 1 ] || external_requirement="required at tier $effective_tier"
+if [ "$external_ran" = yes ]; then
+  if [ "$effective_tier" -ge 1 ]; then
+    [ "$external_result" = passed ] || not_ready "external review is required at tier $effective_tier and did not pass (${external_line#EXTERNAL REVIEW: })"
+  else
+    case "$external_result" in
+      passed | not-configured) ;;
+      *) not_ready "the configured external review did not pass (${external_line#EXTERNAL REVIEW: })" ;;
+    esac
+  fi
 fi
 
 # ---------------------------------------------------------------- full gate (last; never trusted from records)
 gate_line="GATE full: NOT RUN (no base commit)"
 gate_output=""
-if [ -n "$base_sha" ] && [ -n "$head_sha" ]; then
+gate_ran=no
+if [ -z "$base_sha" ] || [ -z "$head_sha" ]; then
+  :
+elif [ "${#not_certifiable_reasons[@]}" -gt 0 ]; then
+  gate_line="GATE full: NOT RUN (not certifiable)"
+elif [ $(($(remaining_seconds) - 60)) -le 0 ]; then
+  gate_line="GATE full: NOT RUN (readiness time limit reached)"
+  not_certifiable "the readiness time limit of $total_limit_seconds s was reached before the full gate"
+else
+  progress "creating a fresh clone of HEAD for the full gate"
   gate_root="$(new_clone_root)" || gate_root=""
   gate_clone="$gate_root/gate-tree"
   if [ -n "$gate_root" ] && prepare_clone "$gate_clone"; then
-    gate_output="$(child_environment "$scripts/run-gate.sh" full "$gate_clone" "$base_sha" 2>&1)"
-    gate_exit=$?
-    gate_last_line="$(printf '%s\n' "$gate_output" | tail -n 1)"
-    case "$gate_exit:$gate_last_line" in
-      "0:GATE full: PASSED"*) gate_line="$gate_last_line" ;;
-      "0:"*) gate_line="GATE full: NO VERDICT (run-gate.sh exit 0 without a PASSED verdict)" ;;
-      *":GATE full: PASSED"*) gate_line="GATE full: NO VERDICT (run-gate.sh exit $gate_exit after a PASSED line)" ;;
-      *":GATE full: "*) gate_line="$gate_last_line" ;;
-      *) gate_line="GATE full: NO VERDICT (run-gate.sh exit $gate_exit)" ;;
-    esac
+    gate_limit="$gate_limit_seconds"
+    # Keep a minute for the checks after the gate.
+    [ $(($(remaining_seconds) - 60)) -ge "$gate_limit" ] || gate_limit=$(($(remaining_seconds) - 60))
+    if [ "$gate_limit" -le 0 ]; then
+      gate_line="GATE full: NOT RUN (readiness time limit reached)"
+      not_certifiable "the readiness time limit of $total_limit_seconds s was reached before the full gate"
+    else
+      progress "running the full gate (limit $((gate_limit / 60)) min $((gate_limit % 60)) s)"
+      run_bounded "$gate_limit" "$temporary_directory/gate.out" child_environment env TMPDIR="$gate_root/tmp" "$scripts/run-gate.sh" full "$gate_clone" "$base_sha"
+      gate_ran=yes
+      gate_exit="$bounded_status"
+      gate_output="$(cat "$temporary_directory/gate.out" 2>/dev/null)"
+      gate_last_line="$(printf '%s\n' "$gate_output" | tail -n 1)"
+      if [ "$bounded_timed_out" = yes ]; then
+        gate_line="GATE full: TIMED OUT (after $gate_limit s; stopped, exit $gate_exit)"
+      else
+        case "$gate_exit:$gate_last_line" in
+          "0:GATE full: PASSED"*) gate_line="$gate_last_line" ;;
+          "0:"*) gate_line="GATE full: NO VERDICT (run-gate.sh exit 0 without a PASSED verdict)" ;;
+          *":GATE full: PASSED"*) gate_line="GATE full: NO VERDICT (run-gate.sh exit $gate_exit after a PASSED line)" ;;
+          *":GATE full: "*) gate_line="$gate_last_line" ;;
+          *) gate_line="GATE full: NO VERDICT (run-gate.sh exit $gate_exit)" ;;
+        esac
+      fi
+    fi
   else
-    gate_line="GATE full: NOT RUN (a fresh clone of HEAD could not be created)"
-    not_certifiable "the full gate could not run: a fresh clone of HEAD could not be created"
+    gate_line="GATE full: NOT RUN (a fresh clone of HEAD could not be created and verified)"
+    not_certifiable "the full gate could not run: a fresh clone of HEAD could not be created and verified"
   fi
   [ -z "$gate_root" ] || remove_tree "$gate_root"
 fi
-case "$gate_line" in
-  "GATE full: PASSED"*"MODIFIES"*) not_ready "the change modifies the full gate (owner review needed)" ;;
-  "GATE full: PASSED"*) ;;
-  *) not_ready "the full gate did not pass" ;;
-esac
+if [ "$gate_ran" = yes ]; then
+  case "$gate_line" in
+    "GATE full: PASSED"*"MODIFIES"*) not_ready "the change modifies the full gate (owner review needed)" ;;
+    "GATE full: PASSED"*) ;;
+    "GATE full: TIMED OUT"*) not_ready "the full gate timed out" ;;
+    *) not_ready "the full gate did not pass" ;;
+  esac
+fi
 
 # ---------------------------------------------------------------- revalidation after the gate
-# The gate runs the change's own code with the user's privileges, so everything readiness relied
-# on is checked again. A changed or unreadable input is NOT CERTIFIABLE; no earlier result is reused.
+# The gate runs the change's own code with the user's privileges, so what readiness relied on is
+# checked again. A changed or unreadable input is NOT CERTIFIABLE; no earlier result is reused.
+# This is defence in depth: it catches persistent or accidental changes, not a determined hostile
+# gate (which runs with the same privileges as readiness itself).
+progress "checking again what the gate could have changed"
 if [ -n "$state_fingerprint" ]; then
   { regular_file "$live_state" && regular_file "$live_spec" \
       && [ "$(sha256_file "$live_state")" = "$state_fingerprint" ] && [ "$(sha256_file "$live_spec")" = "$spec_fingerprint" ]; } \
@@ -927,11 +1185,6 @@ if [ -n "$increment_branch" ] && [ -n "$current_branch" ] && [ "$(git symbolic-r
   not_certifiable "the checked-out branch changed while readiness ran"
 fi
 check_replace_refs " (after the gate)"
-if after_unsafe_key="$(unsafe_git_configuration "$repository_root")"; then
-  [ -z "$after_unsafe_key" ] || not_certifiable "unsafe Git configuration for review after the gate ($after_unsafe_key)"
-else
-  not_certifiable "the repository's Git configuration cannot be read after the gate"
-fi
 if [ "$trusted" = yes ]; then
   trusted=no
   check_trust
@@ -985,3 +1238,5 @@ fi
 echo "READY: NO - $(printf '%s; ' "${not_ready_reasons[@]}" | sed 's/; $//')"
 [ "$certifiable" = yes ] && exit 1
 exit 3
+}
+main "$@" # every path through main ends in exit
