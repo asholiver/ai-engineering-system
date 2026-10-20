@@ -6,32 +6,64 @@ disable-model-invocation: true
 ---
 # Deliver approved work
 
-Coordinate approved work efficiently. You are the coordinator, not the architecture owner.
+Coordinate approved work efficiently. You are the coordinator, not the architecture owner. State records below use `"${CLAUDE_PLUGIN_ROOT}/scripts/workstate.sh" <command> $ARGUMENTS ...` (shown as `workstate.sh`); never put a state file path on a command line. Owner-command records are workflow records, not security authority: no guard reads them, and every protected operation still asks.
 
-## Preconditions
-- Read `.agents/specs/active/$ARGUMENTS.md`. If it is missing, not `Approved`, or has NEEDS_HUMAN_DECISION items, stop and say what is needed.
-- Read `.agents/gates.json`. If `fast` or `full` is missing, say so; gates that are not configured are reported as NOT CONFIGURED, never as passed.
-- Pick the matching playbook from the `playbooks` skill.
+## Entry and preconditions
+- First action: run `"${CLAUDE_PLUGIN_ROOT}/scripts/workstate.sh" deliver $ARGUMENTS --owner-command deliver`. It authorises an approved item and starts delivery, resumes a paused one, or resumes a blocked one whose trigger-3 decision the owner has answered with `/ai-engineering:approve ... --decision <id>`. If it exits non-zero, stop and report its message: exit 3 means the item is not approved, not paused, or still blocked on an unanswered decision (say which), exit 6 means the spec changed and needs `/ai-engineering:approve` again, exit 5 means there is no usable state. A v0.2 item with no state is refused: point the owner to `/ai-engineering:setup` import, and do not create state yourself.
+- Preconditions come from `workstate.sh status` and `show`, not from prose. Open decisions or NEEDS_HUMAN_DECISION items in the spec stop delivery: say what is needed.
+- Read `.agents/gates.json`. A gate that is not configured is reported as NOT CONFIGURED, never as passed.
+- Print a display-only delivery summary (scope, increments and tiers, delivery policy, planned owner actions). Ask no question about it.
 
-## Plan tasks
-- Split the spec into tasks with owner (`ai-engineering:frontend`, `ai-engineering:backend`, `ai-engineering:platform`), dependencies, files in scope and acceptance criteria. Decide obvious routing by file area, not by deliberation.
-- Record the task list under "Implementation state" in the spec.
-- If tasks start to touch shared architectural areas (models, APIs, auth, infrastructure) beyond the spec, stop and return to planning.
+## Execute
+- Plan the tasks as a dependency graph by file area, each with owner (`ai-engineering:frontend`, `ai-engineering:backend`, `ai-engineering:platform`), files in scope and acceptance criteria. If tasks start to touch shared architectural areas beyond the spec, that is escalation trigger 1.
+- Run tasks sequentially in one checkout by default. Parallel worktrees are opt-in: use them only when the owner asked for them, the tasks' files do not overlap and the project's `.claude/settings.json` sets `worktree.baseRef` to `"head"`. Commit the work branch before dispatching (worktrees hold committed state only), pass `isolation: "worktree"`, then merge their branches into the work branch and re-run the fast gate.
+- Starting an increment from the updated default branch asks one guard confirmation. Start it with exactly `git fetch origin <default>` then `git switch -c <work-branch> origin/<default>`; do not check out, pull or merge the default branch locally, because each of those asks again. With parallel worktrees on, each worktree merge also asks. This confirmation never replaces, suppresses or pre-authorises any other guard prompt (deploy, merge, publish, protected push or other reserved operation); each of those still asks.
+- Record increment progress with `workstate.sh increment-set --inc <id> --status <status>` (with `--branch`, `--pr`, `--base-sha`, `--head-sha` as known; to record fields such as a new head SHA without a status change, omit `--status`) and each gate or review result with `workstate.sh evidence --inc <id> --kind gate|review --result pass|fail`.
+- After each task, run the fast gate through the Bash tool in the working tree that holds the change: `"${CLAUDE_PLUGIN_ROOT}/scripts/run-gate.sh" fast <directory>`, and report its verdict line verbatim. On `FAILED`, send the agent the gate output to fix, for at most 2 fix rounds; then retry once with `model: "opus"` if the cause looks like reasoning difficulty, otherwise escalate. An agent report ending `GATE FAILED` means its fix attempts are already exhausted: go straight to that step.
 
-## Delegate
-- Give each agent only: the spec path, its task, acceptance criteria and files in scope. Do not resend conversation history.
-- Run tasks sequentially in the current checkout by default.
-- Run independent tasks in parallel only when their files do not overlap and the project's `.claude/settings.json` sets `worktree.baseRef` to `"head"`; otherwise run them sequentially. Claude Code's default worktree base is the remote default branch, which would not contain the work branch. Commit the work branch before dispatching, because worktrees contain committed state only and no gitignored files (dependencies may need installing; see `.worktreeinclude`). Pass `isolation: "worktree"` for those agents, then merge their branches into the work branch and re-run the fast gate.
-- After each implementation agent returns, run the fast gate yourself through the Bash tool, in the agent's working tree: `"${CLAUDE_PLUGIN_ROOT}/scripts/run-gate.sh" fast <directory>`, and report its verdict line verbatim. Running it through Bash keeps the user's permission rules and sandbox in the execution path; it does not make untrusted code safe to run. On `FAILED`, send the agent the gate output to fix, for at most 2 fix rounds. If it is still failing, retry once with `model: "opus"` if the cause looks like reasoning difficulty, otherwise stop and escalate to the user with the failure. An agent report ending `GATE FAILED` (possible only when the user has opted in to hook gates with `AI_ENGINEERING_HOOK_GATES=1`) means its fix attempts are already exhausted: go straight to that retry-or-escalate step.
-- Any open decision an agent reports goes to the user; do not decide it yourself.
+## Git is the coordinator's
+You create the work branch, commit, merge worktree branches, push the work branch and open or update the increment PR according to the delivery policy (ready or draft; never merge). Specialists edit files and run tests only. Resolving a merge conflict that needs a decision about intent is trigger 1.
 
-## Prove
-- Run the full gate: `"${CLAUDE_PLUGIN_ROOT}/scripts/run-gate.sh" full` and report its verdict line verbatim.
-- Delegate to `ai-engineering:qa` with the spec path. Delegate to `ai-engineering:security-reviewer` when the change touches authentication, authorisation, input handling, secrets, dependencies, IAM or infrastructure exposure.
-- Update "Implementation state" with results.
+## Handoffs
+Give each specialist the task, its acceptance criteria, the files in scope and the relevant spec sections, with the path of the full spec. Never pass the log, the conversation, or a legacy v0.2 "Implementation state" or "Review state" section.
+
+## Remediation
+- Fix findings inside intent at any severity, and record each with `workstate.sh finding-fixed --finding <id> --sha <commit>`.
+- A non-security finding may be marked invalid with evidence: `workstate.sh finding-invalid --finding <id> --evidence <text>`. A security finding needs the raising reviewer's confirmation (`--confirmed-by`); otherwise it is trigger 3.
+- Weakening a test, gate or control to clear a finding is trigger 3.
+
+## Escalation
+Interrupt the owner only for these triggers, recorded with `workstate.sh block --trigger <1-5> --question <text> --options <a,b>`, stating the options and your recommendation:
+1. intent or scope change;
+2. an owner-level trade-off: security, product, UX, performance or cost compromise, new dependency, or new external service, account or credential;
+3. accepting, waiving, deferring or downgrading risk, or disputing a security finding;
+4. a reserved operation (every deploy and other protected operation still asks);
+5. an ambiguity whose readings build different things.
+
+A request that would add scope (for example "we also need a CHANGELOG") while the approved work can still be delivered as approved is not a block: record it with `workstate.sh propose --question <text> --options <a,b>`, do not implement it, tell the owner in one line, and continue the approved scope. It stays open in readiness and the final status until answered. Answering a proposal records the owner's choice only: scope the owner accepts is never implemented under the current approval; it needs a spec change and `/ai-engineering:approve` again, or a separate work item. Block on trigger 1 only when the approved work cannot continue correctly without the answer.
+
+Specialists tag open questions with a proposed trigger. Resolve any that is not a trigger yourself and note the reasoning in the log. Do not decide a trigger yourself.
+
+## Decisions
+- An answer that chooses among options inside approved intent (triggers 1, 2 and 5, no scope added) may be given in conversation. Record it verbatim with `workstate.sh answer --decision <id> --answer <text>` (source `conversation`), or `workstate.sh decision --trigger <n> --question <text> --answer <text>` when nothing was blocked.
+- Accepting risk, lowering a tier and adding scope need `/ai-engineering:approve`. A trigger-3 block resumes only after the owner has answered through `approve ... --decision <id>`, then `/ai-engineering:deliver <WORK-ID>` (or, in a running delivery, `workstate.sh answer --decision <id>`). Only the decision that caused the block resumes it. Tell the owner the commands; do not record them for them.
+
+## End of each increment
+1. Run the `review` skill procedure, the single home of review. Remediate as above, record the result as evidence, and re-run until clean or escalated.
+2. Write the increment's learnings once, collected during the work.
+3. Push the work branch and open or update the PR according to policy.
+4. Produce a readiness summary (from `workstate.sh readiness`) listing every fix of HIGH severity or above, and every owner-command decision that accepted, waived or deferred risk or lowered a tier. It also lists every open decision or scope proposal.
+5. Wait for the owner's merge as a bounded background command: `"${CLAUDE_PLUGIN_ROOT}/scripts/wait-github.sh" merge <pr-number>` (run in the background). A `TIMEOUT` is recorded as the planned owner action "waiting for owner merge" (`workstate.sh owner-action-add --action-id <id> --description <text>`), not retried in a loop.
+6. When it reports `MERGED`, record the increment as merged and continue with the next increment without a prompt (apart from the guard confirmation when it starts).
+7. When every increment is merged, run `workstate.sh done`.
+
+## Bounded recovery
+- A stalled or failed specialist (it errors, is ended by the harness, or returns without a completion report) is re-dispatched once automatically with a fresh brief, without asking, recorded with `workstate.sh increment-recovery --inc <id>`. A second failure is escalated.
+- A specialist the owner stops is an owner instruction, not a stall: do not re-dispatch it. Record `workstate.sh pause --actor owner` and report; `/ai-engineering:deliver` resumes. If it is unclear whether the owner stopped it, treat it as an owner stop.
+- External waits (CI checks, merge) use `wait-github.sh`. `NOT AUTHENTICATED` becomes a planned owner action: the owner runs `gh auth login`. Never poll without it, and never read an error payload as data.
 
 ## Boundaries
 - Never run high-impact operations (apply/destroy, deploy, force push, push to main, PR merge, release, publish); the guard hook will ask the human, and you should not try to work around it.
-- Normal commits and draft PRs are fine when the user asked for them.
+- No autonomous deployment, signing or merge exists in this procedure.
 
-Finish with a short status: tasks done, gate verdicts, QA and security results, open items. Then suggest `/ai-engineering:review $ARGUMENTS`.
+Finish each increment and the whole delivery with a short status: tasks done, gate verdicts, review result, open items and planned owner actions.

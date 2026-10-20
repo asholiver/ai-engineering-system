@@ -19,6 +19,14 @@ Change classifier and release consistency (WORK-003 C1).
 - `classify-change.sh`: deterministic classification of a change by the paths it touches, so review scope does not depend on model judgement.
 - `scripts/check.sh` now fails when `README.md` or `docs/**` pins a version (`ai-engineering-system@vX.Y.Z`, `"ref": "vX.Y.Z"`) that has no `versions/CHANGELOG.md` entry (`scripts/check-doc-versions.sh`). `CONTRIBUTING.md` "Releasing" gains release-notes and upgrade-verification steps.
 
+Work-item lifecycle and delivery (WORK-002, ADR-0004).
+- New human-only `/ai-engineering:approve` command and `scripts/workstate.sh`: a work-item state file with a lifecycle (`proposed` to `archived`), spec-hash checks and a delivery policy. Interim owner commands record owner-only transitions; they are workflow records, not security authority, and no guard reads them. Signed approvals and autonomous deployment are WORK-004 (G1 stays open).
+- `/ai-engineering:deliver` rewritten: authorises or resumes through `workstate.sh`, runs tasks sequentially by default (parallel worktrees opt-in), owns Git (branch, commits, work-branch push, pull request; never merges), fixes findings inside intent, interrupts only for five triggers (a request that only adds scope is recorded as an open proposal and delivery continues), re-dispatches a failed specialist once automatically (a specialist you stop is a pause), runs review per increment and waits for your merge in the background.
+- **Behaviour change:** delivery asks one guard confirmation when each increment starts from the updated default branch (and one per worktree merge when parallel is on). It pre-authorises nothing; every deploy and reserved operation still asks.
+- `scripts/wait-github.sh`: bounded, authenticated `gh` wait for checks or merge; `NOT AUTHENTICATED` becomes a planned owner action. Delivery now needs `gh auth login`.
+- `/setup` writes `worktree.baseRef: "head"` by default (opt-out documented; it also affects your own `claude --worktree` sessions) and gains v0.2 work-item import. The session banner shows the plugin version and root; check it after upgrading.
+- Spec template drops "Implementation state" and "Review state" and gains Increments, Delivery policy and Owner actions; specialist handoffs exclude the log and legacy sections.
+
 ## 0.2.0
 Claude Code native architecture (ADR-0001).
 - Repository is now a Claude Code marketplace publishing the `ai-engineering` plugin.

@@ -11,5 +11,8 @@
   },
   "enabledPlugins": {
     "ai-engineering@ai-engineering-system": true
+  },
+  "worktree": {
+    "baseRef": "head"
   }
 }

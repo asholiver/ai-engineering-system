@@ -10,8 +10,10 @@ if [ ! -f "$standards_file" ]; then
   exit 0
 fi
 
+plugin_version="$(jq -r '.version // "unknown"' "$plugin_root/.claude-plugin/plugin.json" 2>/dev/null)" || plugin_version=unknown
+echo "ai-engineering $plugin_version, plugin root $plugin_root"
 echo "ai-engineering plugin active. The following engineering standards apply to all work in this session."
-echo "Project facts live in AGENTS.md and .agents/. Lifecycle skills: /ai-engineering:plan, :deliver, :review, :learn, :setup."
+echo "Project facts live in AGENTS.md and .agents/. Lifecycle skills: /ai-engineering:plan, :approve, :deliver, :review, :learn, :setup."
 echo
 awk 'BEGIN { in_frontmatter = 0; done = 0 }
      NR == 1 && $0 == "---" { in_frontmatter = 1; next }

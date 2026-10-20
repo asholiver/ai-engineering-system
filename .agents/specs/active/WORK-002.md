@@ -1,6 +1,8 @@
 # Work Specification
 ## Status
-**Current status (2026-10-16): Path B split, proposed, pending owner review.** The owner chose Path B on 2026-10-16: this spec keeps the lifecycle, state, `/deliver` rewrite and the rest of the delivery workflow, with an interim owner-command mechanism for owner-only transitions (Scope item 3). Signed owner approvals, replay protection, the trust anchor and autonomous deployment move unchanged to [WORK-004](WORK-004.md). The interim mechanism grants no new guard permission, no autonomous deployment right and no security authority. Implementation and delivery are not authorised until the owner accepts this amendment and the ADR-0004 interim mechanism, and separately authorises delivery. G1 stays OPEN (WORK-004).
+**Current status (2026-10-19): delivery authorised.** The owner accepted the Path B amendment (PR #8 at `43afbdc`, merged as `164d821`) and authorised delivery of the v0.3.0 lifecycle scope on 2026-10-19, within this spec and ADR-0004. Merge and deployment still need explicit owner approval. G1 stays OPEN; signed approvals and autonomous deployment remain WORK-004.
+
+Previous status (2026-10-16, history): Path B split, proposed, pending owner review. The owner chose Path B on 2026-10-16: this spec keeps the lifecycle, state, `/deliver` rewrite and the rest of the delivery workflow, with an interim owner-command mechanism for owner-only transitions (Scope item 3). Signed owner approvals, replay protection, the trust anchor and autonomous deployment move unchanged to [WORK-004](WORK-004.md). The interim mechanism grants no new guard permission, no autonomous deployment right and no security authority. Implementation and delivery are not authorised until the owner accepts this amendment and the ADR-0004 interim mechanism, and separately authorises delivery. G1 stays OPEN (WORK-004).
 
 Previous status (2026-10-13, history): approved in principle for design. The revised authority mechanism (signed owner approvals, Scope items 3 and 7) is pending security review and G1 closure. It replaces `UserPromptExpansion` tokens after the spike showed that agents can trigger the event (D1 superseded). G1 (trusted approval path) is OPEN. G1-b (separate macOS approver account) is the provisional architecture for investigation, not an approved implementation. The trust anchor (O3) is deferred. Implementation and delivery are not authorised.
 
@@ -62,7 +64,7 @@ Included:
    - Preconditions read state, not prose.
    - It prints a display-only delivery summary (scope, increments, tiers, policy, planned owner actions) without asking a confirmation question.
    - It plans tasks as a dependency graph by file area.
-   - It runs independent tasks in parallel worktrees by default.
+   - It runs tasks sequentially in one checkout by default; parallel worktrees for independent tasks are opt-in. Starting an increment from the updated default branch asks one guard confirmation, because WORK-001's guard asks on branch switches and merges and this spec makes no guard change. That confirmation never replaces, suppresses or pre-authorises any other guard prompt (deploy, merge, publish, protected push or other reserved operation). With parallel worktrees opted in, each worktree merge also asks (amended 2026-10-19, owner decision).
    - It runs the fast gate after each task.
    - It remediates inside intent.
    - At the end of each increment it runs the review procedure (single home: the `review` skill; WORK-003 makes that the readiness procedure).
@@ -212,14 +214,18 @@ End-to-end scenarios run deliberately in a scratch project, using unreleased sou
   - no continue, fix or push prompts;
   - work branch pushed to a local bare remote;
   - both remediations recorded;
-  - readiness reached.
+  - ~~readiness reached~~ a truthful readiness summary with the correct verdict (amended 2026-10-19, owner decision). READY: YES is not required; it holds only when every readiness condition holds, and an external review that is NOT CONFIGURED stays a non-pass. The readiness contract is not weakened.
 - **E2.** A mid-delivery conversational "we also need to update the README". Expected: recorded as a trigger-1 scope proposal, the README untouched, delivery continues on the approved scope.
-- **E3.** A stalled specialist (simulated with a deliberately hanging task) is resumed once, then escalated.
+- **E3.** A stalled specialist (simulated with a deliberately hanging task) is resumed once, then escalated. **Amended 2026-10-19 (owner decision):** for v0.3.0 the evidence for automatic recovery is the regression tests and the `/deliver` procedure, not a human E2E run; no failure is simulated and no E2E pass is claimed. An owner-stopped specialist stays paused until the owner resumes it with `/ai-engineering:deliver` (see Risks).
 ## Risks
 - **UserPromptExpansion behaviour:** resolved 2026-10-13. It cannot attest a human and is no longer part of the authority mechanism.
 - **Interim mechanism (2026-10-16):** owner commands can be triggered by an agent (Security). Mitigated by keeping every guard and platform control unchanged and listing owner-command decisions in readiness for the owner's merge review.
 - **Owner friction:** every deploy and reserved operation still asks in v0.3.0; autonomous preview deploys wait for WORK-004.
 - **Parallel worktrees** need dependencies installed (`.worktreeinclude`). Document; fall back to sequential when installation fails, recording why.
+- **Self-attested records (security review, 2026-10-19):** `finding-invalid --confirmed-by` and `increment-set --status merged` are recorded as the coordinator states them, not verified against the reviewer or Git. Accepted under the threat model (state is a workflow record); readiness and the owner's merge review remain the control.
+- **Effective tier (WORK-003):** `approve tier` records any tier; nothing in WORK-002 reads `.tier`. WORK-003 must compute the effective tier as the maximum of the state tier and the classifier floor, with a test that a state tier of 0 cannot go below a floor of 2.
+- **Commit statuses (security re-check, 2026-10-19):** `wait-github.sh checks <sha>` reads check runs only, not the legacy commit-statuses API. A missing status can only delay a pass, never fake one, and the merge stays the owner's. Accepted for v0.3.0.
+- **Automatic recovery not shown end to end (E3 residual limitation, owner decision 2026-10-19):** automatic recovery from a genuine, unexpected specialist failure has not been demonstrated in a human E2E run. Evidence for v0.3.0 is the regression tests and the `/deliver` procedure. Owner-stopped specialists remain paused until the owner resumes them.
 - **Background merge waits across long gaps.** Bounded; an expired wait records "waiting for owner merge" as a planned owner action, not an interruption.
 ## Acceptance criteria
 1. The transition script is the only supported state-transition interface. Owner-only transitions require the interim owner command and are recorded with `source: "owner-command"`. No guard decision or protected operation reads state as authority (amended 2026-10-16).
@@ -230,9 +236,9 @@ End-to-end scenarios run deliberately in a scratch project, using unreleased sou
 6. HIGH-or-above fixes appear in the readiness report. No risk is accepted or waived silently: each owner-command decision that accepts, waives or defers risk, or lowers a tier, is listed in the readiness report (amended 2026-10-16).
 7. A spec change returns the item to `proposed`.
 8. Specialists never perform Git writes. The coordinator owns branches, commits, merges, pushes and PRs.
-9. Parallel worktrees are the default, and the opt-out is documented.
+9. Sequential execution is the default; parallel worktrees are opt-in and documented. The only guard confirmation added by routine delivery is one per increment start (plus one per worktree merge when parallel is opted in), and it pre-authorises nothing else (amended 2026-10-19).
 10. Specialist handoffs exclude the log and legacy state sections.
-11. Stalls are recovered once automatically. External waits run in the background, authenticated, validated and bounded.
+11. Stalls are recovered once automatically. External waits run in the background, authenticated, validated and bounded. (Evidence for automatic recovery in v0.3.0: regression tests and procedure; see the E3 residual limitation under Risks, amended 2026-10-19.) An owner-stopped specialist is never recovered automatically: it stays paused until the owner resumes.
 12. Guard parity: every deploy class and reserved operation asks exactly as before WORK-002, whatever the state says (test above). No autonomous deployment in v0.3.0; production always asks (amended 2026-10-16).
 13. v0.2 work items import without fabricated authority.
 14. The session banner shows the active plugin version and root.
@@ -242,7 +248,7 @@ End-to-end scenarios run deliberately in a scratch project, using unreleased sou
 - Implementation complete; deterministic tests pass; E1–E3 evidence recorded
 - `scripts/check.sh` passes
 - Internal security review of the state, transition script, owner-command mechanism and guard parity (Opus) with no unresolved findings (amended 2026-10-16)
-- Independent external review passes
+- Independent review passes (amended 2026-10-19: Opus security review, QA review and CI; see Independent review)
 - Human acceptance complete
 ## Compatibility and migration
 - **v0.2 projects:** existing specs keep working as documents. `deliver` refuses items without state and points to `/ai-engineering:setup` import.
@@ -268,7 +274,7 @@ End-to-end scenarios run deliberately in a scratch project, using unreleased sou
 - `versions/CHANGELOG.md`.
 ## Independent review
 - **Internal review.** Opus security review of the transition script, the owner-command mechanism and guard parity (amended 2026-10-16).
-- **External review.** CodeRabbit on the PR at its head SHA, with no unresolved actionable findings (D5 arrangement while v0.2.0 governs).
+- **External review.** ~~CodeRabbit on the PR at its head SHA~~ (amended 2026-10-19, owner decision: CodeRabbit is unavailable). For v0.3.0 the review process is the independent Opus security review, the QA specialist review and the required CI check (`check (ubuntu, ShellCheck 0.11.0)`) on the PR head, with every review thread resolved (repository ruleset) and the owner's merge.
 - **Gate scripts.** Under v0.2 the gate commands come from the base ref, but `tests/run.sh` and `scripts/check.sh` are executed from the change itself. Reviewers must check every diff to those two files, and a weakened or removed check is a blocking finding.
 - **Owner acceptance.** The owner checks the transition table and the Business rules list.
 ## Dependencies
@@ -280,7 +286,7 @@ End-to-end scenarios run deliberately in a scratch project, using unreleased sou
 - Remediation depends on fix versus accept, not severity.
 - No pre-authorisation write hook.
 - One PR per meaningful increment by default (not an invariant).
-- Parallel worktrees by default with an opt-out.
+- Parallel worktrees by default with an opt-out. **Amended 2026-10-19:** sequential by default, parallel worktrees opt-in; one guard confirmation per increment start (Scope item 8).
 - Coordinator-owned Git.
 - Deployment authority as clarified on 2026-10-06 (preview autonomous under policy; persistent only if pre-authorised; production owner-only). **Amended 2026-10-13:** preview and pre-authorised persistent deploys run autonomously only while a valid signed delivery permission covers that increment and action; on expiry or absence they pause for fresh owner approval. **Amended 2026-10-16:** autonomous deployment moves to WORK-004; in v0.3.0 every deploy asks.
 - The command-token mechanism. **Superseded 2026-10-13** by owner signatures (now WORK-004; interim owner commands in v0.3.0, Scope item 3).
@@ -289,15 +295,18 @@ End-to-end scenarios run deliberately in a scratch project, using unreleased sou
 - **Path B (2026-10-16):** split signed approvals and autonomous deployment into WORK-004; ship the lifecycle in v0.3.0 with interim owner-command transitions that grant no security authority.
 - D2: the human-only `/ai-engineering:approve` command exists, and approval stays distinct from delivery authorisation.
 - D3: no main-session model requirement.
-- D5: the gate-bootstrap PR is merged before this work starts, and CodeRabbit is the external reviewer for this PR.
+- D5: the gate-bootstrap PR is merged before this work starts, and CodeRabbit is the external reviewer for this PR. **Amended 2026-10-19:** CodeRabbit is unavailable; see Independent review.
 ## Open decisions
 - G1, rollback-resistant nonce tracking, delivery-permission design, O3, the approver repository update source and guard rule scope moved to WORK-004 (2026-10-16).
-- None remain for this spec beyond the owner's acceptance of the Path B amendment.
+- None. E1 readiness and AC11 evidence were decided by the owner on 2026-10-19 (see Testing and Risks). Unconfigured-reviewer handling in readiness and the security reviewer's execution limits are WORK-003 follow-ups.
 
 D2, D3 and D5 remain resolved (see `WORK-001-planning.md`); D1 is superseded.
 ## Implementation state
 <!-- v0.2 deliver records task status and verdict lines here. Keep entries to one line each; put detailed evidence in WORK-002.log.md. -->
--
+- Delivery (owner-authorised 2026-10-19; branch `feature/work-002-lifecycle` from `f71b540`; v0.2 deliver, sequential in the main checkout; playbook: feature; Opus security review required):
+  - B1 backend: state schema, transition script, owner-command source, policy validation, v0.2 import, guard-parity tests (Scope 1–3, 6, 7, 18; AC1, 3, 7, 12, 13). Status: done; `workstate.sh`; `GATE fast: PASSED (exit 0) command: tests/run.sh` (3069 passed, 0 failed); guard and hook files unchanged.
+  - B2 backend: `/approve` skill, `/deliver` rewrite, `/plan` template, `/setup` (baseRef, import, banner), agent wording, wait helper, recovery (Scope 4, 5, 8–17; AC2, 4–6, 8–11, 14, 16). Status: B2a done (approve skill, deliver entry transition, plan template, setup, banner, agent wording, `wait-github.sh`); `GATE full: PASSED (exit 0) command: scripts/check.sh` (3160 passed, 0 failed). B2b done (`/deliver` rewrite; `review` records evidence for items with state); `GATE full: PASSED (exit 0) command: scripts/check.sh` (3196 passed, 0 failed).
+  - B3 coordinator: docs, CHANGELOG, E1–E3 evidence in a scratch project, gates, reviews. Status: docs and CHANGELOG done with B2b; QA (AC1–3, 7, 8, 10, 12–14, 16 met; AC4, 5, 9, 11 pending E2E) and Opus security review (no Critical/High; M1, L1–L6 fixed) done; `GATE full: PASSED (exit 0) command: scripts/check.sh` (3283 passed, 0 failed) after fixes; security re-check passed; E2E run 2026-10-19: E1 PARTIAL (delivered and pushed to the local remote; readiness NO only for `EXTERNAL REVIEW: NOT CONFIGURED`), E2 PARTIAL (kept out of scope but blocked), E3 FAIL (owner stop halted delivery; automatic recovery not shown). Fix round 2: non-blocking trigger-1 scope proposals (`workstate.sh propose`) and owner stop versus stall in `/deliver`; `tests/run.sh` 3321 passed, 0 failed. Owner decisions 2026-10-19: E1 amended (truthful readiness, NOT CONFIGURED stays a non-pass); E3 accepted on tests and procedure with a residual limitation. E2 human re-test PASS (fresh scratch). Security re-check of fix round 2: M1 (medium, earlier code), L1, L2, I1; fixed in fix round 3 with two re-test defects (resume after a trigger-3 owner decision; head SHA while active). Final re-check of 474ac27: no critical, high or medium; L-A (merged record rewrites) fixed; I-1 to I-3 informational. `tests/run.sh` 3368 passed, 0 failed.
 ## Review state
 <!-- v0.2 review records its status block here. -->
 -

@@ -19,7 +19,7 @@ The system is a Claude Code plugin, `ai-engineering`, published from this reposi
 
 Each agent's model and tools are defined only in its frontmatter (`scripts/check.sh` prints the routing).
 
-Skills: `engineering-standards`, `security-standards`, `frontend-standards`, `platform-standards`, `playbooks` (reference; model-invocable, hidden from the `/` menu) and `plan`, `deliver`, `review`, `learn`, `setup` (lifecycle). `deliver`, `review`, `learn` and `setup` set `disable-model-invocation: true` so they run only when the human invokes them and cost no context until then.
+Skills: `engineering-standards`, `security-standards`, `frontend-standards`, `platform-standards`, `playbooks` (reference; model-invocable, hidden from the `/` menu) and `plan`, `approve`, `deliver`, `review`, `learn`, `setup` (lifecycle). `approve`, `deliver`, `review`, `learn` and `setup` set `disable-model-invocation: true` so they run only when the human invokes them and cost no context until then.
 
 ## How global standards reach a session
 
@@ -115,9 +115,23 @@ Current guarantee: reviewers have no file-editing tools and are instructed not t
 
 `scripts/run-gate.sh <name> [directory] [config-ref]` runs a gate in the repository root and prints `GATE <name>: PASSED | FAILED | NOT CONFIGURED | REFUSED`. Unconfigured gates are never reported as passed. Without a config ref the command is read at `HEAD`, falling back to the uncommitted file with a `NOTE` when none is committed (implementation checks). `/ai-engineering:review` passes the base ref, and only that ref is read (certification).
 
+## Work items: state and authority
+
+Decision record: [ADR-0004](decisions/ADR-0004-work-authority-and-lifecycle.md). Work spec: `WORK-002`. The procedures live in the `approve`, `deliver` and `review` skills; this section does not restate them.
+
+- **State.** Each work item has a `WORK-NNN.state.json` next to its spec. `scripts/workstate.sh` is the only supported way to change it; its header lists the commands, exit codes and transitions. Commands take a work ID, never a state file path. Writes are atomic and schema-validated, and a corrupt file is refused, never repaired.
+- **A workflow record, not security authority.** Owner-only transitions (`approve`, `deliver`) need an owner-command marker passed by the human-only commands. An agent can pass the same flag and anyone can edit the file, so a record never proves owner intent. No guard or hook reads state, and no deploy, merge, publish or protected push depends on it: they ask exactly as before. Signed owner approvals, replay protection and autonomous deployment are WORK-004; the trusted approval path (G1) stays open.
+- **Lifecycle.** `proposed`, `approved`, `authorised`, `delivering` (`blocked` and back), `done`, `archived`; `paused` is reachable from the three active states. Changing the spec after approval changes its hash and returns the item to `proposed`.
+- **Triggers.** After authorisation delivery interrupts the owner only for an intent or scope change, an owner-level trade-off, accepting or downgrading risk, a reserved operation, or an ambiguity whose readings build different things. Each is recorded with its trigger class. A request that would only add scope, while the approved work can continue, is recorded as an open scope proposal without blocking. The list's single home is the `deliver` skill.
+- **Git ownership.** The coordinator creates the branch, commits, merges, pushes the work branch and opens or updates the pull request. Specialists edit and test only; the guard denies their Git writes. Nothing in delivery merges: the owner does.
+- **Delivery policy.** The spec's "Delivery policy" section sets `pushWorkBranch` and `openPullRequest` (ready or draft), copied into state at authorisation. Deployment fields and any production, deploy, release or publish entry are rejected with a pointer to WORK-004.
+- **Waits and recovery.** `scripts/wait-github.sh` waits for CI checks or the owner's merge as a bounded background command through authenticated `gh`: it validates responses, backs off, times out, never treats an error payload as data and reports `NOT AUTHENTICATED` as a planned owner action. A stalled or failed specialist is re-dispatched once automatically with a fresh brief and the recovery is recorded; a second failure escalates. A specialist the owner stops is an owner pause, not a stall.
+
 ## Concurrency
 
-Implementation runs sequentially in the current checkout by default. `deliver` runs parallel tasks with `isolation: "worktree"` only when files are disjoint and the project sets `worktree.baseRef` to `"head"`. Claude Code's default worktree base is the remote default branch, which would not contain the work branch. Worktrees contain committed state only and isolate files only, not databases, ports, `.env` files or infrastructure state; they are not a security boundary. `deliver` runs the fast gate in the agent's worktree.
+Implementation runs sequentially in one checkout by default. Parallel worktrees are opt-in: `deliver` uses `isolation: "worktree"` only when the owner asks, files are disjoint and the project sets `worktree.baseRef` to `"head"`. Claude Code's default worktree base is the remote default branch, which would not contain the work branch. Worktrees contain committed state only and isolate files only, not databases, ports, `.env` files or infrastructure state; they are not a security boundary. `deliver` runs the fast gate in the agent's worktree.
+
+The guard asks on branch switches and merges, and WORK-002 changes no guard. Delivery therefore causes one confirmation when an increment starts from the updated default branch, plus one per worktree merge when parallel is opted in. That confirmation never replaces, suppresses or pre-authorises any other guard prompt.
 
 ## Distribution and updates
 
