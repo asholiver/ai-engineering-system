@@ -31,7 +31,10 @@ Readiness (WORK-003 C2, ADR-0005).
 - New `scripts/readiness.sh`: one deterministic readiness procedure that `/ai-engineering:review` runs (and `/ai-engineering:deliver` through it).
   - Effective tier = max(state tier, classifier floor, action floor), and it never goes lower.
   - It runs the full gate itself in a fresh local clone at HEAD, with configuration from the increment's recorded base, and runs the external review.
-- **Behaviour change:** the increment's base is the `origin/<default>` commit recorded once with `workstate.sh increment-set --base-sha` when the increment begins. A default-branch ref that moves afterwards is `NOT CERTIFIABLE`; a newer ref is never accepted automatically. `/ai-engineering:deliver` records the base at the start.
+- **Behaviour change:** an increment starts with `git switch -c <work-branch> <commit>`, naming the full `origin/<default>` commit, so the owner sees the base in the confirmation (visibility, not authentication).
+  - `workstate.sh increment-set --status active` (planned to active) requires that full commit as `--base-sha`, checks it against `origin/<default>` at that moment, and never records a base later or changes it.
+  - A default-branch ref that moves afterwards is `NOT CERTIFIABLE`; a newer ref is never accepted automatically.
+- **Behaviour change:** the external review runs in its own fresh clone of HEAD, before the gate, with inherited Git overrides removed. Diff-reshaping Git configuration (`diff.external`, textconv or diff command drivers, `core.attributesFile`, `.git/info/attributes`) is `NOT CERTIFIABLE`. After the gate, readiness revalidates the state, refs, HEAD, replace refs, the installed plugin and the evidence.
 - **Behaviour change:** the full gate never runs in the development checkout, so a consuming project's `full` gate must install its own dependencies. Running a project gate is not a sandbox.
 - **Behaviour change:** `/ai-engineering:review` no longer takes a base ref, and reports the `READINESS` block.
   - The block can say `NOT CERTIFIABLE`: trust or evidence is missing, ambiguous, malformed or untrusted. The effective tier is then 2 and READY is NO.

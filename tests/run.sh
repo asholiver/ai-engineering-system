@@ -4064,6 +4064,13 @@ fi
 workstate="$scripts/workstate.sh"
 ws_directory="$work_directory/workstate-specs"
 mkdir -p "$ws_directory"
+# Starting an increment verifies its base against origin/<default>, so the specs directory is a
+# repository with a default-branch ref (no remote is contacted).
+git -C "$ws_directory" init -q -b main
+git -C "$ws_directory" -c user.name=test -c user.email=test@example.com commit -q --allow-empty -m base
+git -C "$ws_directory" update-ref refs/remotes/origin/main HEAD
+git -C "$ws_directory" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+ws_base="$(git -C "$ws_directory" rev-parse HEAD)"
 ws_counter=0
 ws_id=""
 ws_output=""
@@ -4096,7 +4103,7 @@ new_item() { # status [spec text appended, e.g. a delivery policy section]
     blocked) ws block "$ws_id" --trigger 2 --question "which?" --options a,b >/dev/null || fail "setup: block $ws_id" ;;
     paused) ws pause "$ws_id" >/dev/null || fail "setup: pause $ws_id" ;;
     done | archived)
-      ws increment-set "$ws_id" --inc I1 --status active >/dev/null || fail "setup: increment active"
+      ws increment-set "$ws_id" --inc I1 --status active --base-sha "$ws_base" >/dev/null || fail "setup: increment active"
       ws increment-set "$ws_id" --inc I1 --status ready >/dev/null || fail "setup: increment ready"
       ws increment-set "$ws_id" --inc I1 --status merged --merge-sha abc1234 >/dev/null || fail "setup: increment merged"
       ws "done" "$ws_id" >/dev/null || fail "setup: done"
@@ -4161,7 +4168,7 @@ expect_equal "paused: remembers where it was paused from" "paused delivering" "$
 run_ws deliver "$ws_id" --owner-command deliver
 expect_ws "allowed: paused -> delivering by resume" 0
 expect_equal "resumed: back to the paused-from status" "delivering null" "$(state_value '"\(.status) \(.pausedFrom)"')"
-run_ws increment-set "$ws_id" --inc I1 --status active
+run_ws increment-set "$ws_id" --inc I1 --status active --base-sha "$ws_base"
 run_ws increment-set "$ws_id" --inc I1 --status ready
 run_ws "done" "$ws_id"
 expect_ws "done is refused while an increment is not merged" 3
@@ -4279,9 +4286,9 @@ expect_equal "resume: the item is proposed again" proposed "$(state_value .statu
 
 # E2 re-test defect 2: record a head SHA without a status change.
 new_item delivering
-ws increment-set "$ws_id" --inc I1 --status active >/dev/null
+ws increment-set "$ws_id" --inc I1 --status active --base-sha "$ws_base" >/dev/null
 active_at_before="$(state_value '.increments[0].activeAt')"
-run_ws increment-set "$ws_id" --inc I1 --status active --head-sha abc1234
+run_ws increment-set "$ws_id" --inc I1 --status active --base-sha "$ws_base" --head-sha abc1234
 expect_ws "head sha: repeating the current status records fields only" 0
 expect_equal "head sha: recorded, still active, not ready" "abc1234 active null" "$(state_value '.increments[0] | "\(.headSha) \(.status) \(.readyAt)"')"
 expect_equal "head sha: activeAt unchanged" "$active_at_before" "$(state_value '.increments[0].activeAt')"
@@ -4310,7 +4317,7 @@ run_ws increment-set "$ws_id" --inc I1 --pr 99 --branch other
 expect_ws "L-A: a merged increment's pr and branch cannot be rewritten" 3
 expect_equal "L-A: refused updates leave the merged record unchanged" "$merged_before" "$(state_checksum)"
 new_item delivering
-ws increment-set "$ws_id" --inc I1 --status active >/dev/null
+ws increment-set "$ws_id" --inc I1 --status active --base-sha "$ws_base" >/dev/null
 run_ws increment-set "$ws_id" --inc I1 --merge-sha abc1234
 expect_ws "L-A: a merge sha cannot be recorded on an active increment" 3
 ws increment-set "$ws_id" --inc I1 --status ready >/dev/null
@@ -4564,7 +4571,7 @@ expect_equal "policy: pushing and pull requests can be switched off" "false fals
 new_item delivering
 run_ws increment-set "$ws_id" --inc I1 --status ready
 expect_ws "an increment cannot skip from planned to ready" 3
-run_ws increment-set "$ws_id" --inc I1 --status active --branch feature/x --base-sha abc1234
+run_ws increment-set "$ws_id" --inc I1 --status active --branch feature/x --base-sha "$ws_base"
 expect_ws "increment planned -> active" 0
 run_ws increment-recovery "$ws_id" --inc I1
 run_ws increment-recovery "$ws_id" --inc I1
@@ -4640,11 +4647,26 @@ run_ws evidence "$ws_id" --inc I1 --kind review --reviewer external --result pas
 expect_ws "evidence: external review is never recorded as review evidence" 2
 run_ws evidence "$ws_id" --inc I1 --kind residual-risks --result pass --sha "not a sha"
 expect_ws "evidence: a malformed sha is refused" 2
-# The base an increment began from is recorded once (WORK-003 C2, H1).
+# The base an increment starts from (WORK-003 C2, H1): required at planned -> active, a full
+# commit id equal to origin/<default> at that moment, and never recorded later or changed.
 new_item delivering
-first_base=1111111111111111111111111111111111111111
-run_ws increment-set "$ws_id" --inc I1 --status active --branch work/WORK-1-I1 --base-sha "$first_base"
-expect_ws "base: recorded when the increment begins" 0
+before="$(state_checksum)"
+run_ws increment-set "$ws_id" --inc I1 --status active --branch work/WORK-1-I1
+expect_ws "base: starting an increment without a base is refused" 2
+run_ws increment-set "$ws_id" --inc I1 --status active --branch work/WORK-1-I1 --base-sha "${ws_base:0:12}"
+expect_ws "base: a short base is refused" 2
+run_ws increment-set "$ws_id" --inc I1 --status active --branch work/WORK-1-I1 --base-sha 2222222222222222222222222222222222222222
+expect_ws "base: a base other than origin/<default> is refused" 3
+expect_contains "base: the refusal names origin/<default>" "is not the current origin/<default> commit ($ws_base)" "$ws_output"
+expect_equal "base: refused starts leave the state unchanged" "$before" "$(state_checksum)"
+git -C "$ws_directory" symbolic-ref --delete refs/remotes/origin/HEAD
+run_ws increment-set "$ws_id" --inc I1 --status active --branch work/WORK-1-I1 --base-sha "$ws_base"
+expect_ws "base: no origin/HEAD means the base cannot be verified" 3
+git -C "$ws_directory" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+first_base="$ws_base"
+run_ws increment-set "$ws_id" --inc I1 --status active --branch work/WORK-1-I1 --base-sha "$(printf '%s' "$first_base" | tr 'a-f' 'A-F')"
+expect_ws "base: recorded when the increment starts (case-insensitive input)" 0
+expect_equal "base: stored in lower case" "$first_base" "$(state_value '.increments[0].baseSha')"
 run_ws increment-set "$ws_id" --inc I1 --base-sha "$first_base"
 expect_ws "base: repeating the same base is allowed" 0
 before="$(state_checksum)"
@@ -4652,6 +4674,13 @@ run_ws increment-set "$ws_id" --inc I1 --base-sha 222222222222222222222222222222
 expect_ws "base: a different base is refused" 3
 expect_contains "base: the refusal says a base is never replaced" "a recorded base is never replaced" "$ws_output"
 expect_equal "base: the state is unchanged" "$before" "$(state_checksum)"
+# Path A (late recording): an increment started before this rule, with no base, never gets one.
+new_item delivering
+jq '.increments[0].status = "active" | .increments[0].activeAt = "2000-01-01T00:00:00Z"' "$(state_path)" >"$work_directory/no-base.json"
+cp "$work_directory/no-base.json" "$(state_path)"
+run_ws increment-set "$ws_id" --inc I1 --base-sha "$ws_base"
+expect_ws "base: a base cannot be recorded after the increment started" 3
+expect_equal "base: still no base" null "$(state_value '.increments[0].baseSha')"
 for bad_branch in HEAD origin/main refs/heads/x remotes/origin/x tags/v1; do
   run_ws increment-worktree "$ws_id" --inc I1 --branch "$bad_branch"
   expect_ws "increment-worktree: refuses the ref-like name '$bad_branch'" 2
@@ -5023,6 +5052,8 @@ expect_contains "skill deliver: parallel worktrees are opt-in" "Parallel worktre
 expect_contains "skill deliver: one guard confirmation per increment start" "Starting an increment from the updated default branch asks one guard confirmation" "$deliver_text"
 expect_contains "skill deliver: each worktree merge also asks" "each worktree merge also asks" "$deliver_text"
 expect_contains "skill deliver: records the base once at the start" "--status active --branch <work-branch> --base-sha <commit>" "$deliver_text"
+expect_contains "skill deliver: the start command names the full base commit" "\`git switch -c <work-branch> <commit>\` naming that full commit" "$deliver_text"
+case "$deliver_text" in *"git switch -c <work-branch> origin/<default>"*) fail "skill deliver: the start command must not name origin/<default>" ;; *) pass ;; esac
 expect_contains "skill deliver: never moves the default-branch ref during an increment" "Do not fetch, pull or otherwise move \`origin/<default>\` again until the increment is merged" "$deliver_text"
 expect_contains "skill deliver: confirmation never pre-authorises another prompt" "never replaces, suppresses or pre-authorises any other guard prompt" "$deliver_text"
 expect_contains "skill deliver: owner-command records are not security authority" "workflow records, not security authority" "$deliver_text"
@@ -5071,7 +5102,7 @@ case "$deliver_text" in *"Record the task list under"*) fail "skill deliver: mus
 case "$deliver_text" in *[Ss]igned* | *"autonomous deploy"*" is "*) fail "skill deliver: must not claim signing or autonomous deployment" ;; *) pass ;; esac
 # AC9: the increment start is one guard confirmation only with this exact sequence.
 expect_contains "skill deliver: increment start fetches the default branch" 'git fetch origin <default>' "$deliver_text"
-expect_contains "skill deliver: increment start is one switch from the remote default" 'git switch -c <work-branch> origin/<default>' "$deliver_text"
+expect_contains "skill deliver: increment start is one switch from the remote default" 'git switch -c <work-branch> <commit>' "$deliver_text"
 # A review that wrote into the spec would change its hash and stop delivery.
 review_text="$(cat "$plugin_directory/skills/review/SKILL.md")"
 expect_contains "skill review: items with state are recorded as evidence, not in the spec" "never edit the spec" "$review_text"
@@ -5331,7 +5362,7 @@ guard_event() { # decision command session [time]
     '{time: $time, sessionId: $session, agentType: null, decision: $decision, classes: ["fixture-class"], parseMode: "parsed", commandSha256: $sha}'
 }
 guard_log_file() { printf '%s/.git/ai-engineering/guard-log.jsonl' "$readiness_project"; }
-start_command="git switch -c work/WORK-001-I1 origin/main"
+start_command="" # set by build_readiness_project: the start command names the base commit
 reset_guard_log() {
   rm -rf "$readiness_project/.git/ai-engineering"
   mkdir -p "$readiness_project/.git/ai-engineering"
@@ -5349,6 +5380,7 @@ real_guard() { # command [session]: one Bash tool call through the real installe
 # fixture log line.
 readiness_pin_ref=""
 readiness_real_guard=no
+readiness_plant_base=no
 build_readiness_project() { # name external-review-json state-tier [full-gate-command]
   readiness_project="$readiness_root/$1"
   git init -q --bare "$readiness_root/$1.git"
@@ -5371,13 +5403,20 @@ build_readiness_project() { # name external-review-json state-tier [full-gate-co
   readiness_git "$readiness_project" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
   ws_ready approve WORK-001 spec --owner-command approve >/dev/null
   ws_ready deliver WORK-001 --owner-command deliver >/dev/null
-  readiness_git "$readiness_project" switch -q -c work/WORK-001-I1 origin/main
+  if [ "$readiness_plant_base" = yes ]; then
+    # A commit that is not on the remote's main, planted in the local default-branch ref.
+    readiness_git "$readiness_project" update-ref refs/remotes/origin/main \
+      "$(readiness_git "$readiness_project" commit-tree -p HEAD -m planted "HEAD^{tree}")"
+  fi
+  # The owner-approved start command names the full base commit.
+  readiness_base="$(readiness_git "$readiness_project" rev-parse refs/remotes/origin/main)"
+  start_command="git switch -c work/WORK-001-I1 $readiness_base"
+  readiness_git "$readiness_project" switch -q -c work/WORK-001-I1 "$readiness_base"
   if [ "$readiness_real_guard" = yes ]; then
     rm -rf "$readiness_project/.git/ai-engineering"
     real_guard "$start_command" real-session
   fi
-  ws_ready increment-set WORK-001 --inc I1 --status active --branch work/WORK-001-I1 \
-    --base-sha "$(readiness_git "$readiness_project" rev-parse refs/remotes/origin/main)" >/dev/null
+  ws_ready increment-set WORK-001 --inc I1 --status active --branch work/WORK-001-I1 --base-sha "$readiness_base" >/dev/null
   commit_change README.md
   ws_ready evidence WORK-001 --inc I1 --kind review --reviewer qa --result pass --sha "$(readiness_git "$readiness_project" rev-parse HEAD)" >/dev/null
   [ "$readiness_real_guard" = yes ] || reset_guard_log
@@ -5500,7 +5539,7 @@ guard_event ask "$start_command" coordinator >>"$(guard_log_file)"
 run_readiness
 expect_ready_yes "guard log: exact resume and repeated start confirmations are excluded"
 expect_contains "guard log: two exclusions counted" "0 raising event(s), 2 excluded" "$readiness_output"
-for near_miss in "git switch  work/WORK-001-I1" "git switch -c work/WORK-001-I1 origin/main " "git switch work/WORK-001-I2" "cd . && git switch work/WORK-001-I1" "git checkout work/WORK-001-I1" "git merge --no-edit work/WORK-001-I1-T1"; do
+for near_miss in "git switch  work/WORK-001-I1" "$start_command " "git switch -c work/WORK-001-I1 origin/main" "git switch work/WORK-001-I2" "cd . && git switch work/WORK-001-I1" "git checkout work/WORK-001-I1" "git merge --no-edit work/WORK-001-I1-T1"; do
   reset_guard_log
   guard_event ask "$near_miss" coordinator >>"$(guard_log_file)"
   run_readiness
@@ -5606,7 +5645,7 @@ reset_guard_log
 # --- action floor from a trigger-2 decision
 ws_ready decision WORK-001 --trigger 2 --question "add a dependency?" --answer "yes" >/dev/null
 run_readiness
-expect_contains "action floor: a trigger-2 decision raises it" "ACTION FLOOR: 2 (trigger-2 decision D1)" "$readiness_output"
+expect_contains "action floor: a trigger-2 decision raises it" "ACTION FLOOR: 2 (trigger-2 decision(s) D1)" "$readiness_output"
 expect_equal "action floor: classified tier 2" "EFFECTIVE TIER: 2 (classified)" "$(readiness_line "EFFECTIVE TIER:")"
 
 # --- state, repository and evidence conditions
@@ -5993,6 +6032,192 @@ real_guard "git pull" other-real-session
 run_readiness
 expect_equal "real guard: another session's prompt is classified tier 2" "1 EFFECTIVE TIER: 2 (classified)" "$readiness_status $(readiness_line "EFFECTIVE TIER:")"
 expect_contains "real guard: the other session raises the floor" "session other-real-session" "$(readiness_line "ACTION FLOOR:")"
+
+# --- H1 path B: the owner-approved start command must name the recorded base commit
+build_readiness_project start-names-base null 0
+rm -rf "$readiness_project/.git/ai-engineering"
+mkdir -p "$readiness_project/.git/ai-engineering"
+guard_event ask "git switch -c work/WORK-001-I1 origin/main" coordinator 2000-01-01T00:00:00Z >"$(guard_log_file)"
+run_readiness
+expect_not_certifiable "base: a start command that does not name the base is no anchor" "no increment-start anchor (git switch -c work/WORK-001-I1 $readiness_base)"
+guard_event ask "git switch -c work/WORK-001-I1 1111111111111111111111111111111111111111" coordinator 2000-01-01T00:00:00Z >"$(guard_log_file)"
+run_readiness
+expect_not_certifiable "base: a start command naming another commit is no anchor" "no increment-start anchor"
+reset_guard_log
+run_readiness
+expect_ready_yes "base: the start command naming the recorded base anchors"
+# A default-branch ref planted before the start: workstate accepts only what origin/main names
+# at that moment, and the start command the owner approves shows that commit. Readiness cannot
+# authenticate it against the remote (owner-accepted residual: owner visibility is not
+# authentication), but it certifies only an anchor that names the planted commit.
+readiness_plant_base=yes
+build_readiness_project base-planted null 0
+readiness_plant_base=no
+expect_equal "base: a planted base is what the approved start command names" \
+  "git switch -c work/WORK-001-I1 $readiness_base" "$start_command"
+if [ "$readiness_base" = "$(git --git-dir="$readiness_root/base-planted.git" rev-parse main)" ]; then
+  fail "base: the planted fixture differs from the remote's main"
+else pass; fi
+
+# --- H1 path A: a renamed and recreated branch cannot substitute another starting point
+build_readiness_project base-recreated null 0
+base_substitute="$(readiness_git "$readiness_project" commit-tree -p "$readiness_base" -m substitute "$readiness_base^{tree}")"
+readiness_git "$readiness_project" branch -m work/WORK-001-I1 old-work
+readiness_git "$readiness_project" branch work/WORK-001-I1 "$base_substitute"
+readiness_git "$readiness_project" switch -q work/WORK-001-I1
+record_review qa
+run_readiness
+expect_not_certifiable "base: a recreated increment branch" "does not show it created from the recorded base"
+
+# --- external review: its own clone, the intended commits, no repository-controlled diff behaviour
+# shellcheck disable=SC2016 # the reviewer command is run later by external-review.sh
+review_probe='git rev-parse --verify -q "$REVIEW_BASE_REF^{commit}" >/dev/null && test "$REVIEW_HEAD_REF" = "$(git rev-parse HEAD)" && printf "%s %s" "$REVIEW_BASE_REF" "$REVIEW_HEAD_REF" >'"'$readiness_root/review-refs.txt'"' && git diff "$REVIEW_BASE_REF" "$REVIEW_HEAD_REF" -- README.md | grep -q "^+payload-marker"'
+build_readiness_project review-diff "$(jq -n --arg command "$review_probe" '$command')" 0
+printf 'payload-marker\n' >>"$readiness_project/README.md"
+readiness_git "$readiness_project" add README.md
+readiness_git "$readiness_project" commit -q -m payload
+record_review qa
+run_readiness
+expect_ready_yes "external review: the reviewer sees the payload in its own clone"
+expect_equal "external review: the reviewer receives the recorded base and HEAD" \
+  "$readiness_base $(readiness_git "$readiness_project" rev-parse HEAD)" "$(cat "$readiness_root/review-refs.txt" 2>/dev/null)"
+GIT_EXTERNAL_DIFF=true run_readiness
+expect_ready_yes "external review: an inherited GIT_EXTERNAL_DIFF is removed"
+readiness_git "$readiness_project" config diff.external true
+run_readiness
+expect_not_certifiable "external review: diff.external in the repository" "unsafe Git configuration for review (diff.external)"
+readiness_git "$readiness_project" config --unset diff.external
+readiness_git "$readiness_project" config diff.hide.textconv true
+run_readiness
+expect_not_certifiable "external review: a textconv driver" "unsafe Git configuration for review (diff.hide.textconv)"
+readiness_git "$readiness_project" config --unset diff.hide.textconv
+printf '* -diff\n' >"$readiness_project/.git/info/attributes"
+run_readiness
+expect_not_certifiable "external review: a non-empty .git/info/attributes" "non-empty .git/info/attributes"
+rm "$readiness_project/.git/info/attributes"
+run_readiness
+expect_ready_yes "external review: restored"
+
+# --- tampering by the gate: everything readiness relied on is checked again afterwards
+build_readiness_project gate-tamper null 0 "sh '$readiness_root/gate-action.sh'"
+gate_tamper_project="$readiness_project"
+set_gate_action() { printf '#!/bin/sh\n%s\n' "$1" >"$readiness_root/gate-action.sh"; }
+set_gate_action "git -C '$gate_tamper_project' replace \"\$(git -C '$gate_tamper_project' rev-parse HEAD)\" \"\$(git -C '$gate_tamper_project' rev-parse HEAD~1)\""
+run_readiness
+expect_not_certifiable "gate tampering: a replace ref added by the gate" "replace refs"
+expect_contains "gate tampering: found after the gate" "(after the gate)" "$(readiness_line "CERTIFIABLE:")"
+readiness_git "$gate_tamper_project" replace -d "$(readiness_git "$gate_tamper_project" rev-parse HEAD)" >/dev/null
+set_gate_action "git -C '$gate_tamper_project' update-ref refs/remotes/origin/main HEAD"
+run_readiness
+expect_not_certifiable "gate tampering: the default-branch ref moved by the gate" "origin/main moved while readiness ran"
+readiness_git "$gate_tamper_project" update-ref refs/remotes/origin/main "$readiness_base"
+set_gate_action "printf 'x\\n' >>'$install_directory/skills/review/SKILL.md'"
+run_readiness
+expect_not_certifiable "gate tampering: the installed plugin edited by the gate" "the installed plugin no longer matches its release tag after the gate"
+cp "$readiness_root/review-backup.md" "$install_directory/skills/review/SKILL.md"
+set_gate_action "git -C '$gate_tamper_project' config diff.external true"
+run_readiness
+expect_not_certifiable "gate tampering: diff configuration set by the gate" "unsafe Git configuration for review after the gate (diff.external)"
+readiness_git "$gate_tamper_project" config --unset diff.external
+cp "$(readiness_state_file)" "$readiness_root/gate-tamper-state.json"
+set_gate_action "printf 'x' >>'$gate_tamper_project/.agents/specs/active/WORK-001.state.json'"
+run_readiness
+expect_not_certifiable "gate tampering: the state rewritten by the gate" "the work-item state or spec changed while readiness ran"
+cp "$readiness_root/gate-tamper-state.json" "$(readiness_state_file)"
+set_gate_action ":"
+run_readiness
+expect_ready_yes "gate tampering: a gate that changes nothing"
+# A gate that kills run-gate.sh leaves no verdict.
+# The gate walks up its own process ancestry, stopping at readiness.sh, and kills the outermost
+# run-gate.sh that readiness started on its gate clone (the subshell run-gate.sh forks shows the
+# same command line). Nothing above readiness, such as a gate running this suite, is touched.
+# shellcheck disable=SC2016 # the gate script's own text, expanded when it runs
+set_gate_action 'process=$PPID; outermost=""
+while [ "${process:-1}" -gt 1 ]; do
+  command_line="$(ps -o command= -p "$process")"
+  case "$command_line" in
+    *readiness.sh*) break ;;
+    *"run-gate.sh full "*"/gate-tree "*) outermost="$process" ;;
+  esac
+  process="$(ps -o ppid= -p "$process" | tr -d " ")"
+done
+[ -n "$outermost" ] && kill -KILL "$outermost"'
+run_readiness
+expect_contains "gate: no verdict when run-gate.sh is killed" "GATE full: NO VERDICT (run-gate.sh exit" "$(readiness_line "GATE full:")"
+expect_equal "gate: no verdict is READY NO, certifiable" "1 CERTIFIABLE: YES" "$readiness_status $(readiness_line "CERTIFIABLE:")"
+
+# --- the guard log rotated between its two reads (a stand-in cat rotates it after one read)
+cat_stand_in="$readiness_root/cat-stand-in"
+mkdir -p "$cat_stand_in"
+real_cat="$(command -v cat)"
+printf '%s\n' '#!/bin/bash' \
+  "if [ \$# -eq 1 ] && [ \"\${1##*/}\" = guard-log.jsonl ] && [ ! -e '$readiness_root/rotated-once' ]; then" \
+  "  '$real_cat' \"\$1\"; status=\$?; : >'$readiness_root/rotated-once'; mv \"\$1\" \"\$1.1\"; : >\"\$1\"; exit \$status" \
+  'fi' \
+  "exec '$real_cat' \"\$@\"" >"$cat_stand_in/cat"
+chmod +x "$cat_stand_in/cat"
+build_readiness_project log-rotation null 0
+guard_event ask "git status" other-session >>"$(guard_log_file)"
+PATH="$cat_stand_in:$PATH" run_readiness
+expect_not_certifiable "guard log: rotated between its two reads" "the log was rotated or replaced while it was being read"
+rm -f "$readiness_root/rotated-once"
+
+# --- more negative cells
+edit_readiness_state '.decisions += [{id: "", trigger: 2, question: "q", options: [], askedAt: "2000-01-01T00:00:00Z", answeredAt: "2000-01-01T00:00:00Z", answer: "a", source: "conversation", by: null, blocking: false}]'
+reset_guard_log
+run_readiness
+expect_equal "action floor: a trigger-2 decision with an empty id still raises it" "ACTION FLOOR: 2 (trigger-2 decision(s) (no id))" "$(readiness_line "ACTION FLOOR:")"
+expect_equal "action floor: the empty-id decision is a classified tier 2" "1 EFFECTIVE TIER: 2 (classified)" "$readiness_status $(readiness_line "EFFECTIVE TIER:")"
+build_readiness_project negative-cells null 0
+edit_readiness_state '.increments[0].evidence = []'
+run_readiness
+expect_equal "evidence: no QA evidence" "QA (internal): MISSING" "$(readiness_line "QA (internal):")"
+expect_contains "evidence: missing QA is the reason" "QA evidence covering HEAD is MISSING" "$(readiness_line "READY:")"
+record_review qa
+chmod 000 "$(guard_log_file)"
+if [ -r "$(guard_log_file)" ]; then pass; else
+  run_readiness
+  expect_not_certifiable "guard log: an unreadable log" "guard-log.jsonl is missing, unreadable or not a regular file"
+fi
+chmod 600 "$(guard_log_file)"
+mv "$readiness_project/.git/ai-engineering" "$readiness_project/.git/ai-engineering-real"
+ln -s "$readiness_project/.git/ai-engineering-real" "$readiness_project/.git/ai-engineering"
+run_readiness
+expect_not_certifiable "guard log: a linked log directory" "the log directory is missing or a link"
+rm "$readiness_project/.git/ai-engineering"
+mv "$readiness_project/.git/ai-engineering-real" "$readiness_project/.git/ai-engineering"
+ln -s "$(guard_log_file)" "$(guard_log_file).1"
+run_readiness
+expect_not_certifiable "guard log: a linked rotated log" "guard-log.jsonl.1 is unreadable or not a regular file"
+rm "$(guard_log_file).1"
+git_stand_in="$readiness_root/git-stand-in"
+mkdir -p "$git_stand_in"
+# shellcheck disable=SC2016 # the stand-in script's own text, expanded when it runs
+printf '%s\n' '#!/bin/bash' 'for argument in "$@"; do [ "$argument" = clone ] && exit 128; done' "exec '$(command -v git)' \"\$@\"" >"$git_stand_in/git"
+chmod +x "$git_stand_in/git"
+PATH="$git_stand_in:$PATH" run_readiness
+expect_not_certifiable "clones: the external review's clone cannot be created" "the external review could not run: a fresh clone of HEAD could not be created"
+expect_contains "clones: the gate's clone cannot be created" "the full gate could not run: a fresh clone of HEAD could not be created" "$(readiness_line "CERTIFIABLE:")"
+run_readiness
+expect_ready_yes "negative cells: restored"
+build_readiness_project tier2-reviewer-error '"exit 7"' 0
+commit_change package.json
+record_review qa
+run_readiness
+expect_contains "tier 2: an external reviewer error is READY NO" "external review is required at tier 2 and did not pass (ERROR (reviewer exit 7))" "$(readiness_line "READY:")"
+
+# --- locale: readiness parses with a fixed locale; the gate gets the caller's locale back
+test_locale=""
+for locale_candidate in en_US.UTF-8 en_US.utf8; do
+  if locale -a 2>/dev/null | grep -qx "$locale_candidate"; then test_locale="$locale_candidate"; break; fi
+done
+if [ -n "$test_locale" ]; then
+  build_readiness_project locale null 0 "test \"\${LC_ALL-}\" = '$test_locale'"
+  LC_ALL="$test_locale" run_readiness
+  expect_ready_yes "locale: readiness under $test_locale (collating ranges) is unchanged, and the gate gets $test_locale"
+else
+  pass # no en_US UTF-8 locale on this machine
+fi
 
 # ---------------------------------------------------------------- inject-standards
 output="$(CLAUDE_PLUGIN_ROOT="$repository_directory/plugins/ai-engineering" "$scripts/inject-standards.sh")"

@@ -113,21 +113,39 @@ Current guarantee: reviewers have no file-editing tools and are instructed not t
 { "fast": "...", "full": "...", "externalReview": null }
 ```
 
-`scripts/run-gate.sh <name> [directory] [config-ref]` runs a gate in the repository root and prints `GATE <name>: PASSED | FAILED | NOT CONFIGURED | REFUSED`. Unconfigured gates are never reported as passed. Without a config ref the command is read at `HEAD`, falling back to the uncommitted file with a `NOTE` when none is committed (implementation checks). Readiness (below) passes the merge-base commit, and only that commit is read (certification).
+`scripts/run-gate.sh <name> [directory] [config-ref]` runs a gate in the repository root and prints `GATE <name>: PASSED | FAILED | NOT CONFIGURED | REFUSED`. Unconfigured gates are never reported as passed. Without a config ref the command is read at `HEAD`, falling back to the uncommitted file with a `NOTE` when none is committed (implementation checks). Readiness (below) passes the increment's recorded base commit, and only that commit is read (certification).
 
 ### Readiness (WORK-003 C2)
 
 `scripts/readiness.sh <WORK-ID> --inc <increment>` is the one readiness procedure. The `review` skill runs it, and `/ai-engineering:deliver` reaches it through `review`. It prints a `READINESS` block ending in `READY: YES | NO`. The script's header documents every rule; in summary:
 
 - **Effective tier** is the maximum of the state tier, the classifier floor and the action floor. Nothing lowers it. It is computed during readiness only; recomputing after each task commit is deferred to v0.3.x.
-- **Base** is the increment's recorded base: the `origin/<default>` commit recorded once with `workstate.sh increment-set --base-sha` when the increment begins (`origin/HEAD` names the default branch). It is never a chosen ref, and never whatever the local ref says later. Otherwise the result is `NOT CERTIFIABLE`:
+- **Base** is the increment's recorded base commit. `workstate.sh` records it only when the increment moves from planned to active. It must be the full commit `origin/<default>` names at that moment (`origin/HEAD` names the default branch), and it never changes: late recording, a different base and re-anchoring are refused. The owner-approved start command names that exact commit (`git switch -c <branch> <commit>`), and readiness needs that exact command as the guard-log anchor. Otherwise the result is `NOT CERTIFIABLE`:
   - the local `origin/<default>` must still equal the recorded base, so a ref moved to HEAD or to a newer commit is rejected. A newer ref is never accepted automatically, and re-anchoring an increment needs a separate owner workflow (not available in v0.3.0);
   - the base must be an ancestor of HEAD;
-  - the increment branch's reflog must show the branch created from it.
+  - the increment branch's reflog must show the branch created from it, so a renamed and recreated branch does not count.
 
-  The ref and the reflog are local records: remote authenticity is not verified (no `ls-remote`).
-- **Full gate:** readiness runs it itself, with configuration from the base commit, in a fresh local clone of the repository at exactly HEAD. The clone's objects are copied, not linked; it is checked out on its own branch (`ai-engineering-readiness-gate`), its remote and every other branch are removed, and Git hooks are off. Readiness reads Git with `GIT_NO_REPLACE_OBJECTS` and `GIT_NO_LAZY_FETCH` set. The gate and external review run without them, because the guard treats the first as a variable that changes what Git sees. Both still receive explicit paths and commits, and a repository with replace refs is `NOT CERTIFIABLE`. The gate never runs in, falls back to, or links anything from the development checkout (no `node_modules`, `.env` or other ignored files), so the project's `full` gate must be self-contained, installing its own dependencies. The verdict counts only together with `run-gate.sh`'s exit status. Recorded gate results are never trusted. **Running the project's gate is not a security sandbox:** it runs with the user's privileges and can reach user-level resources and absolute paths unless separately isolated.
-- **Working tree and records:** `git status` must succeed and show only the active item's state and log, and no tracked file may be marked assume-unchanged or skip-worktree. The spec and state are read once, from a copy. A failed read is `NOT CERTIFIABLE`, never an empty record, and a change to either while readiness runs is `NOT CERTIFIABLE`.
+  **Owner visibility is not authentication.** The ref and the reflog are local records, and remote authenticity is not verified (no `ls-remote`). A ref planted before the start shows in the start prompt as an unfamiliar commit, and only the owner can notice it.
+- **Order:** trust, the classifier and the action floor first, then the external review, then the full gate last, then revalidation. After the gate readiness checks again, and treats any change as `NOT CERTIFIABLE`:
+  - the spec and state;
+  - HEAD, the checked-out branch and `origin/<default>`;
+  - replace refs and diff configuration;
+  - the installed plugin against its tag;
+  - the evidence statuses.
+
+  No earlier result is reused.
+- **Fresh clones:**
+  - The external review and the full gate each run in their own fresh local clone of the repository at exactly HEAD. Each clone sits in a temporary root separate from readiness's own files.
+  - A clone's objects are copied, with no hard links and no alternates. It is checked out on its own branch, `ai-engineering-readiness-gate`; its remote, every other branch and every replace ref are absent. Git hooks are off for readiness's own clone and checkout steps; a hook template in global configuration could still run when the gate itself calls Git.
+  - Readiness reads Git with `GIT_NO_REPLACE_OBJECTS` and `GIT_NO_LAZY_FETCH` set, and with `LC_ALL=C`. The gate and the external review run without the two variables, because the guard treats the first as one that changes what Git sees, and with the caller's locale. Both still receive explicit commits.
+  - Inherited Git variables that redirect Git or reshape diffs are removed for readiness and every child it runs (for example `GIT_DIR`, `GIT_CONFIG_*`, `GIT_EXTERNAL_DIFF` and `GIT_ATTR_SOURCE`).
+- **External review:** it receives the recorded base and HEAD. Configuration that reshapes diffs makes the result `NOT CERTIFIABLE`; it is rejected, not trusted. That covers `diff.external`, any `diff.<driver>.textconv` or `.command` and `core.attributesFile`, in any configuration scope, and a non-empty `.git/info/attributes`. A user-level `diff.external` (for example a structural diff tool) therefore also blocks readiness.
+- **Full gate:** readiness runs it itself, with configuration from the base commit. It never runs in, falls back to, or links anything from the development checkout (no `node_modules`, `.env` or other ignored files), so the project's `full` gate must be self-contained, installing its own dependencies. The verdict counts only together with `run-gate.sh`'s exit status. Recorded gate results are never trusted. **Running the project's gate is not a security sandbox:** it runs with the user's privileges and can reach user-level resources and absolute paths unless separately isolated.
+- **Working tree and records:**
+  - `git status` (with fsmonitor off) must succeed and show only the active item's state and log.
+  - No tracked file may be marked assume-unchanged or skip-worktree.
+  - A repository with replace refs is `NOT CERTIFIABLE`.
+  - The spec and state are read once, from a copy. A failed read is `NOT CERTIFIABLE`, never an empty record.
 - **Trusted classifier: a local consistency check, not cryptographic provenance.** All of these must hold, otherwise the result is `NOT CERTIFIABLE`:
   - readiness runs from the plugin install that Claude Code's registry (`$CLAUDE_CONFIG_DIR`, default `~/.claude`) records for the repository, and every registry entry is strictly validated;
   - that install's version equals the project's base-commit pin and is at least 0.3.0. The pin must have the form `{source, repo, ref: "v<version>"}`, as a GitHub marketplace source does;
@@ -136,7 +154,7 @@ Current guarantee: reviewers have no file-editing tools and are instructed not t
   - the whole installed tree is byte- and mode-identical to the tag. The runtime `.in_use/` directory, and everything in it, is ignored.
 
   Signed releases are WORK-004.
-- **Action floor:** tier 2 for any trigger-2 decision, or any guard-log `ask` or `deny` after the increment-start anchor, from any session. Events are ordered by line order, never by timestamp. Only `ask` events for three exact commands are excluded, each matched by the SHA-256 of its exact text: the increment start, the resume of the increment branch, and the merge of a recorded worktree branch. A denial is never excluded.
+- **Action floor:** tier 2 for any trigger-2 decision, or any guard-log `ask` or `deny` after the increment-start anchor, from any session. Events are ordered by line order, never by timestamp. Only `ask` events for three exact commands are excluded, each matched by the SHA-256 of its exact text: the increment start (naming the recorded base commit), the resume of the increment branch, and the merge of a recorded worktree branch. A denial is never excluded. A log rotated or replaced while readiness reads it is `NOT CERTIFIABLE`.
 - **NOT CERTIFIABLE** means trust or evidence is missing, ambiguous, malformed or untrusted. Examples: an untrusted install, no state, uncommitted changes, a moved default-branch ref, a missing or malformed guard log, or no anchor. The effective tier is then 2 and READY is NO. It is reported separately from a valid tier-2 classification.
 - **Exit codes:**
   - 0: READY: YES.
@@ -152,8 +170,9 @@ Current guarantee: reviewers have no file-editing tools and are instructed not t
   - Evidence and the guard log are workflow records written by the coordinator and the guard. Neither is complete or tamper-proof.
   - A guard-log write that the guard's deadline kills is lost silently.
   - Standalone `/review` without work-item state is always NOT CERTIFIABLE.
-  - Remote authenticity of the default-branch ref is not verified.
+  - Remote authenticity of the default-branch ref is not verified, and owner visibility of the base commit is not authentication.
   - A project gate that assumes installed dependencies fails in the fresh clone, which is READY: NO.
+  - Practical limits for consuming projects are listed in [consuming-project.md](consuming-project.md#readiness-and-the-version-pin).
 
 ## Work items: state and authority
 

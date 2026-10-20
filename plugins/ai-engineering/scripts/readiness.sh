@@ -14,20 +14,28 @@
 #
 # Effective tier = max(state tier, trusted classifier floor, action floor). Nothing lowers it.
 #
-# Base: the increment's recorded baseSha (workstate.sh increment-set --base-sha, recorded once
-# when the increment begins). It must equal the local refs/remotes/origin/<default> (origin/HEAD
-# names the default branch), be an ancestor of HEAD, and be the commit the increment branch was
-# created from (the oldest entry of the branch's reflog). A default-branch ref that moved after
-# the increment began, to HEAD or to a newer commit, is NOT CERTIFIABLE: a newer ref is never
-# accepted automatically, and re-anchoring an increment is not available. The ref and the
-# reflog are local records; remote authenticity is not verified (no ls-remote).
+# Base: the increment's recorded baseSha. workstate.sh records it only when the increment moves
+# from planned to active, as the full commit id refs/remotes/origin/<default> names at that
+# moment, and never changes it. The owner-approved start command names that exact commit
+# ("git switch -c <branch> <base>"), and readiness requires the guard-log anchor to be that exact
+# command. The base must still equal the local origin/<default> (origin/HEAD names the default
+# branch), be an ancestor of HEAD, and be the commit the increment branch was created from (the
+# oldest entry of the branch's reflog). A default-branch ref that moved after the increment
+# began, to HEAD or to a newer commit, is NOT CERTIFIABLE: a newer ref is never accepted
+# automatically, and re-anchoring an increment is not available. The ref and the reflog are
+# local records. Owner visibility of the base is not authentication: remote authenticity is not
+# verified (no ls-remote), so a ref planted before the start shows as an unfamiliar commit in
+# the start prompt, and only the owner can notice it.
 #
 # Work-item records: the spec and state are copied once at the start and workstate.sh reads
 # only that snapshot (show, status, readiness). Any read failure is NOT CERTIFIABLE, never an
 # empty record. The live spec and state are hashed again at the end; a change is NOT CERTIFIABLE.
 #
-# Working tree: git status must succeed and show nothing but the active item's state and log,
-# and no tracked file may be marked assume-unchanged or skip-worktree.
+# Working tree: git status (with fsmonitor off) must succeed and show nothing but the active
+# item's state and log, and no tracked file may be marked assume-unchanged or skip-worktree.
+# Replace refs, diff-reshaping configuration (diff.external, diff.<driver>.textconv or .command,
+# core.attributesFile, in any scope) and a non-empty .git/info/attributes are NOT CERTIFIABLE.
+# Inherited Git variables that redirect or reshape Git are unset; readiness parses with LC_ALL=C.
 #
 # Trust (local consistency, not cryptographic provenance; signed releases are WORK-004):
 #   1. Claude Code's plugin registry ($CLAUDE_CONFIG_DIR, default ~/.claude, then
@@ -49,7 +57,7 @@
 # any ask or deny after the increment-start anchor, from any session, apart from three exact
 # exclusions. Events are ordered by their line order in guard-log.jsonl.1 then guard-log.jsonl,
 # never by their one-second timestamps.
-#   anchor and exclusion 1: "git switch -c <increment branch> origin/<default>" (ask)
+#   anchor and exclusion 1: "git switch -c <increment branch> <recorded base commit>" (ask)
 #   exclusion 2:            "git switch <increment branch>" (ask; resuming the increment)
 #   exclusion 3:            "git merge --no-edit <recorded worktree branch>" (ask; only for
 #                           branches recorded with workstate.sh increment-worktree)
@@ -57,31 +65,47 @@
 # never excluded. The anchor is the first such ask no later than the increment's activeAt.
 # Malformed lines before the anchor are ignored; after it they make the result NOT CERTIFIABLE.
 # A missing, unreadable or linked log, a missing anchor, a log near the size at which the guard
-# drops lines, or hashes that cannot be computed is NOT CERTIFIABLE. Residual: a guard-log
+# drops lines, a log rotated or replaced while it is read, or hashes that cannot be computed is
+# NOT CERTIFIABLE. Residual: a guard-log
 # write the guard's deadline kills is lost silently, a command run in another repository or
 # outside Git is logged elsewhere or not at all, and a local process can edit lines; the log is
 # a workflow record, not complete or tamper-proof.
 #
-# Full gate: run-gate.sh full with its configuration from the base commit, in a fresh local
-# clone of this repository checked out at exactly HEAD on the clone's own branch
-# ai-engineering-readiness-gate (objects copied, not linked; origin and every other branch
-# removed; Git hooks off). The gate and the external review run without the
-# GIT_NO_REPLACE_OBJECTS and GIT_NO_LAZY_FETCH protections readiness uses for its own reads; a
-# repository with replace refs is NOT CERTIFIABLE. It never runs in, falls back to, or links anything from the
-# development checkout, so the project's gate must be self-contained (installing its own
-# dependencies). The verdict counts only with run-gate.sh's exit status. Running the project's
-# gate is not a security sandbox: the gate runs with the user's privileges and can reach
-# user-level resources and absolute paths unless separately isolated.
+# Order: trust, classifier, action floor, evidence and records, then the external review, then
+# the full gate last, then revalidation of everything the gate could change.
 #
-# External review: external-review.sh (configuration from the base commit), in this checkout.
-# PASSED is required at tiers 1 and 2. At tier 0 NOT CONFIGURED is allowed, but a configured
-# reviewer's BLOCKING FINDINGS or ERROR is READY: NO at every tier.
+# Fresh clones: the external review and the gate each run in their own fresh local clone of this
+# repository at exactly HEAD, in temporary roots separate from readiness's own files, checked out
+# on the clone's own branch ai-engineering-readiness-gate (objects copied, not linked; the
+# remote, every other branch and every replace ref absent; Git hooks off for readiness's clone
+# and checkout steps). Both run without the GIT_NO_REPLACE_OBJECTS and GIT_NO_LAZY_FETCH
+# protections readiness uses for its own reads (the guard would refuse every gate command with
+# them set), and with the caller's locale.
+#
+# External review: external-review.sh with configuration from the base commit and the explicit
+# base and HEAD commits. PASSED is required at tiers 1 and 2. At tier 0 NOT CONFIGURED is
+# allowed, but a configured reviewer's BLOCKING FINDINGS or ERROR is READY: NO at every tier.
+#
+# Full gate: run-gate.sh full with its configuration from the base commit. It never runs in,
+# falls back to, or links anything from the development checkout, so the project's gate must be
+# self-contained (installing its own dependencies). The verdict counts only with run-gate.sh's
+# exit status. Running the project's gate is not a security sandbox: the gate runs with the
+# user's privileges and can reach user-level resources and absolute paths unless separately
+# isolated. Afterwards readiness checks again the spec and state, HEAD, the checked-out branch,
+# origin/<default>, replace refs, diff configuration, the installed plugin against its tag and
+# the evidence statuses; any change is NOT CERTIFIABLE.
 #
 # Tier-dependent depth (WORK-003 Scope item 11): QA evidence always; security review and a
 # residual-risk list at tier 2. Review and residual-risk evidence count only when they pass and
 # name a commit that covers HEAD (only the active item's state and log changed since); review
 # evidence must also name its reviewer. Evidence is recorded by the coordinator, not proven.
 set -u
+
+# Readiness parses with a fixed locale (pattern ranges such as [a-z] follow collation in some
+# locales). The gate and the external review get the caller's locale back (child_environment).
+original_lc_all_set="${LC_ALL+set}"
+original_lc_all="${LC_ALL-}"
+export LC_ALL=C
 
 self_root="$(cd "$(dirname "$0")/.." && pwd -P)"
 scripts="$self_root/scripts"
@@ -124,19 +148,34 @@ not_ready_reasons=()
 not_certifiable() { not_certifiable_reasons+=("$1"); }
 not_ready() { not_ready_reasons+=("$1"); }
 
+# Three separate temporary roots: readiness's own working files, the gate's clone and the
+# external review's clone. The gate's working directory is never inside readiness's files.
 temporary_directory="$(mktemp -d "${TMPDIR:-/tmp}/readiness.XXXXXX")" || {
   echo "readiness.sh: cannot create a temporary directory" >&2
   exit 2
 }
+gate_root=""
+review_root=""
 # The gate may leave read-only files in its checkout; make them removable first. Neither chmod
 # -R nor rm -rf follows a symbolic link the gate planted, so nothing outside is touched.
-remove_tree() { # directory inside the temporary directory
-  case "$1" in "$temporary_directory" | "$temporary_directory"/*) ;; *) return 1 ;; esac
+remove_tree() { # a directory inside one of readiness's temporary roots
+  local root inside=no
+  for root in "$temporary_directory" "$gate_root" "$review_root"; do
+    [ -n "$root" ] || continue
+    case "$1" in "$root" | "$root"/*) inside=yes ;; esac
+  done
+  [ "$inside" = yes ] || return 1
   [ -e "$1" ] || return 0
   chmod -R u+rwx "$1" 2>/dev/null
   rm -rf "$1"
 }
-trap 'remove_tree "$temporary_directory"' EXIT
+# shellcheck disable=SC2329 # invoked by the EXIT trap below
+remove_temporary_roots() {
+  remove_tree "$temporary_directory"
+  [ -z "$gate_root" ] || remove_tree "$gate_root"
+  [ -z "$review_root" ] || remove_tree "$review_root"
+}
+trap remove_temporary_roots EXIT
 
 sha256_text() { # text: prints the SHA-256 of the exact text (no trailing newline), or nothing
   local digest
@@ -197,15 +236,27 @@ real_directory() { [ -d "$1" ] && (cd "$1" && pwd -P); }
 
 command -v jq >/dev/null 2>&1 || { echo "readiness.sh: jq is required" >&2; exit 2; }
 command -v git >/dev/null 2>&1 || { echo "readiness.sh: git is required" >&2; exit 2; }
-unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_REPLACE_REF_BASE GIT_NAMESPACE
+# Inherited variables that redirect Git to another repository, index, object store, namespace or
+# configuration, or that reshape diffs (external diff, textconv through injected configuration,
+# attribute sources), are removed for readiness and every child it runs.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR \
+  GIT_REPLACE_REF_BASE GIT_NAMESPACE GIT_CEILING_DIRECTORIES GIT_DISCOVERY_ACROSS_FILESYSTEM \
+  GIT_EXTERNAL_DIFF GIT_DIFF_OPTS GIT_PAGER GIT_ATTR_SOURCE \
+  GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_NOSYSTEM
 # Readiness's own Git reads never use replace objects or fetch lazily. The gate and the external
-# review run without these two variables (child_without_git_protections): the guard's
-# classification treats GIT_NO_REPLACE_OBJECTS as a variable that changes what Git sees and
-# would refuse every gate. They still read the same repository and commits: both get explicit
-# paths and commit ids, GIT_DIR and friends are unset above, the gate's clone holds no replace
-# refs, and a repository with replace refs is NOT CERTIFIABLE (below).
+# review run without these two variables (child_environment): the guard's classification treats
+# GIT_NO_REPLACE_OBJECTS as a variable that changes what Git sees and would refuse every gate.
+# They still read the intended repository and commits: each runs in its own fresh clone with
+# explicit commit ids, the clones hold no replace refs, and a repository with replace refs is
+# NOT CERTIFIABLE (below).
 export GIT_NO_REPLACE_OBJECTS=1 GIT_NO_LAZY_FETCH=1
-child_without_git_protections() { env -u GIT_NO_REPLACE_OBJECTS -u GIT_NO_LAZY_FETCH "$@"; }
+child_environment() { # command...: run without readiness's Git protections, with the caller's locale
+  if [ -n "$original_lc_all_set" ]; then
+    env -u GIT_NO_REPLACE_OBJECTS -u GIT_NO_LAZY_FETCH LC_ALL="$original_lc_all" "$@"
+  else
+    env -u GIT_NO_REPLACE_OBJECTS -u GIT_NO_LAZY_FETCH -u LC_ALL "$@"
+  fi
+}
 
 # ---------------------------------------------------------------- repository, head and default branch
 repository_root="$(git -C "$start_directory" rev-parse --show-toplevel 2>/dev/null)" || {
@@ -240,7 +291,8 @@ current_branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null)" || {
 # Uncommitted changes, apart from the active item's own state and log, make HEAD not the
 # certified content. A status that cannot be read, or a tracked file whose changes Git is told
 # to hide, means the working tree cannot be shown to match HEAD.
-if git status --porcelain=v1 -z --untracked-files=all >"$temporary_directory/status" 2>/dev/null; then
+# An fsmonitor hook could report a changed file as unchanged, so it is switched off here.
+if git -c core.fsmonitor=false -c core.untrackedCache=false status --porcelain=v1 -z --untracked-files=all --ignore-submodules=none >"$temporary_directory/status" 2>/dev/null; then
   while IFS= read -r -d '' status_entry; do
     status_code="${status_entry:0:2}"
     changed_paths=("${status_entry:3}")
@@ -261,7 +313,7 @@ if git status --porcelain=v1 -z --untracked-files=all >"$temporary_directory/sta
 else
   not_certifiable "git status failed, so the working tree cannot be checked against HEAD"
 fi
-if git ls-files -v -z >"$temporary_directory/index-flags" 2>/dev/null; then
+if git -c core.fsmonitor=false ls-files -v -z >"$temporary_directory/index-flags" 2>/dev/null; then
   while IFS= read -r -d '' index_entry; do
     case "${index_entry:0:1}" in
       [[:lower:]] | S) # lower case: assume-unchanged ([a-z] would also match capitals in some locales)
@@ -273,12 +325,36 @@ if git ls-files -v -z >"$temporary_directory/index-flags" 2>/dev/null; then
 else
   not_certifiable "git ls-files failed, so hidden working-tree changes cannot be ruled out"
 fi
-# The external review runs here without GIT_NO_REPLACE_OBJECTS, so a replace ref could show it
-# different objects than readiness sees.
-if replace_refs="$(git for-each-ref --count=1 --format='%(refname)' refs/replace/ 2>/dev/null)"; then
-  [ -z "$replace_refs" ] || not_certifiable "the repository has replace refs ($replace_refs), which could substitute the commits under review"
+# Replace refs could substitute commits for anything that reads without GIT_NO_REPLACE_OBJECTS.
+check_replace_refs() { # [label suffix]
+  local replace_refs
+  if replace_refs="$(git for-each-ref --count=1 --format='%(refname)' refs/replace/ 2>/dev/null)"; then
+    [ -z "$replace_refs" ] || not_certifiable "the repository has replace refs ($replace_refs), which could substitute the commits under review${1:-}"
+  else
+    not_certifiable "the repository's replace refs cannot be listed${1:-}"
+  fi
+}
+check_replace_refs
+# Configuration that reshapes diff output (an external diff program, textconv or diff command
+# drivers, an extra attributes file) is never trusted: it could show the external reviewer, or
+# readiness, something other than the change. It is rejected, not worked around.
+unsafe_git_configuration() { # git -C directory: prints the first unsafe key, if any; fails when unreadable
+  local listing status
+  listing="$(git -C "$1" config --get-regexp '^(diff\.external|diff\..+\.(textconv|command)|core\.attributesfile)$' 2>/dev/null)"
+  status=$?
+  case "$status" in
+    0) printf '%s\n' "$listing" | head -n 1 | cut -d' ' -f1 ;;
+    1) ;;
+    *) return 1 ;;
+  esac
+}
+if unsafe_key="$(unsafe_git_configuration "$repository_root")"; then
+  [ -z "$unsafe_key" ] || not_certifiable "unsafe Git configuration for review ($unsafe_key)"
 else
-  not_certifiable "the repository's replace refs cannot be listed"
+  not_certifiable "the repository's Git configuration cannot be read"
+fi
+if [ -s "$(git rev-parse --git-common-dir 2>/dev/null)/info/attributes" ]; then
+  not_certifiable "the repository has a non-empty .git/info/attributes, which could reshape diffs"
 fi
 
 # ---------------------------------------------------------------- work-item state (one snapshot)
@@ -367,11 +443,13 @@ fi
 # The recorded base, never whatever the local default-branch ref says now: a ref moved to HEAD
 # would empty the diff and let the branch supply its own gate, pin and reviewer configuration.
 default_ref_commit=""
+recorded_base=""
 check_base() {
-  local recorded_base creation
+  local creation
   [ "$increment_json" != null ] || return 0
   recorded_base="$(jq -r '.baseSha // ""' <<<"$increment_json" | tr 'A-F' 'a-f')"
   if ! [[ $recorded_base =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]; then
+    recorded_base=""
     not_certifiable "increment $increment_id has no recorded base commit (record origin/<default> with increment-set --base-sha when the increment begins)"
     return
   fi
@@ -526,16 +604,27 @@ action_floor=0
 action_reasons=()
 action_certifiable=yes
 if [ -n "$state_json" ]; then
-  while IFS= read -r decision_id; do
-    [ -n "$decision_id" ] && action_reasons+=("trigger-2 decision $decision_id")
-  done < <(jq -r '.decisions[] | select(.trigger == 2) | .id' <<<"$state_json")
+  # Counted, not looked up by id: a decision with an empty or odd id still raises the floor.
+  if [ "$(jq '[.decisions[] | select(.trigger == 2)] | length' <<<"$state_json")" != 0 ]; then
+    action_reasons+=("trigger-2 decision(s) $(jq -r '[.decisions[] | select(.trigger == 2) | (.id // "") | if . == "" then "(no id)" else . end] | join(", ")' <<<"$state_json")")
+  fi
 fi
+
+file_identity() { # path: the file's inode number, or "absent"
+  if [ -e "$1" ] || [ -L "$1" ]; then
+    # shellcheck disable=SC2012 # only the inode number of one fixed path is read (portable, unlike stat)
+    ls -di "$1" 2>/dev/null | awk '{print $1}'
+  else
+    echo absent
+  fi
+}
 
 evaluate_guard_log() {
   local common_directory log_directory current previous current_size previous_size start_hash resume_hash merge_hash merge_hashes="[]" branch result
-  if [ -z "$increment_branch" ] || [ -z "$default_branch" ] || [ -z "$active_at" ]; then
+  local current_identity previous_identity
+  if [ -z "$increment_branch" ] || [ -z "$recorded_base" ] || [ -z "$active_at" ]; then
     action_certifiable=no
-    not_certifiable "guard log: no increment branch, default branch or activeAt to anchor on"
+    not_certifiable "guard log: no increment branch, recorded base or activeAt to anchor on"
     return
   fi
   common_directory="$(git rev-parse --git-common-dir 2>/dev/null)" || common_directory=""
@@ -567,7 +656,8 @@ evaluate_guard_log() {
     return
   fi
   # An empty hash would match every logged ask, so a hash that cannot be computed is fatal.
-  start_hash="$(sha256_text "git switch -c $increment_branch origin/$default_branch")"
+  # The start command names the full base commit, so the owner who approves it sees that commit.
+  start_hash="$(sha256_text "git switch -c $increment_branch $recorded_base")"
   resume_hash="$(sha256_text "git switch $increment_branch")"
   if [ -z "$start_hash" ] || [ -z "$resume_hash" ]; then
     action_certifiable=no
@@ -583,10 +673,23 @@ evaluate_guard_log() {
     fi
     merge_hashes="$(jq -c --arg h "$merge_hash" '. + [$h]' <<<"$merge_hashes")"
   done
+  # Copy the newer file first, then the rotated one, and require both to be the same files
+  # afterwards: a rotation between the two reads would otherwise drop lines from view.
+  current_identity="$(file_identity "$current")"
+  previous_identity="$(file_identity "$previous")"
+  cat "$current" >"$temporary_directory/current.log" 2>/dev/null || current_identity="unreadable"
   : >"$temporary_directory/previous.log"
-  regular_file "$previous" && cat "$previous" >"$temporary_directory/previous.log"
+  if regular_file "$previous"; then
+    cat "$previous" >"$temporary_directory/previous.log" 2>/dev/null || previous_identity="unreadable"
+  fi
+  if [ "$current_identity" = unreadable ] || [ "$previous_identity" = unreadable ] \
+    || [ "$(file_identity "$current")" != "$current_identity" ] || [ "$(file_identity "$previous")" != "$previous_identity" ]; then
+    action_certifiable=no
+    not_certifiable "guard log: the log was rotated or replaced while it was being read"
+    return
+  fi
   result="$(jq -n -c \
-    --rawfile previous "$temporary_directory/previous.log" --rawfile current "$current" \
+    --rawfile previous "$temporary_directory/previous.log" --rawfile current "$temporary_directory/current.log" \
     --arg start "$start_hash" --arg resume "$resume_hash" --argjson merges "$merge_hashes" --arg active "$active_at" '
     def lines_of($text): $text | split("\n") | if length > 0 and .[-1] == "" then .[:-1] else . end;
     def valid_event: type == "object"
@@ -618,7 +721,7 @@ evaluate_guard_log() {
       ;;
     no-anchor)
       action_certifiable=no
-      not_certifiable "guard log: no increment-start anchor (git switch -c $increment_branch origin/$default_branch) at or before activeAt"
+      not_certifiable "guard log: no increment-start anchor (git switch -c $increment_branch $recorded_base) at or before activeAt"
       ;;
     malformed-after-anchor)
       action_certifiable=no
@@ -650,84 +753,6 @@ effective_tier="$state_tier"
 [ "$action_floor" -gt "$effective_tier" ] && effective_tier="$action_floor"
 [ "${#not_certifiable_reasons[@]}" -eq 0 ] || effective_tier=2
 
-# ---------------------------------------------------------------- full gate (fresh clone at HEAD; never trusted from records)
-# The clone is checked out on a branch of its own (gate_branch), never detached and never named
-# like the increment branch: the guard's current-branch lookup succeeds there, and nothing in
-# the clone carries the increment's identity. Its directory name is neutral, but nothing depends
-# on that: the guard classifies the gate command the same way wherever the clone lives.
-gate_checkout="$temporary_directory/gate-tree"
-prepare_gate_checkout() {
-  local local_ref
-  git -c core.hooksPath=/dev/null clone --quiet --no-checkout --no-hardlinks -- "$repository_root" "$gate_checkout" >/dev/null 2>&1 || return 1
-  # Without a remote, nothing in the gate can push or fetch back into the development repository.
-  git -C "$gate_checkout" remote remove origin >/dev/null 2>&1 || return 1
-  git -C "$gate_checkout" -c core.hooksPath=/dev/null checkout --quiet -B "$gate_branch" "$head_sha" >/dev/null 2>&1 || return 1
-  # Every other local branch goes, including the copy of the increment branch.
-  git -C "$gate_checkout" for-each-ref --format='%(refname)' refs/heads/ >"$temporary_directory/gate-branches" 2>/dev/null || return 1
-  while IFS= read -r local_ref; do
-    [ "$local_ref" = "refs/heads/$gate_branch" ] || git -C "$gate_checkout" update-ref -d "$local_ref" >/dev/null 2>&1 || return 1
-  done <"$temporary_directory/gate-branches"
-  [ "$(git -C "$gate_checkout" symbolic-ref --quiet HEAD 2>/dev/null)" = "refs/heads/$gate_branch" ] || return 1
-  [ "$(git -C "$gate_checkout" rev-parse --verify HEAD 2>/dev/null)" = "$head_sha" ] || return 1
-  [ "$(git -C "$gate_checkout" for-each-ref --format='%(refname)' refs/heads/ refs/remotes/ refs/replace/ 2>/dev/null)" = "refs/heads/$gate_branch" ] || return 1
-  [ -z "$(git -C "$gate_checkout" remote 2>/dev/null)" ] || return 1
-  git -C "$gate_checkout" status --porcelain=v1 --untracked-files=all >"$temporary_directory/gate-status" 2>/dev/null || return 1
-  [ ! -s "$temporary_directory/gate-status" ]
-}
-gate_line="GATE full: NOT RUN (no base commit)"
-gate_exit=""
-if [ -n "$base_sha" ] && [ -n "$head_sha" ]; then
-  if prepare_gate_checkout; then
-    child_without_git_protections "$scripts/run-gate.sh" full "$gate_checkout" "$base_sha" >"$temporary_directory/gate.out" 2>&1
-    gate_exit=$?
-    gate_last_line="$(tail -n 1 "$temporary_directory/gate.out")"
-    case "$gate_exit:$gate_last_line" in
-      "0:GATE full: PASSED"*) gate_line="$gate_last_line" ;;
-      "0:"*) gate_line="GATE full: NO VERDICT (run-gate.sh exit 0 without a PASSED verdict)" ;;
-      *":GATE full: PASSED"*) gate_line="GATE full: NO VERDICT (run-gate.sh exit $gate_exit after a PASSED line)" ;;
-      *":GATE full: "*) gate_line="$gate_last_line" ;;
-      *) gate_line="GATE full: NO VERDICT (run-gate.sh exit $gate_exit)" ;;
-    esac
-  else
-    gate_line="GATE full: NOT RUN (a fresh checkout of HEAD could not be created)"
-    not_certifiable "the full gate could not run: a fresh checkout of HEAD could not be created"
-  fi
-  remove_tree "$gate_checkout"
-fi
-case "$gate_line" in
-  "GATE full: PASSED"*"MODIFIES"*) not_ready "the change modifies the full gate (owner review needed)" ;;
-  "GATE full: PASSED"*) ;;
-  *) not_ready "the full gate did not pass" ;;
-esac
-
-# ---------------------------------------------------------------- external review
-external_line="EXTERNAL REVIEW: NOT RUN (no base commit)"
-external_result=error
-if [ -n "$base_sha" ] && [ -n "$head_sha" ]; then
-  child_without_git_protections "$scripts/external-review.sh" "$base_sha" "$head_sha" "$spec_path" >"$temporary_directory/external.out" 2>&1
-  external_exit=$?
-  external_first_line="$(head -n 1 "$temporary_directory/external.out")"
-  external_last_line="$(tail -n 1 "$temporary_directory/external.out")"
-  # A verdict counts only when the exit status and the verdict line agree.
-  case "$external_exit:$external_last_line:$external_first_line" in
-    "0:EXTERNAL REVIEW: PASSED:"*) external_result=passed external_line="$external_last_line" ;;
-    "1:EXTERNAL REVIEW: BLOCKING FINDINGS:"*) external_result=blocking external_line="$external_last_line" ;;
-    "3:"*":EXTERNAL REVIEW: NOT CONFIGURED") external_result=not-configured external_line="$external_first_line" ;;
-    "2:EXTERNAL REVIEW: ERROR"*) external_line="$external_last_line" ;;
-    *) external_line="EXTERNAL REVIEW: ERROR (no consistent verdict; external-review.sh exit $external_exit)" ;;
-  esac
-fi
-if [ "$effective_tier" -ge 1 ]; then
-  external_requirement="required at tier $effective_tier"
-  [ "$external_result" = passed ] || not_ready "external review is required at tier $effective_tier and did not pass (${external_line#EXTERNAL REVIEW: })"
-else
-  external_requirement="optional at tier 0"
-  case "$external_result" in
-    passed | not-configured) ;;
-    *) not_ready "the configured external review did not pass (${external_line#EXTERNAL REVIEW: })" ;;
-  esac
-fi
-
 # ---------------------------------------------------------------- recorded evidence and records
 covers_head() { # sha: a commit on HEAD's history after which only the active item's bookkeeping changed
   local sha="$1" changed_path
@@ -735,7 +760,7 @@ covers_head() { # sha: a commit on HEAD's history after which only the active it
   sha="$(git rev-parse --verify --quiet "$sha^{commit}" 2>/dev/null)" || return 1
   git merge-base --is-ancestor "$sha" HEAD 2>/dev/null || return 1
   # No rename detection: a deletion hidden as a rename into a bookkeeping path still counts.
-  git diff --no-renames --no-ext-diff --name-only -z "$sha" HEAD -- >"$temporary_directory/covered" 2>/dev/null || return 1
+  git diff --no-renames --no-ext-diff --no-textconv --name-only -z "$sha" HEAD -- >"$temporary_directory/covered" 2>/dev/null || return 1
   while IFS= read -r -d '' changed_path; do
     [ "$changed_path" = "${bookkeeping_paths[0]}" ] || [ "$changed_path" = "${bookkeeping_paths[1]}" ] || return 1
   done <"$temporary_directory/covered"
@@ -752,6 +777,9 @@ evidence_status() { # filter-name: MET | MISSING | STALE | FAILED for the latest
   covers_head "$sha" || { echo STALE; return; }
   echo MET
 }
+evidence_summary() { # one line of every evidence status, for the comparison after the gate
+  printf 'qa=%s security=%s residual=%s' "$(evidence_status qa)" "$(evidence_status security)" "$(evidence_status residual-risks)"
+}
 qa_status="$(evidence_status qa)"
 [ "$qa_status" = MET ] || not_ready "QA evidence covering HEAD is $qa_status"
 security_status="NOT REQUIRED at tier $effective_tier"
@@ -762,6 +790,7 @@ if [ "$effective_tier" -eq 2 ]; then
   residual_status="$(evidence_status residual-risks)"
   [ "$residual_status" = MET ] || not_ready "the residual-risk list covering HEAD is $residual_status"
 fi
+evidence_before="$(evidence_summary)"
 
 record_list() { # jq filter over the records snapshot: comma-separated ids, or "none"
   if [ -n "$records_json" ]; then
@@ -778,7 +807,113 @@ if [ -n "$records_json" ]; then
   [ "$open_blocking" = 0 ] || not_ready "$open_blocking open blocking decision(s)"
 fi
 
-# ---------------------------------------------------------------- nothing moved while readiness ran
+# ---------------------------------------------------------------- fresh clones at HEAD
+# The external review and the gate each run in their own fresh local clone of this repository at
+# exactly HEAD, in temporary roots separate from readiness's own files. A clone is checked out on
+# a branch of its own (gate_branch), never detached and never named like the increment branch:
+# the guard's current-branch lookup succeeds there, and nothing in the clone carries the
+# increment's identity. Directory names are neutral, but nothing depends on them: the guard
+# classifies a command the same way wherever the clone lives. Objects are copied (no hard links,
+# no alternates); the clone's remote, every other branch and every replace ref are absent; Git
+# hooks are off for readiness's own clone and checkout steps.
+prepare_clone() { # directory
+  local clone="$1" local_ref listing="$temporary_directory/clone-refs"
+  git -c core.hooksPath=/dev/null clone --quiet --no-checkout --no-hardlinks --origin ai-engineering-source -- "$repository_root" "$clone" >/dev/null 2>&1 || return 1
+  # Without a remote, nothing in the clone can push or fetch back into the development repository.
+  git -C "$clone" remote remove ai-engineering-source >/dev/null 2>&1 || return 1
+  [ ! -s "$clone/.git/objects/info/alternates" ] || return 1
+  git -C "$clone" -c core.hooksPath=/dev/null checkout --quiet -B "$gate_branch" "$head_sha" >/dev/null 2>&1 || return 1
+  git -C "$clone" for-each-ref --format='%(refname)' refs/heads/ >"$listing" 2>/dev/null || return 1
+  while IFS= read -r local_ref; do
+    [ "$local_ref" = "refs/heads/$gate_branch" ] || git -C "$clone" update-ref -d "$local_ref" >/dev/null 2>&1 || return 1
+  done <"$listing"
+  [ "$(git -C "$clone" symbolic-ref --quiet HEAD 2>/dev/null)" = "refs/heads/$gate_branch" ] || return 1
+  [ "$(git -C "$clone" rev-parse --verify HEAD 2>/dev/null)" = "$head_sha" ] || return 1
+  git -C "$clone" cat-file -e "$base_sha^{commit}" 2>/dev/null || return 1
+  [ "$(git -C "$clone" for-each-ref --format='%(refname)' refs/heads/ refs/remotes/ refs/replace/ 2>/dev/null)" = "refs/heads/$gate_branch" ] || return 1
+  [ -z "$(git -C "$clone" remote 2>/dev/null)" ] || return 1
+  git -C "$clone" -c core.fsmonitor=false status --porcelain=v1 --untracked-files=all >"$temporary_directory/clone-status" 2>/dev/null || return 1
+  [ ! -s "$temporary_directory/clone-status" ]
+}
+new_clone_root() { # prints a new temporary root, separate from readiness's own files
+  mktemp -d "${TMPDIR:-/tmp}/readiness-clone.XXXXXX" 2>/dev/null
+}
+
+# ---------------------------------------------------------------- external review (before the gate)
+# The reviewer runs in its own clone with readiness's controlled Git environment (the overrides
+# unset above). Configuration that would reshape its diff is rejected, not trusted.
+external_line="EXTERNAL REVIEW: NOT RUN (no base commit)"
+external_result=error
+if [ -n "$base_sha" ] && [ -n "$head_sha" ]; then
+  review_root="$(new_clone_root)" || review_root=""
+  review_clone="$review_root/review-tree"
+  if [ -n "$review_root" ] && prepare_clone "$review_clone"; then
+    if review_unsafe_key="$(unsafe_git_configuration "$review_clone")" && [ -z "$review_unsafe_key" ]; then
+      external_output="$(cd "$review_clone" && child_environment "$scripts/external-review.sh" "$base_sha" "$head_sha" "$spec_path" 2>&1)"
+      external_exit=$?
+      external_first_line="$(printf '%s\n' "$external_output" | head -n 1)"
+      external_last_line="$(printf '%s\n' "$external_output" | tail -n 1)"
+      # A verdict counts only when the exit status and the verdict line agree.
+      case "$external_exit:$external_last_line:$external_first_line" in
+        "0:EXTERNAL REVIEW: PASSED:"*) external_result=passed external_line="$external_last_line" ;;
+        "1:EXTERNAL REVIEW: BLOCKING FINDINGS:"*) external_result=blocking external_line="$external_last_line" ;;
+        "3:"*":EXTERNAL REVIEW: NOT CONFIGURED") external_result=not-configured external_line="$external_first_line" ;;
+        "2:EXTERNAL REVIEW: ERROR"*) external_line="$external_last_line" ;;
+        *) external_line="EXTERNAL REVIEW: ERROR (no consistent verdict; external-review.sh exit $external_exit)" ;;
+      esac
+    else
+      external_line="EXTERNAL REVIEW: NOT RUN (unsafe or unreadable Git diff configuration${review_unsafe_key:+: $review_unsafe_key})"
+      not_certifiable "the external review could not run safely: unsafe or unreadable Git diff configuration${review_unsafe_key:+ ($review_unsafe_key)}"
+    fi
+  else
+    external_line="EXTERNAL REVIEW: NOT RUN (a fresh clone of HEAD could not be created)"
+    not_certifiable "the external review could not run: a fresh clone of HEAD could not be created"
+  fi
+  [ -z "$review_root" ] || remove_tree "$review_root"
+fi
+if [ "$effective_tier" -ge 1 ]; then
+  external_requirement="required at tier $effective_tier"
+  [ "$external_result" = passed ] || not_ready "external review is required at tier $effective_tier and did not pass (${external_line#EXTERNAL REVIEW: })"
+else
+  external_requirement="optional at tier 0"
+  case "$external_result" in
+    passed | not-configured) ;;
+    *) not_ready "the configured external review did not pass (${external_line#EXTERNAL REVIEW: })" ;;
+  esac
+fi
+
+# ---------------------------------------------------------------- full gate (last; never trusted from records)
+gate_line="GATE full: NOT RUN (no base commit)"
+gate_output=""
+if [ -n "$base_sha" ] && [ -n "$head_sha" ]; then
+  gate_root="$(new_clone_root)" || gate_root=""
+  gate_clone="$gate_root/gate-tree"
+  if [ -n "$gate_root" ] && prepare_clone "$gate_clone"; then
+    gate_output="$(child_environment "$scripts/run-gate.sh" full "$gate_clone" "$base_sha" 2>&1)"
+    gate_exit=$?
+    gate_last_line="$(printf '%s\n' "$gate_output" | tail -n 1)"
+    case "$gate_exit:$gate_last_line" in
+      "0:GATE full: PASSED"*) gate_line="$gate_last_line" ;;
+      "0:"*) gate_line="GATE full: NO VERDICT (run-gate.sh exit 0 without a PASSED verdict)" ;;
+      *":GATE full: PASSED"*) gate_line="GATE full: NO VERDICT (run-gate.sh exit $gate_exit after a PASSED line)" ;;
+      *":GATE full: "*) gate_line="$gate_last_line" ;;
+      *) gate_line="GATE full: NO VERDICT (run-gate.sh exit $gate_exit)" ;;
+    esac
+  else
+    gate_line="GATE full: NOT RUN (a fresh clone of HEAD could not be created)"
+    not_certifiable "the full gate could not run: a fresh clone of HEAD could not be created"
+  fi
+  [ -z "$gate_root" ] || remove_tree "$gate_root"
+fi
+case "$gate_line" in
+  "GATE full: PASSED"*"MODIFIES"*) not_ready "the change modifies the full gate (owner review needed)" ;;
+  "GATE full: PASSED"*) ;;
+  *) not_ready "the full gate did not pass" ;;
+esac
+
+# ---------------------------------------------------------------- revalidation after the gate
+# The gate runs the change's own code with the user's privileges, so everything readiness relied
+# on is checked again. A changed or unreadable input is NOT CERTIFIABLE; no earlier result is reused.
 if [ -n "$state_fingerprint" ]; then
   { regular_file "$live_state" && regular_file "$live_spec" \
       && [ "$(sha256_file "$live_state")" = "$state_fingerprint" ] && [ "$(sha256_file "$live_spec")" = "$spec_fingerprint" ]; } \
@@ -788,6 +923,21 @@ fi
 if [ -n "$base_sha" ] && [ "$(git rev-parse --verify --quiet "refs/remotes/origin/$default_branch^{commit}" 2>/dev/null)" != "$base_sha" ]; then
   not_certifiable "origin/$default_branch moved while readiness ran"
 fi
+if [ -n "$increment_branch" ] && [ -n "$current_branch" ] && [ "$(git symbolic-ref --quiet --short HEAD 2>/dev/null)" != "$current_branch" ]; then
+  not_certifiable "the checked-out branch changed while readiness ran"
+fi
+check_replace_refs " (after the gate)"
+if after_unsafe_key="$(unsafe_git_configuration "$repository_root")"; then
+  [ -z "$after_unsafe_key" ] || not_certifiable "unsafe Git configuration for review after the gate ($after_unsafe_key)"
+else
+  not_certifiable "the repository's Git configuration cannot be read after the gate"
+fi
+if [ "$trusted" = yes ]; then
+  trusted=no
+  check_trust
+  [ "$trusted" = yes ] || not_certifiable "the installed plugin no longer matches its release tag after the gate"
+fi
+[ "$(evidence_summary)" = "$evidence_before" ] || not_certifiable "the review evidence covering HEAD changed while readiness ran"
 
 # ---------------------------------------------------------------- report
 certifiable=yes
@@ -811,7 +961,7 @@ echo "EFFECTIVE TIER: $tier_label"
 echo "$gate_line"
 case "$gate_line" in
   "GATE full: PASSED"*) ;;
-  *) [ -s "$temporary_directory/gate.out" ] && { echo "GATE OUTPUT (last 20 lines):"; tail -n 20 "$temporary_directory/gate.out"; } ;;
+  *) [ -n "$gate_output" ] && { echo "GATE OUTPUT (last 20 lines):"; printf '%s\n' "$gate_output" | tail -n 20; } ;;
 esac
 echo "QA (internal): $qa_status"
 echo "SECURITY REVIEW (internal): $security_status"

@@ -56,9 +56,11 @@
 #   check           C  the spec-hash transition check on its own (exit 6 and revert on mismatch)
 #   increment-add, increment-set, increment-recovery, raise-tier, evidence,
 #   finding-add, finding-fixed, finding-invalid, owner-action-add, owner-action-done   C  records
-#   increment-set   --base-sha records the default-branch commit the increment began from. It is
-#                      recorded once: a different base is refused (re-anchoring an increment is not
-#                      available; readiness rejects a moved default-branch ref).
+#   increment-set   planned -> active needs --base-sha: the full commit id (40 or 64 hexadecimal
+#                      characters) that refs/remotes/origin/<default> names at that moment, checked
+#                      against the repository holding the specs directory. A base is recorded only
+#                      then and never changes (late recording, a different base and re-anchoring are
+#                      refused; readiness rejects a moved default-branch ref).
 #   evidence        C  --inc <id> --kind gate|review|residual-risks --result pass|fail
 #                      [--reviewer qa|security] (review evidence for readiness names its reviewer)
 #                      [--sha <commit>] (the commit the evidence covers) [--note <text>]
@@ -277,6 +279,17 @@ need_sha() { # option-name value (optional: empty allowed)
 }
 
 actor_name() { printf '%s' "${opt_by:-${USER:-unknown}}"; }
+
+# The commit refs/remotes/origin/<default> names now (origin/HEAD gives <default>), in the
+# repository that holds the specs directory. Inherited variables that redirect Git are ignored.
+default_branch_commit() {
+  local repository_git=(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY
+    -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_NAMESPACE -u GIT_REPLACE_REF_BASE GIT_NO_REPLACE_OBJECTS=1 git -C "$specs_directory")
+  local default_ref
+  default_ref="$("${repository_git[@]}" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null)" || return 1
+  case "$default_ref" in refs/remotes/origin/?*) ;; *) return 1 ;; esac
+  "${repository_git[@]}" rev-parse --verify --quiet "$default_ref^{commit}" 2>/dev/null
+}
 
 # ------------------------------------------------------------------ state access
 # The hash and the delivery policy of one transition come from the same snapshot of the spec
@@ -764,11 +777,21 @@ cmd_increment_set() {
   [ "$current" != merged ] || fail "$EXIT_INVALID_TRANSITION" "increment $opt_inc is merged; its record is final"
   [ -z "$opt_merge_sha" ] || [ "$opt_status" = merged ] \
     || fail "$EXIT_INVALID_TRANSITION" "--merge-sha is recorded only with --status merged"
-  # The base is the default-branch commit the increment began from; it is recorded once.
-  if [ -n "$opt_base_sha" ]; then
-    opt_base_sha="$(printf '%s' "$opt_base_sha" | tr 'A-F' 'a-f')"
-    holds --arg i "$opt_inc" --arg base "$opt_base_sha" '.increments[] | select(.id == $i) | .baseSha == null or (.baseSha | ascii_downcase) == $base' \
-      || fail "$EXIT_INVALID_TRANSITION" "increment $opt_inc already records base $(query --arg i "$opt_inc" '.increments[] | select(.id == $i) | .baseSha'); a recorded base is never replaced (re-anchoring an increment is not available)"
+  # The base is the default-branch commit the increment starts from. It is recorded only with the
+  # move from planned to active, as a full commit id equal to origin/<default> at that moment, and
+  # never changes afterwards (re-anchoring an increment is not available).
+  [ -z "$opt_base_sha" ] || opt_base_sha="$(printf '%s' "$opt_base_sha" | tr 'A-F' 'a-f')"
+  if [ "$current" = planned ] && [ "$opt_status" = active ]; then
+    [ -n "$opt_base_sha" ] || fail "$EXIT_USAGE" "starting increment $opt_inc needs --base-sha <the full origin/<default> commit it starts from>"
+    [[ $opt_base_sha =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] || fail "$EXIT_USAGE" "--base-sha must be a full commit id (40 or 64 hexadecimal characters)"
+    local expected_base
+    expected_base="$(default_branch_commit)" \
+      || fail "$EXIT_INVALID_TRANSITION" "cannot read origin/<default> for this repository (is origin/HEAD set? git remote set-head origin -a); the base cannot be verified"
+    [ "$expected_base" = "$opt_base_sha" ] \
+      || fail "$EXIT_INVALID_TRANSITION" "--base-sha $opt_base_sha is not the current origin/<default> commit ($expected_base)"
+  elif [ -n "$opt_base_sha" ]; then
+    holds --arg i "$opt_inc" --arg base "$opt_base_sha" '.increments[] | select(.id == $i) | .baseSha != null and (.baseSha | ascii_downcase) == $base' \
+      || fail "$EXIT_INVALID_TRANSITION" "a base is recorded only when increment $opt_inc starts (planned -> active), and a recorded base is never replaced"
   fi
   # Repeating the current status records fields only (for example a new head SHA while active);
   # it changes no status or timestamp.

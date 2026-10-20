@@ -61,7 +61,19 @@ Readiness (`/ai-engineering:review`, and the end of each delivered increment) is
 
 Without a pin, from a `--plugin-dir` checkout, or with any mismatch, readiness reports `NOT CERTIFIABLE` and `READY: NO`.
 
-It also reads the guard log under the Git directory, so each increment must start with the exact command `/ai-engineering:deliver` uses. The increment's base is recorded once when it begins. Do not fetch or move `origin/<default>` until the increment is merged: readiness rejects a moved default-branch ref.
+It also reads the guard log under the Git directory, so each increment must start with the exact command `/ai-engineering:deliver` uses: `git switch -c <work-branch> <commit>`, naming the full `origin/<default>` commit. That command's confirmation shows you the base commit. Seeing it does not prove it is the remote's commit; readiness doesn't contact the remote. The base is recorded when the increment starts and never changes.
+
+Practical requirements and limits:
+- **`origin/HEAD` must be set.** Repositories created with `git init` and `git remote add` don't set it. Run `git remote set-head origin -a` once.
+- **Don't move `origin/<default>` during an increment.** That means no `git fetch`, `git pull` or IDE auto-fetch (some IDEs fetch in the background by default) until it is merged. A moved default-branch ref makes the increment `NOT CERTIFIABLE`, and v0.3.0 has no way to re-anchor it.
+- **Keep reflogs.** Readiness reads the increment branch's oldest reflog entry. An increment older than `gc.reflogExpire` (90 days by default), a repository with `core.logAllRefUpdates=false`, or a branch created any other way is `NOT CERTIFIABLE`.
+- **Clone compatibility.** The fresh clones don't fetch, so these are `NOT CERTIFIABLE` or fail the gate:
+  - partial or blobless clones;
+  - repositories using alternates;
+  - sparse checkouts (skip-worktree flags);
+  - submodules, unless the gate initialises them;
+  - Git LFS content, unless the gate fetches it.
+- **Diff configuration.** `diff.external`, `diff.<driver>.textconv`, `diff.<driver>.command` or `core.attributesFile` in any Git configuration scope, or a non-empty `.git/info/attributes`, is `NOT CERTIFIABLE`.
 
 Readiness runs the `full` gate in a fresh clone of `HEAD`, never in your checkout. **Make the `full` gate self-contained:** install dependencies inside it (for example `pnpm install --frozen-lockfile && …`), and don't rely on `node_modules`, `.env` or other untracked files. A gate that fails there is `READY: NO`. The gate still runs with your privileges and is not a sandbox. See [readiness](architecture.md#readiness-work-003-c2).
 

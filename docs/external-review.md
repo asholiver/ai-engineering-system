@@ -15,7 +15,7 @@ In the project's `.agents/gates.json`, committed to the base branch:
 `null` or a missing key means not configured. The command is read from the file **as committed at the base ref**, so a change under review cannot select or alter its own reviewer; when a change modifies `externalReview`, the report notes that the base command was used. A command that the approval guard classifies as high-impact is refused (`ERROR`).
 
 ## Invocation
-Readiness (`scripts/readiness.sh`, which `/ai-engineering:review` runs) calls `scripts/external-review.sh <base> <head> [spec-path]` with the increment's recorded base commit and `HEAD`. It executes the command with `bash -c` from the repository root and these environment variables:
+Readiness (`scripts/readiness.sh`, which `/ai-engineering:review` runs) calls `scripts/external-review.sh <base> <head> [spec-path]` with the increment's recorded base commit and `HEAD`, in its own fresh clone of `HEAD`. It controls the Git environment and rejects diff-reshaping configuration (see [readiness](architecture.md#readiness-work-003-c2)). It executes the command with `bash -c` from the repository root and these environment variables:
 
 | Variable | Meaning |
 | :- | :- |
@@ -23,7 +23,7 @@ Readiness (`scripts/readiness.sh`, which `/ai-engineering:review` runs) calls `s
 | `REVIEW_HEAD_REF` | Head of the change, normally `HEAD` |
 | `REVIEW_SPEC_PATH` | Work spec path relative to the repository root, or empty |
 
-The command is trusted because it comes from the base ref, but it runs in the change's checkout: a reviewer that executes repository code (for example by running tests) executes the change's code. See the [trust boundary](architecture.md#trust-boundary-for-project-code).
+The command is trusted because it comes from the base ref, but it runs in a clone of the change: a reviewer that executes repository code (for example by running tests) executes the change's code. See the [trust boundary](architecture.md#trust-boundary-for-project-code).
 
 Commit the change before review. The command computes the diff itself (for example `git diff "$REVIEW_BASE_REF...$REVIEW_HEAD_REF"`), sends it to the reviewer, and prints findings as text or Markdown on stdout. Output beyond 400 lines is truncated in the report.
 

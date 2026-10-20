@@ -134,3 +134,46 @@ Append-only delivery narrative, written by the coordinator. Not sent to speciali
     The guard is unchanged. Tests: a temporary path containing `checkout` and `push`; a gate that checks its environment, branch, refs, remote and HEAD from inside; a replace ref; and a guard-refused unsafe gate in the clone.
 - The finding-confirmation fail-open (`workstate.sh` `holds`): confirmed by reading. A jq error made `holds` return false, so `finding-invalid` would accept a security finding without `--confirmed-by`. It needs a fix, and it is fixed: `holds` now treats a jq error (exit 2, 3 or 5) as an internal error that stops the command. This changes WORK-002 code (a deviation).
 - Not fixed (not in the approved list): security L4 (hook-target extraction misses newline separators and non-hook command settings) and L5 (events logged in other repositories or outside Git; only noted as a residual in the readiness header), QA L2 (jq error text on oddly shaped registry files) and QA L3 (the gate and external review still run on a NOT CERTIFIABLE evaluation).
+- Committed as `61cda34`. `GATE full: PASSED (exit 0) command: scripts/check.sh` (3855 passed, 0 failed).
+
+## 2026-10-20: PR C remediation round 2, local
+- Fresh internal reviews of `a5e7796..61cda34` (not external review evidence):
+  - Security: High H-1, the base could still be chosen. Path B: a ref planted with an unguarded `git update-ref` before the start command. Path A: a base recorded late after recreating the branch. Medium M-1: the external reviewer could be shown a falsified diff through repository config or `GIT_EXTERNAL_DIFF`. Medium M-2: the gate ran before checks it could undermine. Low: a guard-log rotation race, an empty-id trigger-2 decision, test gaps.
+  - QA: no High. Medium: no pinned-locale test, stale `docs/architecture.md:116`, no recovery from a moved default-branch ref, reflog expiry, undocumented `origin/HEAD`. Plus Low items and missing negative tests.
+- Owner decisions (conversation, 2026-10-20), verbatim excerpts:
+  - "H1: Use options (a) + (b). Require a full 40-character base SHA at increment creation, verified against the expected default-branch ref at that moment. Make that exact SHA visible in the owner-approved increment-start command. The recorded base must be immutable for that increment. Reject late base recording, branch-renaming attempts to substitute a base, and unexpected default-branch ref changes."
+  - "Before changing the start command, inspect its compatibility with the existing Guard classification and the exact-command action-floor exclusion. If implementing this requires a Guard policy change or creates a new approval bypass, stop and report the blocker."
+  - "Document that owner visibility is not independent authentication of the remote SHA."
+  - "External review: Run it against a separate fresh clone at the exact intended HEAD, using controlled Git environment and configuration. … Reject unsafe diff/textconv configuration rather than trusting repository-controlled diff behaviour."
+  - "Gate ordering: Separate the gate clone from readiness's temporary evidence files. Run trust and external-review checks before the gate, then revalidate … A changed or unreadable critical input must result in NOT CERTIFIABLE and READY: NO. Never reuse a stale successful verdict."
+  - Fix the remaining QA correctness and documentation findings, add the listed tests, and pin a predictable locale.
+- Compatibility check (read-only, `guard/policy.jq:644-648`):
+  - `git switch -c <branch> <full sha>` has one start-point operand, so the guard classifies it as `git switch -c <start point>`. That is the same `ask` as the earlier `origin/<default>` form; it is logged with the exact command's hash, and the owner sees the full commit.
+  - No Guard change is needed. The exclusion matches only that exact text with the recorded base, so it opens no bypass: `-C`, other start points and denials still raise the floor.
+- Implemented:
+  - **H1:**
+    - planned to active requires a full `--base-sha`, checked against `origin/<default>` in the repository holding the specs directory;
+    - a base is never recorded later or changed;
+    - the anchor is `git switch -c <branch> <recorded base>`.
+
+    "Increment creation" is implemented as the planned-to-active start, when the branch is created, not `increment-add` at planning time.
+  - **External review:** runs in its own clone. Inherited Git overrides (the `GIT_CONFIG_*` family, `GIT_EXTERNAL_DIFF`, `GIT_ATTR_SOURCE` and more) are unset for readiness and its children. Diff-reshaping configuration in any scope, and a non-empty `.git/info/attributes`, are NOT CERTIFIABLE.
+  - **Ordering:**
+    - separate temporary roots for readiness's files and each clone;
+    - the external review runs before the gate;
+    - gate and reviewer output are held in memory;
+    - after the gate, readiness revalidates the state and spec, HEAD, the branch, `origin/<default>`, replace refs, diff configuration, the installed plugin (the trust check re-run) and the evidence statuses.
+  - **Guard log:** the newer file is read first, then the rotated one, and both must be the same files (inode) afterwards. Trigger-2 decisions are counted, not looked up by id.
+  - **Locale:** readiness runs with `LC_ALL=C`; the gate and the reviewer get the caller's locale back. `git status` runs with fsmonitor and the untracked cache off.
+  - **Clones:** created with an explicit remote name (`clone.defaultRemoteName` cannot break it), and alternates are refused.
+- Tests added:
+  - H1 paths A and B: no anchor without the base in the start command, a recreated branch, a late base, short and wrong bases, and the planted-ref residual made explicit;
+  - external review receiving the intended base and HEAD, and its diff manipulation (`GIT_EXTERNAL_DIFF`, `diff.external`, textconv, `info/attributes`);
+  - gate tampering: replace ref, moved ref, edited install, diff config, rewritten state, and run-gate killed (no verdict);
+  - guard-log rotation during the read (a stand-in `cat`), an empty-id trigger-2 decision, missing QA, unreadable and linked logs, clone failure (a stand-in `git`), external ERROR at tier 2, and the locale.
+- Test defects found while running:
+  - an existing WORK-002 skill test still expected the old start command;
+  - the first "no verdict" gate action used `pkill`, which matched nothing.
+
+  Its replacement walked up the process ancestry and killed the outermost `run-gate.sh full`. When the suite ran inside the real full gate, that was the real gate run: it was killed (exit 137), and nothing else was affected. The action now stops at `readiness.sh` and matches only a `run-gate.sh` on readiness's `/gate-tree` clone.
+- `GATE full: PASSED (exit 0) command: scripts/check.sh` (3966 passed, 0 failed).
