@@ -1,6 +1,8 @@
 # Work Specification
 ## Status
-**Current status (2026-10-16): partial delivery authorised.** The gate-bootstrap PR (D5) is merged. On 2026-10-16 the owner authorised implementation of the components that do not depend on WORK-002's state schema or owner-only transitions: Scope items 1 (classifier), 3 (gate configuration v2), 4 (gate trust states), 5 (bootstrap structural checks and canaries), 6 (certification), 7 (gate ledger, except the cause recorded through the transition script), 9 (external evidence adapters), 10 (coverage evaluation), 15 (release and documentation consistency) and 16 (removals), subject to the repository workflow and review gates. Items 2, 8, 11–14 and the transition-script parts of 7 wait for WORK-002's state schema and the owner's acceptance of the Path B amendment.
+**Current status (2026-10-20): C1 complete; v0.3.0 scope and PR sequence approved; only PR A (this docs closeout) authorised.** C1 (Scope items 1 and 15) merged as `f71b540`. WORK-002 merged as `d7db152`, so the items that waited for its state schema are unblocked. Owner decisions of 2026-10-20 (see "v0.3.0 scope and C2 design"): v0.3.0 ships C2 (effective tier with the action floor, deterministic readiness, tier-dependent depth, the two C1 readiness requirements) and the item 16 removals; the rest moves to v0.3.x. PRs B–E each need separate owner authorisation.
+
+Earlier status (2026-10-16, history): partial delivery authorised. The gate-bootstrap PR (D5) is merged. On 2026-10-16 the owner authorised implementation of the components that do not depend on WORK-002's state schema or owner-only transitions: Scope items 1 (classifier), 3 (gate configuration v2), 4 (gate trust states), 5 (bootstrap structural checks and canaries), 6 (certification), 7 (gate ledger, except the cause recorded through the transition script), 9 (external evidence adapters), 10 (coverage evaluation), 15 (release and documentation consistency) and 16 (removals), subject to the repository workflow and review gates. Items 2, 8, 11–14 and the transition-script parts of 7 wait for WORK-002's state schema and the owner's acceptance of the Path B amendment.
 
 Original status (history): Approved (by Ashley Oliver, 2026-10-06), in principle, with owner decisions D1–D6 incorporated as recorded in `WORK-001-planning.md`. Delivery is not authorised; it may start only after the gate-bootstrap PR (D5) is merged and the owner explicitly authorises it.
 ## Work ID
@@ -119,7 +121,7 @@ Included:
      - Valid JSON example of complete evidence with one unresolved actionable finding (illustrative values):
        ```json
        {
-         "provider": "coderabbit",
+         "provider": "example-reviewer",
          "status": "complete",
          "reviewedRanges": [
            { "base": "1111111111111111111111111111111111111111", "head": "2222222222222222222222222222222222222222" }
@@ -142,7 +144,7 @@ Included:
    - **Legacy command:** the v0.2 `externalReview` command string is kept unchanged as the `command` adapter. Exit 0 or 1 maps to complete evidence for the exact head, with no findings or with one blocking finding carrying the truncated text. Other exit codes are `error`, and the old environment variables are still provided.
    - **`provider`** must differ from the implementation provider. Claude reviewing Claude never counts, and internal reviews never satisfy the external requirement.
    - **Reusable adapter** `github-pr-reviews` (D6), shipped with the plugin:
-     - The reviewer identity (one or more account logins) is configuration at the base ref, never hard-coded. CodeRabbit (`coderabbitai[bot]`) is the documented example configuration.
+     - The reviewer identity (one or more account logins) is configuration at the base ref, never hard-coded. The documented example uses a placeholder login (amended 2026-10-20: CodeRabbit is unavailable; the example previously named `coderabbitai[bot]`). Deferred to v0.3.x.
      - Uses authenticated `gh` only.
      - Evidence counts only when **both** hold:
        - a submitted review by a configured reviewer has a `commit_id` equal to the head being certified, or reviewed ranges that reach it;
@@ -333,23 +335,23 @@ End-to-end scenario in a scratch project (self-development protocol, evidence in
 ## Acceptance criteria
 1. The classifier is deterministic, reads project configuration only from base, and raises on uncertainty. It never puts `.agents/**` (other than the active item's bookkeeping) in tier 0, and never puts instruction-bearing files in tier 0; they are tier 1 or 2 by what they can influence (D4 regression cases pass).
 2. Effective tier follows the max rule. Agents can't lower it, and owner lowering is recorded and floored.
-3. Gate trust states are computed and labelled correctly. Provisional and proposed-change definitions never certify themselves. When any `definedBy` file differs from base, certify mode returns `NOT CERTIFIABLE`, never `PASSED` (regression fixture above).
-4. Bootstrap acceptance requires structural evidence, safe canaries (or the structural-plus-review fallback), external review and owner acceptance at merge. No real resource is touched.
-5. Certification refuses dirty trees, and `prelude` is applied.
-6. The gate ledger labels reruns after failure, and readiness requires a recorded cause.
-7. The review ledger ties every review to an exact range. No review repeats on an unchanged range.
-8. The legacy external-review command works unchanged as an adapter. The reusable GitHub PR-review adapter takes its reviewer identity from base-ref configuration. It accepts evidence only for the exact head (or incremental ranges reaching it) with no unresolved actionable findings, never merely because a reviewer posted.
+3. Gate trust states are computed and labelled correctly. Provisional and proposed-change definitions never certify themselves. When any `definedBy` file differs from base, certify mode returns `NOT CERTIFIABLE`, never `PASSED` (regression fixture above). *(Deferred to v0.3.x, 2026-10-20.)*
+4. Bootstrap acceptance requires structural evidence, safe canaries (or the structural-plus-review fallback), external review and owner acceptance at merge. No real resource is touched. *(Deferred to v0.3.x, 2026-10-20.)*
+5. Certification refuses dirty trees, and `prelude` is applied. *(Deferred to v0.3.x, 2026-10-20.)*
+6. The gate ledger labels reruns after failure, and readiness requires a recorded cause. *(Deferred to v0.3.x, 2026-10-20.)*
+7. The review ledger ties every review to an exact range. No review repeats on an unchanged range. *(Deferred to v0.3.x, 2026-10-20; C2 records only the reviewer kind.)*
+8. The legacy external-review command works unchanged as an adapter. The reusable GitHub PR-review adapter takes its reviewer identity from base-ref configuration. It accepts evidence only for the exact head (or incremental ranges reaching it) with no unresolved actionable findings, never merely because a reviewer posted. *(Adapters deferred to v0.3.x, 2026-10-20; the legacy command keeps working unchanged.)*
 9. One readiness procedure serves both `deliver` and `/review`, with tier-dependent depth as in the table.
-10. Historical evidence is supported and never counts for new increments.
-11. The metrics report covers every dogfood metric that isn't transcript-only.
+10. Historical evidence is supported and never counts for new increments. *(Deferred to v0.3.x, 2026-10-20.)*
+11. The metrics report covers every dogfood metric that isn't transcript-only. *(Deferred to v0.3.x, 2026-10-20.)*
 12. The release and documentation consistency check is in `scripts/check.sh`.
-13. `gate-fast.sh`, the `SubagentStop` gate, `AI_ENGINEERING_HOOK_GATES` and the working-tree fallback are removed.
+13. `gate-fast.sh`, the `SubagentStop` gate, `AI_ENGINEERING_HOOK_GATES` and the working-tree fallback are removed. *(PR D, 2026-10-20.)*
 14. `scripts/check.sh` passes.
 ## Definition of done
 - Implementation complete; deterministic tests pass; E1–E3 evidence recorded
 - `scripts/check.sh` passes
 - Internal security review (Opus) of classifier, trust states, certification, adapters and coverage with no unresolved findings
-- Independent external review passes
+- Independent external review passes (amended 2026-10-20: for this repository's PRs, the review process in Independent review; no external-review evidence is claimed)
 - Human acceptance complete
 ## Compatibility and migration
 - **v0.2 `gates.json`:** works unchanged. String gates are single-step. A string `externalReview` is the command adapter. Missing optional keys use defaults.
@@ -373,7 +375,7 @@ End-to-end scenario in a scratch project (self-development protocol, evidence in
 - A note in ADR-0002 pointing to ADR-0005.
 ## Independent review
 - **Internal review.** Opus security review with a brief on self-certification and tier-0 escape attempts.
-- **External review.** CodeRabbit on the PR at its head SHA, with no unresolved actionable findings (D5 arrangement while v0.2.0 governs).
+- **External review.** ~~CodeRabbit on the PR at its head SHA, with no unresolved actionable findings (D5 arrangement while v0.2.0 governs).~~ Amended 2026-10-20 (owner decision 2026-10-19: CodeRabbit is unavailable). For WORK-003's own PRs the review process is the independent Opus security review, the QA specialist review and the required CI check (`check (ubuntu, ShellCheck 0.11.0)`) on the PR head, with every review thread resolved, then the owner's merge. None of these is external-review evidence, and none is claimed as such.
 - **Gate scripts.** Under v0.2 the gate commands come from the base ref, but `tests/run.sh` and `scripts/check.sh` are executed from the change itself. Reviewers must check every diff to those two files, and a weakened or removed check is a blocking finding.
 - **Owner acceptance.** The owner reviews the tier tables, tier-0 exclusions and readiness block text.
 ## Dependencies
@@ -388,13 +390,33 @@ End-to-end scenario in a scratch project (self-development protocol, evidence in
 - Safe canaries only, with the structural-plus-review fallback.
 - Removal of the hook-gate machinery and the working-tree fallback.
 - D4: instruction-bearing Markdown and configuration are never tier 0, and are classified by what they can influence.
-- D5: the gate-bootstrap PR is merged before this work starts, and CodeRabbit is the external reviewer for this PR.
+- D5: the gate-bootstrap PR is merged before this work starts, and CodeRabbit is the external reviewer for this PR. **Amended 2026-10-20:** CodeRabbit is unavailable (owner decision 2026-10-19); see Independent review. The gate-bootstrap precondition is met.
 - D6: the GitHub PR-review adapter is reusable, its reviewer identity is configuration, and it validates head coverage and unresolved actionable findings.
+## v0.3.0 scope and C2 design (owner decisions 2026-10-20)
+- **v0.3.0 scope.** C2: Scope item 2 (effective tier, including the action floor), item 11 (tier-dependent depth), item 12 (one deterministic readiness procedure; without gate trust states, rerun labels or bootstrap notes) and the two C1 readiness requirements in Implementation state. From item 8, only a reviewer kind (`security`, `qa`, `external`) on review evidence. PR D: item 16 removals. Deferred to v0.3.x: items 3–7, the rest of 8, 9, 10, 13 and 14.
+- **PR sequence:** A `docs/work-003-closeout` (this closeout) → B `feature/reviewer-execution-limits` → C `feature/work-003-c2-readiness` → D `feature/work-003-removals` → E v0.3.0 release. Each needs separate owner authorisation. No tag or installation without the owner's approval. The local branch `docs/work-003-c1-closeout` is kept until PR A merges and `96a9687`'s content is verified on `main`.
+- **External review: option 1.** No independent external reviewer is configured. `NOT CONFIGURED` is a non-pass for tiers 1 and 2, so READY stays NO for them. The owner's merge approval is not external-review evidence. Opus and QA reviews never count as external review, and no passing result is invented. Tier 0 follows the depth table: external review is optional, so a genuinely tier-0 increment may be READY: YES when every other applicable requirement passes.
+- **Effective tier** = max(approved or state tier, trusted classifier floor, action floor). Nothing lowers it below the classifier floor in v0.3.0.
+- **Classifier fallback.** Without a trusted installed classifier, the classifier floor is tier 2 and readiness reports `NOT CERTIFIABLE` (READY: NO). A path outside the repository and the presence of `classify-change.sh` do not prove trust.
+- **Action floor (C2).** Tier 2 when the increment has any trigger-2 decision (new dependency or external service are trigger 2; the category is not finer, so this over-counts), or when the guard log shows any reserved-class `ask` or `deny` in the increment's window, apart from the two exclusions below. Exclusions are exact and deterministic, never command-pattern exemptions:
+  - the increment-start confirmation: the one `ask` event whose command SHA-256 equals that of the exact command `git switch -c <increment branch> origin/<default>` for this increment's recorded branch;
+  - with parallel worktrees explicitly opted in and recorded in state, `ask` events whose command SHA-256 equals that of the exact worktree merge command for a recorded worktree branch.
+
+  Any deviation from those exact commands counts, which raises the tier.
+- **Guard-log evidence (C2).** Readiness reads `guard-log.jsonl` and its one rotated file. Missing, unreadable, symlinked or malformed log files, or insufficient evidence, are never treated as an empty log: readiness reports `NOT CERTIFIABLE` (READY: NO). Insufficient evidence means the increment-start event (the anchor) is not found, so deleting or losing the log is detected. Rotation keeps everything after the anchor while the anchor is present. Residual: a deliberate local process can edit lines after the anchor; the log is a workflow record, as state is.
+- **Tests (C2):** the exact exclusions and near-miss commands; log rotation; malformed, missing, symlinked and anchor-less logs; tier-0 readiness (YES possible) and tier 1 and 2 with `NOT CONFIGURED` (NO); a state tier of 0 against a classifier floor of 2 gives 2; every fallback path. No READY: YES without every applicable requirement met.
 ## Open decisions
-- None. D1–D6 are resolved (see `WORK-001-planning.md`).
+- D1–D6 are resolved (see `WORK-001-planning.md`).
+- **Trusted-classifier rule (proposed 2026-10-20; owner approval needed before C2 starts).** Readiness trusts a classifier only when all of these hold, and otherwise uses the fallback above:
+  1. The installation is read from Claude Code's plugin registry (`installed_plugins.json` in the Claude Code config directory), never from `CLAUDE_PLUGIN_ROOT`, arguments or the repository: the `ai-engineering@ai-engineering-system` entry for this project (local scope for the repository root, else user scope).
+  2. The installed version equals the version pinned at the base ref in the project's `.claude/settings.json` (`extraKnownMarketplaces.ai-engineering-system.source.ref` `v<version>`), and is at least 0.3.0. No pin means not trusted.
+  3. The registry's `gitCommitSha` equals the commit that tag `v<version>` resolves to in the marketplace clone, and the installed `classify-change.sh` is byte-identical to the blob at that commit (Git object hash comparison).
+  4. The install path is outside the repository under review (defence in depth, not proof).
+
+  Limits: this proves consistency between Claude Code's install records, the approved pin and the release tag. It is not cryptographic identity (signed releases are WORK-004), and a deliberate local process could forge all of it. Testable with fixture registries, clones and pins: each condition failing alone gives `NOT CERTIFIABLE` and tier 2.
 ## Implementation state
 <!-- v0.2 deliver records task status and verdict lines here. Keep entries to one line each; put detailed evidence in WORK-003.log.md. -->
-- Increment C1 (owner-authorised 2026-10-16; Scope items 1 and 15 only; branch `feature/work-003-c1-classifier` from `454f69f`; independent of PR #8):
+- Increment C1 (owner-authorised 2026-10-16; Scope items 1 and 15 only; branch `feature/work-003-c1-classifier` from `454f69f`; independent of PR #8). **Complete:** PR #9 merged by owner approval at `4d1baa6` as `f71b540` (2026-10-19). Only C1 is complete; the rest of WORK-003 remains open.
   - T1 backend: change classifier `classify-change.sh` and its `tests/run.sh` cases (Scope item 1; AC1). Status: done; `GATE fast: PASSED (exit 0) command: tests/run.sh` (2566 passed, 0 failed); destructive-SQL rule narrowed in fix round 1; process deviation logged in WORK-003.log.md.
   - T2 backend: release and documentation consistency check in `scripts/check.sh` with a fixture test, and the `CONTRIBUTING.md` release checklist (Scope item 15; AC12). Status: done; `scripts/check-doc-versions.sh` called from `check.sh`; `GATE fast: PASSED (exit 0) command: tests/run.sh` (2573 passed, 0 failed).
   - C1 full gate at `92af863`: `GATE full: PASSED (exit 0) command: scripts/check.sh`. QA: AC1 met, AC12 met. Security review: 2 High, 4 Medium and 4 Low findings; fixed in two rounds (plugin-root code, case folding, git environment and version, renames, default lists, statement shapes, executable mode, `docs/` file types, doc-version check); security re-check: all High and Medium findings fixed, no tier lowered. After fixes: `GATE fast: PASSED (exit 0) command: tests/run.sh` and `GATE full: PASSED (exit 0) command: scripts/check.sh` (2740 passed, 0 failed).
