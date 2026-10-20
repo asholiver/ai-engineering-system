@@ -52,3 +52,34 @@ Append-only delivery narrative, written by the coordinator. Not sent to speciali
 - Evidence for the change: the C1 security review (a combined setup-and-probe command denied, 2026-10-19) and the WORK-002 E1 reviewer (an oversized-input run, and a narrower retry after a declined command).
 - Exceptions to the limits are valid only when the brief states the owner authorised them for that review. The agent's description and tools are unchanged (always-loaded budget unaffected; still no Edit or Write).
 - The local branch `docs/work-003-c1-closeout` (`96a9687`) was deleted with the owner's approval after its patch was verified on `main` as `ac7eb33` (identical `git patch-id`). Git's safe delete refused because a cherry-pick is not an ancestor, so the forced form was used. The remote has no such branch.
+
+## 2026-10-20: PR C (C2 readiness), local
+- Design review before implementation (read-only), grounded on disk:
+  - Claude Code's `installed_plugins.json` records `installPath`, `version` and `gitCommitSha`.
+  - The marketplace clone is a shallow checkout of its pinned tag.
+  - All 42 files of tag `v0.2.0` match the installed cache in bytes and modes; the cache's only extras are `.in_use/<pid>`.
+  - Landra pins `ref: v0.2.0`.
+  - The guard log has one-second timestamps, best-effort writes, rotation at 1 MiB, dropped lines above 2 MiB, and a deadline-killed writer.
+- Owner decisions (conversation, 2026-10-20), verbatim excerpts:
+  - "Add a third narrow exclusion for the exact `git switch <recorded increment branch>` resume command."
+  - "Any logged Guard event after the increment-start anchor raises the action floor to tier 2, except for the precisely defined start, resume and authorised worktree-merge exclusions. Include denials and events from other sessions."
+  - "Readiness must execute the full gate itself against the resolved merge-base."
+  - "For C2, compute effective tier during readiness evaluation, not after each task commit."
+  - "Standalone `/review` without valid increment state and anchor must report NOT CERTIFIABLE and READY: NO."
+  - "Accept and document the residual possibility of silent Guard-log write loss."
+  - "Verify that the executing plugin root resolves to the selected installed-plugin registry path, and verify the whole installed plugin tree against the matching marketplace tag, ignoring only the known runtime `.in_use/` files."
+- Implementation (coordinator, in the main checkout): see Implementation state. The tests use fixture registries, a tagged fixture marketplace clone, an installed copy and projects with local bare remotes, covering:
+  - trust failures, each alone;
+  - anchors, exact hashes and near-misses, resume, denials, other sessions and worktree merges;
+  - rotation, malformed, truncated, linked and oversized logs;
+  - missing evidence and stale or failed QA;
+  - tier 0 YES without an external reviewer; tier 1 and 2 with and without an external reviewer;
+  - the base-commit gate and gate modification;
+  - the classifier floor over a state tier of 0;
+  - dirty, detached and stateless runs.
+- Defects found and fixed during implementation:
+  - A parenthesis error in the new schema clause made the state validator fail to compile. Because `validate_state_json` discarded jq errors, every state then validated (two existing schema tests caught it). The clause was fixed, and the validator now reports its own failure as a schema error (fail closed). The latter changes WORK-002 code and is reported as a deviation.
+  - The hook-target extraction first split quoted `"$CLAUDE_PROJECT_DIR"/path` into two words; quotes are now removed, not turned into separators.
+  - Three test lines needed line-scoped `SC2016` directives.
+- Process: the owner declined one Bash command that would have edited the docs with a Python heredoc. The guard flagged its text as a deploy/release class. It was not retried, split or rephrased: the four documentation files were edited with the Edit tool instead, and the diff was checked.
+- `GATE full: PASSED (exit 0) command: scripts/check.sh` (3636 passed, 0 failed).

@@ -53,6 +53,14 @@ v0.2 specs have no state file. Run `/ai-engineering:setup` and use its import st
 ## Parallel worktrees
 `/setup` writes `"worktree": {"baseRef": "head"}` by default and tells you the effect: your own `claude --worktree` sessions then branch from the current HEAD instead of the remote default branch. To opt out, delete the `worktree` key from `.claude/settings.json`. `/ai-engineering:deliver` runs tasks sequentially in one checkout by default; parallel worktrees are opt-in per delivery and need this setting, because Claude Code's default worktree base would not contain the work branch.
 
+## Readiness and the version pin
+Readiness (`/ai-engineering:review`, and the end of each delivered increment) is certifiable only when all of these hold:
+- the session runs the plugin install that Claude Code records for the project;
+- that install matches the version pinned in the project's committed `.claude/settings.json` (`ref: v<version>`);
+- it matches that version's release tag.
+
+Without a pin, from a `--plugin-dir` checkout, or with any mismatch, readiness reports `NOT CERTIFIABLE` and `READY: NO`. It also reads the guard log under the Git directory, so each increment must start with the exact command `/ai-engineering:deliver` uses. See [readiness](architecture.md#readiness-work-003-c2).
+
 ## GitHub authentication
 Delivery waits for CI checks and for your merge through authenticated `gh` (`scripts/wait-github.sh`). Run `gh auth login` first. Without it the wait reports `NOT AUTHENTICATED`, which delivery records as an action for you; it never polls unauthenticated.
 

@@ -113,7 +113,33 @@ Current guarantee: reviewers have no file-editing tools and are instructed not t
 { "fast": "...", "full": "...", "externalReview": null }
 ```
 
-`scripts/run-gate.sh <name> [directory] [config-ref]` runs a gate in the repository root and prints `GATE <name>: PASSED | FAILED | NOT CONFIGURED | REFUSED`. Unconfigured gates are never reported as passed. Without a config ref the command is read at `HEAD`, falling back to the uncommitted file with a `NOTE` when none is committed (implementation checks). `/ai-engineering:review` passes the base ref, and only that ref is read (certification).
+`scripts/run-gate.sh <name> [directory] [config-ref]` runs a gate in the repository root and prints `GATE <name>: PASSED | FAILED | NOT CONFIGURED | REFUSED`. Unconfigured gates are never reported as passed. Without a config ref the command is read at `HEAD`, falling back to the uncommitted file with a `NOTE` when none is committed (implementation checks). Readiness (below) passes the merge-base commit, and only that commit is read (certification).
+
+### Readiness (WORK-003 C2)
+
+`scripts/readiness.sh <WORK-ID> --inc <increment>` is the one readiness procedure. The `review` skill runs it, and `/ai-engineering:deliver` reaches it through `review`. It prints a `READINESS` block ending in `READY: YES | NO`. The script's header documents every rule; in summary:
+
+- **Effective tier** is the maximum of the state tier, the classifier floor and the action floor. Nothing lowers it. It is computed during readiness only; recomputing after each task commit is deferred to v0.3.x.
+- **Base** is the merge-base of HEAD with `origin/<default>` (from `origin/HEAD`), never a chosen ref. Readiness runs the full gate itself with configuration from that commit, and runs the external review. Recorded gate results are never trusted.
+- **Trusted classifier: a local consistency check, not cryptographic provenance.** All of these must hold, otherwise the result is `NOT CERTIFIABLE`:
+  - readiness runs from the plugin install that Claude Code's registry records for the repository;
+  - that install's version equals the project's base-commit pin (`ref: v<version>`) and is at least 0.3.0;
+  - its recorded commit equals the release tag in the marketplace clone;
+  - the whole installed tree is byte- and mode-identical to the tag, ignoring only `.in_use/`.
+
+  Signed releases are WORK-004.
+- **Action floor:** tier 2 for any trigger-2 decision, or any guard-log `ask` or `deny` after the increment-start anchor, from any session. Events are ordered by line order, never by timestamp. Only `ask` events for three exact commands are excluded, each matched by the SHA-256 of its exact text: the increment start, the resume of the increment branch, and the merge of a recorded worktree branch. A denial is never excluded.
+- **NOT CERTIFIABLE** means trust or evidence is missing, ambiguous, malformed or untrusted. Examples: an untrusted install, no state, uncommitted changes, a missing or malformed guard log, or no anchor. The effective tier is then 2 and READY is NO. It is reported separately from a valid tier-2 classification.
+- **Depth:**
+  - QA evidence is needed at every tier.
+  - A security review is needed at tier 2, or at tier 1 when the classifier flags a security category.
+  - A residual-risk list is needed at tier 2.
+  - External review must be PASSED at tiers 1 and 2. It is optional at tier 0, so only a genuinely tier-0 increment can be READY without a configured reviewer.
+  - Review evidence counts only when it names its reviewer and a commit that covers HEAD.
+- **Limits:**
+  - Evidence and the guard log are workflow records written by the coordinator and the guard. Neither is complete or tamper-proof.
+  - A guard-log write that the guard's deadline kills is lost silently.
+  - Standalone `/review` without work-item state is always NOT CERTIFIABLE.
 
 ## Work items: state and authority
 

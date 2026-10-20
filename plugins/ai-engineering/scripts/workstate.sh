@@ -56,6 +56,12 @@
 #   check           C  the spec-hash transition check on its own (exit 6 and revert on mismatch)
 #   increment-add, increment-set, increment-recovery, raise-tier, evidence,
 #   finding-add, finding-fixed, finding-invalid, owner-action-add, owner-action-done   C  records
+#   evidence        C  --inc <id> --kind gate|review|residual-risks --result pass|fail
+#                      [--reviewer qa|security] (review evidence for readiness names its reviewer)
+#                      [--sha <commit>] (the commit the evidence covers) [--note <text>]
+#   increment-worktree C  record an owner-opted-in parallel worktree branch for an increment:
+#                      --inc <id> --branch <worktree-branch>. Readiness excludes only the exact
+#                      merge command for a recorded branch from the action floor.
 #   import          C  create state from a v0.2 spec Status line (Draft or Approved), never
 #                      authorised or delivering. Idempotent. [--merged "id|title|pr|mergeSha[|tier]"]
 #   show            read-only: the full state as JSON
@@ -135,14 +141,20 @@ def tier: type == "number" and . == floor and . >= 0 and . <= 2;
     need((.delivery != null) == (.status | one_of(["proposed","approved"]) | not); "delivery must be set exactly when the status is past approved"),
     each_of("ownerActions"; need(type == "object" and (.id | text) and (.description | text) and (.increment | textOrNull) and (.status | one_of(["requested","done"])) and (.requestedAt | text) and (.doneAt | textOrNull); "ownerActions entry is invalid")),
     each_of("decisions"; need(type == "object" and (.id | text) and (.trigger | (type == "number" and . >= 1 and . <= 5 and . == floor)) and (.question | text) and (.options | type == "array") and (.askedAt | text) and (.answeredAt | textOrNull) and (.answer | textOrNull) and (.source | (. == null or one_of(["owner-command","conversation"]))) and (.by | textOrNull) and (.blocking | (. == null or type == "boolean")); "decisions entry is invalid")),
-    each_of("increments"; need(type == "object" and (.id | text) and (.title | text) and (.status | one_of(["planned","active","ready","merged"])) and (.proposedTier | tier) and (.tier | tier) and (.branch | textOrNull) and (.pr | textOrNull) and (.baseSha | textOrNull) and (.headSha | textOrNull) and (.mergeSha | textOrNull) and (.recoveries | (type == "number" and . >= 0 and . == floor)) and (.activeAt | textOrNull) and (.readyAt | textOrNull) and (.mergedAt | textOrNull) and (.evidence | type == "array"); "increments entry is invalid")),
+    each_of("increments"; need(type == "object" and (.id | text) and (.title | text) and (.status | one_of(["planned","active","ready","merged"])) and (.proposedTier | tier) and (.tier | tier) and (.branch | textOrNull) and (.pr | textOrNull) and (.baseSha | textOrNull) and (.headSha | textOrNull) and (.mergeSha | textOrNull) and (.recoveries | (type == "number" and . >= 0 and . == floor)) and (.activeAt | textOrNull) and (.readyAt | textOrNull) and (.mergedAt | textOrNull) and (.evidence | type == "array") and (.worktreeBranches | (. == null or (type == "array" and all(.[]; text)))); "increments entry is invalid")),
     each_of("findings"; need(type == "object" and (.id | text) and (.source | text) and (.severity | one_of(["critical","high","medium","low","info"])) and (.security | type == "boolean") and (.summary | text) and (.disposition | (type == "object" and (.state | one_of(["open","fixed","invalid","owner"])) and ((.state != "fixed") or (.sha | text)) and ((.state != "invalid") or ((.evidence | text) and (.confirmedBy | textOrNull))) and ((.state != "owner") or ((.decisionId | text) and (.action | one_of(["accept","defer","tier"])))))); "findings entry is invalid")),
     each_of("history"; need(type == "object" and (.at | text) and (.transition | text) and (.actor | text); "history entry is invalid"))
   end
 ]'
 
 validate_state_json() { # json text; prints one error per line
-  jq -r "$schema_validator | .[]" <<<"$1" 2>/dev/null
+  # A validator that cannot run is itself an error, never an empty (valid) result.
+  local errors
+  errors="$(jq -r "$schema_validator | .[]" <<<"$1" 2>/dev/null)" || {
+    echo "the schema validator could not run"
+    return 0
+  }
+  [ -z "$errors" ] || printf '%s\n' "$errors"
 }
 
 # ------------------------------------------------------------------ environment
@@ -181,7 +193,7 @@ opt_answer="" opt_decision="" opt_finding="" opt_inc="" opt_status="" opt_branch
 opt_base_sha="" opt_head_sha="" opt_merge_sha="" opt_tier="" opt_kind="" opt_result=""
 opt_note="" opt_evidence="" opt_sha="" opt_severity="" opt_summary="" opt_security="no"
 opt_confirmed_by="" opt_action_id="" opt_description="" opt_actor="" opt_source=""
-opt_increment=""
+opt_increment="" opt_reviewer=""
 merged_specs=()
 positional=()
 
@@ -222,6 +234,7 @@ parse_options() {
       --actor) opt_actor="$2" ;;
       --source) opt_source="$2" ;;
       --increment) opt_increment="$2" ;;
+      --reviewer) opt_reviewer="$2" ;;
       --merged) merged_specs+=("$2") ;;
       --*) fail "$EXIT_USAGE" "unknown option $1" ;;
       *) positional+=("$1"); shift; continue ;;
@@ -244,6 +257,12 @@ need_text() { # option-name value
 need_identifier() { # option-name value
   [ -n "$2" ] || fail "$EXIT_USAGE" "$1 is required"
   [[ $2 =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || fail "$EXIT_USAGE" "$1 must be 1-64 letters, digits, dot, dash or underscore"
+}
+
+need_branch() { # option-name value: a plain Git branch name, so its exact commands hash deterministically
+  [ -n "$2" ] || fail "$EXIT_USAGE" "$1 is required"
+  [[ $2 =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$ ]] && [[ $2 != *..* && $2 != *//* && $2 != */ && $2 != *.lock && $2 != */.* ]] \
+    || fail "$EXIT_USAGE" "$1 must be a plain branch name (letters, digits, dot, dash, underscore and single slashes)"
 }
 
 need_sha() { # option-name value (optional: empty allowed)
@@ -786,13 +805,32 @@ cmd_evidence() {
   transition_check
   need_identifier "--inc" "$opt_inc"
   require_increment
-  case "$opt_kind" in gate | review) ;; *) fail "$EXIT_USAGE" "--kind must be gate or review" ;; esac
+  case "$opt_kind" in gate | review | residual-risks) ;; *) fail "$EXIT_USAGE" "--kind must be gate, review or residual-risks" ;; esac
   case "$opt_result" in pass | fail) ;; *) fail "$EXIT_USAGE" "--result must be pass or fail" ;; esac
+  case "$opt_reviewer" in "" | qa | security) ;; *) fail "$EXIT_USAGE" "--reviewer must be qa or security" ;; esac
+  [ -z "$opt_reviewer" ] || [ "$opt_kind" = review ] || fail "$EXIT_USAGE" "--reviewer applies only to --kind review"
+  need_sha "--sha" "$opt_sha"
   check_text "--note" "$opt_note"
   mutate "$opt_kind evidence ($opt_result) for $opt_inc" "coordinator" \
-    '.increments |= map(if .id == $i then .evidence += [{kind: $kind, result: $result, at: $now, note: $note}] else . end)' \
-    --arg i "$opt_inc" --arg kind "$opt_kind" --arg result "$opt_result" --arg note "$opt_note"
+    '.increments |= map(if .id == $i then .evidence += [{kind: $kind, result: $result, at: $now, note: $note,
+        reviewer: (if $reviewer == "" then null else $reviewer end), sha: (if $sha == "" then null else ($sha | ascii_downcase) end)}] else . end)' \
+    --arg i "$opt_inc" --arg kind "$opt_kind" --arg result "$opt_result" --arg note "$opt_note" --arg reviewer "$opt_reviewer" --arg sha "$opt_sha"
   echo "evidence recorded"
+}
+
+cmd_increment_worktree() {
+  open_for_update
+  require_status increment-worktree "${active_statuses[@]}"
+  transition_check
+  need_identifier "--inc" "$opt_inc"
+  require_increment
+  need_branch "--branch" "$opt_branch"
+  holds --arg b "$opt_branch" '[.increments[] | .branch, (.worktreeBranches // [])[]] | any(.[]; . == $b) | not' \
+    || fail "$EXIT_INVALID_TRANSITION" "branch $opt_branch is already recorded as an increment or worktree branch"
+  mutate "worktree branch recorded for increment $opt_inc" "coordinator" \
+    '.increments |= map(if .id == $i then .worktreeBranches = ((.worktreeBranches // []) + [$b]) else . end)' \
+    --arg i "$opt_inc" --arg b "$opt_branch"
+  echo "worktree branch $opt_branch recorded for $opt_inc"
 }
 
 cmd_finding_add() {
@@ -1043,6 +1081,7 @@ case "$command_name" in
   increment-recovery) cmd_increment_recovery ;;
   raise-tier) cmd_raise_tier ;;
   evidence) cmd_evidence ;;
+  increment-worktree) cmd_increment_worktree ;;
   finding-add) cmd_finding_add ;;
   finding-fixed) cmd_finding_fixed ;;
   finding-invalid) cmd_finding_invalid ;;

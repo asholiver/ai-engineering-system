@@ -36,7 +36,7 @@ Commit the change before review. The command computes the diff itself (for examp
 | not configured | `EXTERNAL REVIEW: NOT CONFIGURED` | 3 |
 
 ## Rules
-- When not configured, the review report says `EXTERNAL REVIEW: NOT CONFIGURED` and the work is **not** marked ready for final human acceptance.
+- When not configured, the review report says `EXTERNAL REVIEW: NOT CONFIGURED`. At tiers 1 and 2 that is a non-pass: the work is **not** marked ready for final human acceptance, and the owner's merge approval does not substitute for it. At tier 0 external review is optional (see [readiness](architecture.md#readiness-work-003-c2)).
 - Missing external review never blocks implementation, local testing, normal commits, draft PRs or other engineering work.
 - Claude reviewing Claude (including the internal `security-reviewer` and `qa` agents) never substitutes for the external review.
 - The reviewer command runs with the user's credentials. Keep provider API keys in the user's environment or secret store, never in `gates.json`.

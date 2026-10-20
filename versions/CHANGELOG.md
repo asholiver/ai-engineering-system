@@ -27,6 +27,20 @@ Work-item lifecycle and delivery (WORK-002, ADR-0004).
 - `/setup` writes `worktree.baseRef: "head"` by default (opt-out documented; it also affects your own `claude --worktree` sessions) and gains v0.2 work-item import. The session banner shows the plugin version and root; check it after upgrading.
 - Spec template drops "Implementation state" and "Review state" and gains Increments, Delivery policy and Owner actions; specialist handoffs exclude the log and legacy sections.
 
+Readiness (WORK-003 C2, ADR-0005).
+- New `scripts/readiness.sh`: one deterministic readiness procedure that `/ai-engineering:review` runs (and `/ai-engineering:deliver` through it).
+  - Effective tier = max(state tier, classifier floor, action floor), and it never goes lower.
+  - It runs the full gate itself against the merge-base with `origin/<default>`, and runs the external review.
+- **Behaviour change:** `/ai-engineering:review` no longer takes a base ref, and reports the `READINESS` block.
+  - The block can say `NOT CERTIFIABLE`: trust or evidence is missing, ambiguous, malformed or untrusted. The effective tier is then 2 and READY is NO.
+  - It is certifiable only from the installed plugin that matches the project's pinned version and its release tag. This is a local consistency check, not cryptographic provenance.
+- **Behaviour change:** review depth now depends on the tier.
+  - External review is required at tiers 1 and 2, so `NOT CONFIGURED` means READY: NO there. It is optional at tier 0.
+  - Review evidence must name its reviewer and the commit it covers (`workstate.sh evidence --reviewer qa|security --sha`). Tier 2 also needs `--kind residual-risks`.
+- Action floor from the local guard log: any guard prompt or denial after the increment-start anchor raises the tier to 2. Only the exact start, resume and recorded worktree-merge commands are excluded. New command: `workstate.sh increment-worktree`.
+- The change classifier makes files named by hook commands in the base `.claude/settings.json` tier 2.
+- `workstate.sh` schema validation now fails closed if the validator itself cannot run.
+
 Security reviewer execution limits.
 - `security-reviewer` follows default execution limits: one simple command per Bash call, bounded inputs (no stress or oversized runs), probes only in an isolated scratch directory, no deletes, no running base or known-vulnerable versions without explicit authorisation, and no retrying a declined command in another form. `/ai-engineering:review` briefs the reviewer with them; exceptions need the owner's authorisation. These are procedural instructions, not a sandbox; the guard and hooks are unchanged.
 

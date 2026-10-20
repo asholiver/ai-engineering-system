@@ -407,7 +407,15 @@ End-to-end scenario in a scratch project (self-development protocol, evidence in
 - **Tests (C2):** the exact exclusions and near-miss commands; log rotation; malformed, missing, symlinked and anchor-less logs; tier-0 readiness (YES possible) and tier 1 and 2 with `NOT CONFIGURED` (NO); a state tier of 0 against a classifier floor of 2 gives 2; every fallback path. No READY: YES without every applicable requirement met.
 ## Open decisions
 - D1–D6 are resolved (see `WORK-001-planning.md`).
-- **Trusted-classifier rule (proposed 2026-10-20; owner approval needed before C2 starts).** Readiness trusts a classifier only when all of these hold, and otherwise uses the fallback above:
+- **Trusted-classifier rule: approved 2026-10-20 and strengthened (T-1).**
+  - Readiness itself must run from the selected registry entry's `installPath` (real paths compared).
+  - The *whole* installed plugin tree must match the tag's plugin directory in bytes and modes, ignoring only `.in_use/`. Extra files and links are not allowed.
+  - The known-marketplace source must equal the base-commit pin.
+  - Registry entries are strictly validated. Local, then project, then user scope; more than one entry at a scope is ambiguous and NOT CERTIFIABLE.
+  - Condition 4 below is subsumed by the `installPath` match.
+  - This establishes local consistency, not cryptographic provenance.
+
+  Original proposal (kept for the record): Readiness trusts a classifier only when all of these hold, and otherwise uses the fallback above:
   1. The installation is read from Claude Code's plugin registry (`installed_plugins.json` in the Claude Code config directory), never from `CLAUDE_PLUGIN_ROOT`, arguments or the repository: the `ai-engineering@ai-engineering-system` entry for this project (local scope for the repository root, else user scope).
   2. The installed version equals the version pinned at the base ref in the project's `.claude/settings.json` (`extraKnownMarketplaces.ai-engineering-system.source.ref` `v<version>`), and is at least 0.3.0. No pin means not trusted.
   3. The registry's `gitCommitSha` equals the commit that tag `v<version>` resolves to in the marketplace clone, and the installed `classify-change.sh` is byte-identical to the blob at that commit (Git object hash comparison).
@@ -423,6 +431,22 @@ End-to-end scenario in a scratch project (self-development protocol, evidence in
   - C1 owner decisions (2026-10-19): (1) under `docs/`, tier 0 only for recognised documentation and asset file types; other files there are tier 1 at least; (2) `role(s)` and `polic(y|ies)` added to the auth/permission word parts; `security` and `signin`/`signup` deferred pending Landra evidence; (3) see the requirement below; (4) Markdown additions containing destructive statements stay tier 2. Non-empty `.git/info/attributes` fails closed (tier 2, clear error, file never modified): accepted.
   - Requirement for the later readiness integration (not C1): readiness must run the trusted installed classifier (not the copy in the branch under review) against the merge-base of the head with `main`, never a caller-chosen base. It must also treat scripts referenced as hook commands in the base `.claude/settings.json` as tier 2 (security re-check; not C1).
   - C1 follow-ups (minor QA gaps, not in C1 scope): (a) done in PR #9 review: a test that `check.sh`'s documentation version step fails the gate; (b) no test pinning that only the two documented pin shapes are recognised; (c) destructive-statement detection is single-line only (documented in the script header).
+- Increment C2 (PR C; owner-authorised 2026-10-20; branch `feature/work-003-c2-readiness` from `a5e7796`; Scope items 2, 11, 12 and the two C1 readiness requirements). **Status:** implemented locally, not pushed; review pending.
+  - Built:
+    - `scripts/readiness.sh` (effective tier with the action floor, trust check, guard-log anchor and exact exclusions, the full gate run against the merge-base, external review, tier-dependent depth, the `READINESS` block);
+    - `workstate.sh`: evidence `--reviewer` and `--sha`, `residual-risks`, `increment-worktree`, and a validator that fails closed;
+    - `classify-change.sh`: base hook command targets are tier 2;
+    - `review` and `deliver` skills; docs; CHANGELOG.
+  - `GATE full: PASSED (exit 0) command: scripts/check.sh` (3636 passed, 0 failed).
+  - C2 resolves the C1 requirement above as merge-base with `origin/<default>` (from `origin/HEAD`), not a hard-coded `main`.
+  - Deferred to v0.3.x (owner decision 2026-10-20): per-task recomputation of the effective tier (C2 computes it only during readiness), and every item listed in "v0.3.0 scope and C2 design".
+  - Accepted limitations (owner decisions 2026-10-20):
+    - Guard-log writes killed by the guard's deadline can be lost silently, and the guard's logging is unchanged.
+    - The guard log and the evidence records are workflow records, neither complete nor tamper-proof.
+    - Any logged event after the anchor raises the tier, including denials and other sessions' events.
+    - Standalone `/review` without valid state and an anchor is NOT CERTIFIABLE and READY: NO.
+    - Trust is local consistency, not provenance.
+    - Readiness runs the full gate on every evaluation.
 ## Review state
 <!-- v0.2 review records its status block here. -->
 -

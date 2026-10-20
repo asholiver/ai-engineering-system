@@ -3917,6 +3917,69 @@ classify_git "$classifier_repository" config --unset diff.evil.textconv
 classify_git "$classifier_repository" checkout -q -f main
 rm -f "$classifier_repository/.gitattributes"
 
+# ---------------------------------------------------------------- WORK-003 C2: hook command targets in the classifier
+hook_repository="$(new_repository classifier-hooks main)"
+mkdir -p "$hook_repository/.claude" "$hook_repository/scripts" "$hook_repository/tools" "$hook_repository/src"
+cat >"$hook_repository/.claude/settings.json" <<'JSON'
+{"hooks": {"PostToolUse": [{"matcher": "Edit", "hooks": [
+  {"type": "command", "command": "\"$CLAUDE_PROJECT_DIR\"/scripts/format.sh --write && ./tools/lint.py; npx prettier $HOME/x.sh"}]}]},
+ "statusLine": {"type": "command", "command": "src/status.sh"}}
+JSON
+printf 'echo format\n' >"$hook_repository/scripts/format.sh"
+printf 'print(1)\n' >"$hook_repository/tools/lint.py"
+printf 'echo status\n' >"$hook_repository/src/status.sh"
+printf 'export const c = 1;\n' >"$hook_repository/src/c.ts"
+classify_git "$hook_repository" add -A
+classify_git "$hook_repository" commit -q -m seed
+scratch_commit "$hook_repository" scripts/format.sh
+classify_run "$hook_repository"
+expect_floor "classify hooks: a base hook command target is tier 2" 2 "$(floor_of)"
+expect_equal "classify hooks: reason names the hook target" "tier2:hook-target" "$(reasons_of scripts/format.sh both)"
+scratch_commit "$hook_repository" tools/lint.py
+classify_run "$hook_repository"
+expect_equal "classify hooks: a ./-relative hook target is tier 2" "2 tier2:hook-target" "$(floor_of) $(reasons_of tools/lint.py both)"
+scratch_commit "$hook_repository" src/c.ts
+classify_run "$hook_repository"
+expect_floor "classify hooks: an unreferenced file keeps its tier" 1 "$(floor_of)"
+scratch_commit "$hook_repository" src/status.sh
+classify_run "$hook_repository"
+expect_floor "classify hooks: a statusLine command is not a hook target" 1 "$(floor_of)"
+# Only the base settings count: a hook added on the branch does not name its own target.
+classify_git "$hook_repository" checkout -q -f -B scratch main
+jq '.hooks.PreToolUse = [{"matcher": "Bash", "hooks": [{"type": "command", "command": "src/c.ts"}]}]' "$hook_repository/.claude/settings.json" >"$work_directory/branch-settings.json"
+cp "$work_directory/branch-settings.json" "$hook_repository/.claude/settings.json"
+printf 'changed\n' >>"$hook_repository/src/c.ts"
+classify_git "$hook_repository" add -A
+classify_git "$hook_repository" commit -q -m scratch
+classify_run "$hook_repository"
+expect_equal "classify hooks: a branch-only hook does not mark its target" "1" "$(tier_of src/c.ts both)"
+# Case variants match, as for the built-in rules.
+case_repository="$(new_repository classifier-hooks-case main)"
+mkdir -p "$case_repository/.claude" "$case_repository/scripts"
+printf '%s\n' '{"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "Scripts/Format.sh"}]}]}}' >"$case_repository/.claude/settings.json"
+printf 'echo\n' >"$case_repository/scripts/format.sh"
+classify_git "$case_repository" add -A
+classify_git "$case_repository" commit -q -m seed
+scratch_commit "$case_repository" scripts/format.sh
+classify_run "$case_repository"
+expect_equal "classify hooks: a case variant of a hook target is tier 2" "2" "$(tier_of scripts/format.sh both)"
+# A malformed base settings file is a classifier error, never a silent pass.
+malformed_repository="$(new_repository classifier-hooks-malformed main)"
+mkdir -p "$malformed_repository/.claude" "$malformed_repository/src"
+printf '{"hooks": [}\n' >"$malformed_repository/.claude/settings.json"
+printf 'x\n' >"$malformed_repository/src/a.ts"
+classify_git "$malformed_repository" add -A
+classify_git "$malformed_repository" commit -q -m seed
+scratch_commit "$malformed_repository" src/a.ts
+classify_run "$malformed_repository"
+expect_equal "classify hooks: malformed base settings is a classifier error" "3 2" "$classify_status $(floor_of)"
+classify_git "$malformed_repository" checkout -q -f main
+printf '%s\n' '{"hooks": []}' >"$malformed_repository/.claude/settings.json"
+classify_git "$malformed_repository" commit -q -am "hooks array"
+scratch_commit "$malformed_repository" src/a.ts
+classify_run "$malformed_repository"
+expect_equal "classify hooks: a non-object hooks value is a classifier error" "3 2" "$classify_status $(floor_of)"
+
 # ---------------------------------------------------------------- WORK-003 C1: release consistency check
 version_check() { bash "$repository_directory/scripts/check-doc-versions.sh" "$@"; }
 new_version_fixture() {
@@ -4553,6 +4616,30 @@ jq '.status = "levitating"' "$(state_path)" >"$work_directory/bad-status.json"
 cp "$work_directory/bad-status.json" "$(state_path)"
 run_ws pause "$ws_id"
 expect_ws "an unknown status fails schema validation" 5
+new_item delivering
+jq '.increments[0].worktreeBranches = "work/x"' "$(state_path)" >"$work_directory/bad-worktrees.json"
+cp "$work_directory/bad-worktrees.json" "$(state_path)"
+run_ws status "$ws_id"
+expect_ws "worktree branches that are not a list of names fail schema validation" 5
+new_item delivering
+run_ws increment-worktree "$ws_id" --inc I1 --branch work/WORK-1-I1-T1
+expect_ws "increment-worktree records a worktree branch" 0
+expect_equal "increment-worktree: the branch is listed" '["work/WORK-1-I1-T1"]' "$(state_value '.increments[0].worktreeBranches' | jq -c .)"
+run_ws increment-worktree "$ws_id" --inc I1 --branch work/WORK-1-I1-T1
+expect_ws "increment-worktree: a branch is recorded only once" 3
+# shellcheck disable=SC2016 # the literal text $(id) is an injection-shaped branch name under test
+for bad_branch in "work/../x" "work//x" "-x" "work/x.lock" "work/.x" "work x" 'work/$(id)'; do
+  run_ws increment-worktree "$ws_id" --inc I1 --branch "$bad_branch"
+  expect_ws "increment-worktree: refuses branch '$bad_branch'" 2
+done
+run_ws evidence "$ws_id" --inc I1 --kind review --reviewer qa --result pass --sha abc1234
+expect_equal "evidence: reviewer and sha are recorded" "qa abc1234" "$(state_value '.increments[0].evidence[-1] | "\(.reviewer) \(.sha)"')"
+run_ws evidence "$ws_id" --inc I1 --kind gate --reviewer qa --result pass
+expect_ws "evidence: a reviewer applies only to review evidence" 2
+run_ws evidence "$ws_id" --inc I1 --kind review --reviewer external --result pass
+expect_ws "evidence: external review is never recorded as review evidence" 2
+run_ws evidence "$ws_id" --inc I1 --kind residual-risks --result pass --sha "not a sha"
+expect_ws "evidence: a malformed sha is refused" 2
 new_item proposed
 jq '.approval = {"by": "x"}' "$(state_path)" >"$work_directory/bad-approval.json"
 cp "$work_directory/bad-approval.json" "$(state_path)"
@@ -4918,6 +5005,24 @@ expect_contains "skill deliver: increment start is one switch from the remote de
 review_text="$(cat "$plugin_directory/skills/review/SKILL.md")"
 expect_contains "skill review: items with state are recorded as evidence, not in the spec" "never edit the spec" "$review_text"
 expect_contains "skill review: items with state use workstate.sh evidence" "workstate.sh evidence" "$review_text"
+# WORK-003 C2: one deterministic readiness procedure.
+expect_contains "skill review: runs the readiness script" 'scripts/readiness.sh" <WORK-ID> --inc <increment-id>' "$review_text"
+expect_contains "skill review: never replaces readiness lines with judgement" "Never replace any of its lines with your own judgement" "$review_text"
+expect_contains "skill review: base is the merge-base, never chosen" "never a chosen ref" "$review_text"
+expect_contains "skill review: evidence names reviewer and commit" "--reviewer qa|security --result pass|fail --sha <commit>" "$review_text"
+expect_contains "skill review: tier-2 residual-risk list" "--kind residual-risks" "$review_text"
+expect_contains "skill review: NOT CERTIFIABLE differs from tier 2" "it is not the same as a valid tier-2 classification" "$review_text"
+expect_contains "skill review: external review required at tiers 1 and 2" "External review is required at tiers 1 and 2" "$review_text"
+expect_contains "skill review: nothing substitutes for external review" "Owner merge approval, Opus or QA reviews never substitute for it" "$review_text"
+case "$review_text" in *"run-gate.sh\" full . <base>"*) fail "skill review: the gate must not be run against a chosen base" ;; *) pass ;; esac
+expect_contains "skill deliver: records worktree branches" "workstate.sh increment-worktree --inc <id> --branch <worktree-branch>" "$deliver_text"
+# shellcheck disable=SC2016 # the literal backticks are what the skill must contain
+expect_contains "skill deliver: exact worktree merge command" 'merge each with exactly `git merge --no-edit <worktree-branch>`' "$deliver_text"
+# shellcheck disable=SC2016 # the literal backticks are what the skill must contain
+expect_contains "skill deliver: exact resume command" 'use exactly `git switch <work-branch>`' "$deliver_text"
+expect_contains "skill deliver: other forms raise the tier" "any other form, and every other guard prompt, raises the increment to tier 2" "$deliver_text"
+expect_contains "skill deliver: review evidence names reviewer and commit" "--reviewer qa|security --sha <commit>" "$deliver_text"
+expect_contains "skill deliver: reports NOT CERTIFIABLE as it is" "Report NOT CERTIFIABLE and READY: NO as they are" "$deliver_text"
 
 work_spec_template="$plugin_directory/skills/plan/templates/work-spec.md"
 for template_section in "## Increments" "## Delivery policy" "## Owner actions"; do
@@ -5097,6 +5202,402 @@ for bad_arguments in "checks" "bogus 12" "merge abc1234" "checks 12;id" 'checks 
   run_wait "${fast_wait[@]}" $bad_arguments
   expect_equal "wait: usage error for '$bad_arguments'" 2 "$wait_status"
 done
+
+# ---------------------------------------------------------------- WORK-003 C2: readiness
+# Fixtures: a Claude Code config directory (plugin registry and known marketplaces), a
+# marketplace clone whose tag holds this plugin, the installed copy readiness runs from, and a
+# project with a local bare remote. Every scenario runs the installed readiness.sh.
+readiness_root="$work_directory/readiness"
+mkdir -p "$readiness_root"
+readiness_git() { git -C "$1" -c user.name=test -c user.email=test@example.com "${@:2}" </dev/null; }
+text_sha256() { if command -v shasum >/dev/null 2>&1; then printf '%s' "$1" | shasum -a 256 | cut -d' ' -f1; else printf '%s' "$1" | sha256sum | cut -d' ' -f1; fi; }
+readiness_version="$(jq -r .version "$plugin_directory/.claude-plugin/plugin.json")"
+expect_equal "readiness: guard-log cap matches guard-bash.sh" \
+  "$(sed -n 's/^log_max_bytes=\([0-9]*\).*/\1/p' "$scripts/guard-bash.sh")" \
+  "$(sed -n 's/^guard_log_cap=\([0-9]*\).*/\1/p' "$scripts/readiness.sh")"
+
+marketplace_clone="$readiness_root/marketplace"
+mkdir -p "$marketplace_clone/.claude-plugin" "$marketplace_clone/plugins"
+cp -R "$plugin_directory" "$marketplace_clone/plugins/ai-engineering"
+cp "$repository_directory/.claude-plugin/marketplace.json" "$marketplace_clone/.claude-plugin/marketplace.json"
+readiness_git "$marketplace_clone" init -q -b main
+readiness_git "$marketplace_clone" add -A
+readiness_git "$marketplace_clone" commit -q -m release
+readiness_git "$marketplace_clone" tag "v$readiness_version"
+marketplace_commit="$(readiness_git "$marketplace_clone" rev-parse HEAD)"
+install_directory="$readiness_root/cache/ai-engineering/$readiness_version"
+mkdir -p "$install_directory"
+cp -R "$marketplace_clone/plugins/ai-engineering/." "$install_directory/"
+mkdir -p "$install_directory/.in_use"
+printf '1\n' >"$install_directory/.in_use/4242"
+installed_readiness="$install_directory/scripts/readiness.sh"
+
+config_directory="$readiness_root/config"
+mkdir -p "$config_directory/plugins"
+write_registry() { # entries JSON array
+  jq -n --argjson entries "$1" '{version: 2, plugins: {"ai-engineering@ai-engineering-system": $entries}}' >"$config_directory/plugins/installed_plugins.json"
+}
+user_entry() { # [install path] [version] [commit]
+  jq -n -c --arg path "${1:-$install_directory}" --arg version "${2:-$readiness_version}" --arg commit "${3:-$marketplace_commit}" \
+    '{scope: "user", installPath: $path, version: $version, gitCommitSha: $commit, installedAt: "2026-10-20T00:00:00Z"}'
+}
+write_known() { # ref
+  jq -n --arg ref "${1:-v$readiness_version}" --arg location "$marketplace_clone" \
+    '{"ai-engineering-system": {source: {source: "github", repo: "asholiver/ai-engineering-system", ref: $ref}, installLocation: $location, autoUpdate: false}}' \
+    >"$config_directory/plugins/known_marketplaces.json"
+}
+reset_trust() { write_registry "[$(user_entry)]"; write_known; }
+reset_trust
+
+ws_ready() { (cd "$readiness_project" && "$install_directory/scripts/workstate.sh" "$@"); }
+guard_event() { # decision command session [time]
+  jq -n -c --arg time "${4:-2000-01-01T00:00:01Z}" --arg decision "$1" --arg sha "$(text_sha256 "$2")" --arg session "$3" \
+    '{time: $time, sessionId: $session, agentType: null, decision: $decision, classes: ["fixture-class"], parseMode: "parsed", commandSha256: $sha}'
+}
+guard_log_file() { printf '%s/.git/ai-engineering/guard-log.jsonl' "$readiness_project"; }
+start_command="git switch -c work/WORK-001-I1 origin/main"
+reset_guard_log() {
+  rm -rf "$readiness_project/.git/ai-engineering"
+  mkdir -p "$readiness_project/.git/ai-engineering"
+  guard_event ask "$start_command" coordinator 2000-01-01T00:00:00Z >"$(guard_log_file)"
+}
+
+# Builds a project on main (pin, gates, spec, state), pushes it, and starts increment I1 on
+# its work branch with one tier-0 README change and QA evidence for that commit.
+build_readiness_project() { # name external-review-json state-tier [full-gate-command]
+  readiness_project="$readiness_root/$1"
+  git init -q --bare "$readiness_root/$1.git"
+  git init -q -b main "$readiness_project"
+  mkdir -p "$readiness_project/.claude" "$readiness_project/.agents/specs/active"
+  jq -n --arg ref "v$readiness_version" '{extraKnownMarketplaces: {"ai-engineering-system": {source: {source: "github", repo: "asholiver/ai-engineering-system", ref: $ref}, autoUpdate: false}}, enabledPlugins: {"ai-engineering@ai-engineering-system": true}}' \
+    >"$readiness_project/.claude/settings.json"
+  jq -n --argjson external "$2" --arg full "${4:-true}" '{fast: "true", full: $full, externalReview: $external}' >"$readiness_project/.agents/gates.json"
+  printf '# WORK-001 readiness fixture\n## Status\nDraft\n## Objective\nReadiness fixture.\n' >"$readiness_project/.agents/specs/active/WORK-001.md"
+  printf '# Project\n' >"$readiness_project/README.md"
+  printf '{"name": "fixture"}\n' >"$readiness_project/package.json"
+  ws_ready create WORK-001 >/dev/null
+  ws_ready increment-add WORK-001 --inc I1 --title One --tier "$3" >/dev/null
+  readiness_git "$readiness_project" add -A
+  readiness_git "$readiness_project" commit -q -m seed
+  readiness_git "$readiness_project" remote add origin "$readiness_root/$1.git"
+  readiness_git "$readiness_project" push -q origin main
+  readiness_git "$readiness_project" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+  ws_ready approve WORK-001 spec --owner-command approve >/dev/null
+  ws_ready deliver WORK-001 --owner-command deliver >/dev/null
+  readiness_git "$readiness_project" switch -q -c work/WORK-001-I1 origin/main
+  ws_ready increment-set WORK-001 --inc I1 --status active --branch work/WORK-001-I1 >/dev/null
+  commit_change README.md
+  ws_ready evidence WORK-001 --inc I1 --kind review --reviewer qa --result pass --sha "$(readiness_git "$readiness_project" rev-parse HEAD)" >/dev/null
+  reset_guard_log
+}
+commit_change() { # path...: appends a line to each path and commits only those paths
+  local changed_path
+  for changed_path in "$@"; do printf 'more\n' >>"$readiness_project/$changed_path"; done
+  readiness_git "$readiness_project" add -- "$@"
+  readiness_git "$readiness_project" commit -q -m change
+}
+record_review() { # reviewer|residual-risks: passing evidence for HEAD
+  if [ "$1" = residual-risks ]; then
+    ws_ready evidence WORK-001 --inc I1 --kind residual-risks --result pass --sha "$(readiness_git "$readiness_project" rev-parse HEAD)" >/dev/null
+  else
+    ws_ready evidence WORK-001 --inc I1 --kind review --reviewer "$1" --result pass --sha "$(readiness_git "$readiness_project" rev-parse HEAD)" >/dev/null
+  fi
+}
+run_readiness() { # [readiness script]
+  readiness_output="$(CLAUDE_CONFIG_DIR="$config_directory" "${1:-$installed_readiness}" WORK-001 --inc I1 "$readiness_project" 2>&1)"
+  readiness_status=$?
+}
+readiness_line() { printf '%s\n' "$readiness_output" | grep "^$1" | head -n 1; }
+expect_not_certifiable() { # label reason-fragment
+  expect_equal "$1: exit 3 (not certifiable)" 3 "$readiness_status"
+  expect_equal "$1: effective tier 2, marked not certifiable" "EFFECTIVE TIER: 2 (NOT CERTIFIABLE)" "$(readiness_line "EFFECTIVE TIER:")"
+  expect_contains "$1: names the reason" "$2" "$(readiness_line "CERTIFIABLE:")"
+  expect_contains "$1: READY NO" "READY: NO" "$(readiness_line "READY:")"
+}
+expect_ready_yes() { # label
+  expect_equal "$1: exit 0" 0 "$readiness_status"
+  expect_equal "$1: READY YES" "READY: YES" "$(readiness_line "READY:")"
+  expect_equal "$1: certifiable" "CERTIFIABLE: YES" "$(readiness_line "CERTIFIABLE:")"
+}
+
+# --- baseline: a genuinely tier-0 increment is READY: YES without an external reviewer
+build_readiness_project tier0 null 0
+run_readiness
+expect_ready_yes "readiness tier 0"
+expect_contains "readiness tier 0: trusted install" "TRUST: TRUSTED - ai-engineering $readiness_version at ${marketplace_commit:0:12}" "$readiness_output"
+expect_equal "readiness tier 0: classified tier 0" "EFFECTIVE TIER: 0 (classified)" "$(readiness_line "EFFECTIVE TIER:")"
+expect_contains "readiness tier 0: the gate ran from the base config" "GATE full: PASSED" "$readiness_output"
+expect_contains "readiness tier 0: external review optional and not configured" "EXTERNAL REVIEW: NOT CONFIGURED (optional at tier 0)" "$readiness_output"
+expect_contains "readiness tier 0: the anchor was found" "GUARD LOG: anchor at 2000-01-01T00:00:00Z; 0 raising event(s)" "$readiness_output"
+
+# --- trust: each failure alone is NOT CERTIFIABLE, tier 2, READY NO
+run_readiness "$plugin_directory/scripts/readiness.sh"
+expect_not_certifiable "trust: running from the repository copy" "not running from the installed plugin"
+rm "$config_directory/plugins/installed_plugins.json"
+run_readiness
+expect_not_certifiable "trust: registry missing" "plugin registry is missing"
+printf '{"plugins": [}\n' >"$config_directory/plugins/installed_plugins.json"
+run_readiness
+expect_not_certifiable "trust: registry malformed" "plugin registry is missing, unreadable or malformed"
+write_registry "[$(user_entry), $(user_entry)]"
+run_readiness
+expect_not_certifiable "trust: two user installs are ambiguous" "more than one user-scope install"
+write_registry "[$(user_entry | jq -c 'del(.gitCommitSha)')]"
+run_readiness
+expect_not_certifiable "trust: an entry missing its commit" "no valid ai-engineering@ai-engineering-system entries"
+write_registry "[$(user_entry "$install_directory" 0.2.9)]"
+run_readiness
+expect_not_certifiable "trust: an installed version below 0.3.0" "older than 0.3.0"
+write_registry "[$(user_entry "$install_directory" "$readiness_version" 0000000000000000000000000000000000000000)]"
+run_readiness
+expect_not_certifiable "trust: the recorded commit is not the tag" "does not resolve to the recorded commit"
+write_registry "[$(user_entry), $(jq -n -c --arg p "$readiness_project" --arg c "$marketplace_commit" --arg v "$readiness_version" '{scope: "local", projectPath: $p, installPath: "/nonexistent/install", version: $v, gitCommitSha: $c}')]"
+run_readiness
+expect_not_certifiable "trust: a local-scope install for this project takes precedence" "installed plugin directory does not exist"
+write_registry "[$(user_entry), $(jq -n -c --arg c "$marketplace_commit" --arg v "$readiness_version" '{scope: "local", projectPath: "/some/other/project", installPath: "/nonexistent/install", version: $v, gitCommitSha: $c}')]"
+run_readiness
+expect_ready_yes "trust: a local install for another project does not apply"
+reset_trust
+write_known v0.0.1
+run_readiness
+expect_not_certifiable "trust: the known marketplace source differs from the pin" "known marketplace source does not equal the project pin"
+reset_trust
+cp "$install_directory/skills/review/SKILL.md" "$readiness_root/review-backup.md"
+printf 'tampered\n' >>"$install_directory/skills/review/SKILL.md"
+run_readiness
+expect_not_certifiable "trust: an installed file differs from the tag" "installed file differs from the tag: skills/review/SKILL.md"
+cp "$readiness_root/review-backup.md" "$install_directory/skills/review/SKILL.md"
+chmod +x "$install_directory/skills/review/SKILL.md"
+run_readiness
+expect_not_certifiable "trust: an installed file mode differs from the tag" "installed file mode differs from the tag: skills/review/SKILL.md"
+chmod -x "$install_directory/skills/review/SKILL.md"
+printf 'extra\n' >"$install_directory/scripts/extra.sh"
+run_readiness
+expect_not_certifiable "trust: an extra installed file" "files that are not in the tag"
+rm "$install_directory/scripts/extra.sh"
+ln -s "$install_directory/README.md" "$install_directory/scripts/linked.sh"
+run_readiness
+expect_not_certifiable "trust: a symbolic link in the install" "symbolic link"
+rm "$install_directory/scripts/linked.sh"
+run_readiness
+expect_ready_yes "trust: restored fixtures are trusted again"
+
+# --- guard log: anchors, exact exclusions, rotation, missing and malformed evidence
+reset_guard_log
+guard_event deny "rm -rf /tmp/x" other-session >>"$(guard_log_file)"
+run_readiness
+expect_equal "guard log: a deny after the anchor (other session) is classified, not uncertifiable" "1 EFFECTIVE TIER: 2 (classified)" "$readiness_status $(readiness_line "EFFECTIVE TIER:")"
+expect_contains "guard log: the deny raises the action floor" "ACTION FLOOR: 2 (guard log: deny [fixture-class] session other-session)" "$readiness_output"
+expect_contains "guard log: tier 2 needs external review, which is not configured" "external review is required at tier 2 and did not pass (NOT CONFIGURED)" "$readiness_output"
+reset_guard_log
+guard_event ask "git switch work/WORK-001-I1" coordinator >>"$(guard_log_file)"
+guard_event ask "$start_command" coordinator >>"$(guard_log_file)"
+run_readiness
+expect_ready_yes "guard log: exact resume and repeated start confirmations are excluded"
+expect_contains "guard log: two exclusions counted" "0 raising event(s), 2 excluded" "$readiness_output"
+for near_miss in "git switch  work/WORK-001-I1" "git switch -c work/WORK-001-I1 origin/main " "git switch work/WORK-001-I2" "cd . && git switch work/WORK-001-I1" "git checkout work/WORK-001-I1" "git merge --no-edit work/WORK-001-I1-T1"; do
+  reset_guard_log
+  guard_event ask "$near_miss" coordinator >>"$(guard_log_file)"
+  run_readiness
+  expect_equal "guard log: near miss '$near_miss' raises the floor" "ACTION FLOOR: 2" "$(readiness_line "ACTION FLOOR:" | cut -c1-15)"
+done
+reset_guard_log
+guard_event deny "git switch work/WORK-001-I1" coordinator >>"$(guard_log_file)"
+run_readiness
+expect_equal "guard log: a denied resume command is not excluded" "ACTION FLOOR: 2" "$(readiness_line "ACTION FLOOR:" | cut -c1-15)"
+ws_ready increment-worktree WORK-001 --inc I1 --branch work/WORK-001-I1-T1 >/dev/null
+reset_guard_log
+guard_event ask "git merge --no-edit work/WORK-001-I1-T1" coordinator >>"$(guard_log_file)"
+run_readiness
+expect_ready_yes "guard log: the exact merge of a recorded worktree branch is excluded"
+reset_guard_log
+guard_event ask "git merge --no-edit work/WORK-001-I1-T2" coordinator >>"$(guard_log_file)"
+run_readiness
+expect_equal "guard log: a merge of an unrecorded branch raises the floor" "ACTION FLOOR: 2" "$(readiness_line "ACTION FLOOR:" | cut -c1-15)"
+# Events before the anchor are outside the window; malformed lines there are ignored.
+mkdir -p "$readiness_project/.git/ai-engineering"
+{
+  guard_event deny "rm -rf /" earlier-session 1999-12-31T23:59:59Z
+  printf '{"truncated": \n'
+  guard_event ask "$start_command" coordinator 2000-01-01T00:00:00Z
+} >"$(guard_log_file)"
+run_readiness
+expect_ready_yes "guard log: events and malformed lines before the anchor are ignored"
+reset_guard_log
+printf 'not json\n' >>"$(guard_log_file)"
+run_readiness
+expect_not_certifiable "guard log: a malformed line after the anchor" "malformed line after the increment-start anchor"
+reset_guard_log
+printf '{"time": "2000-01-01T00:00:02Z", "decision": "ask"' >>"$(guard_log_file)"
+run_readiness
+expect_not_certifiable "guard log: a truncated final line after the anchor" "malformed line after the increment-start anchor"
+reset_guard_log
+printf '%s\n' '{"time": "2000-01-01T00:00:02Z", "decision": "allow", "classes": [], "commandSha256": "x"}' >>"$(guard_log_file)"
+run_readiness
+expect_not_certifiable "guard log: an event with an unknown decision" "malformed line after the increment-start anchor"
+rm -rf "$readiness_project/.git/ai-engineering"
+run_readiness
+expect_not_certifiable "guard log: no log directory" "the log directory is missing"
+mkdir -p "$readiness_project/.git/ai-engineering"
+run_readiness
+expect_not_certifiable "guard log: no log file" "guard-log.jsonl is missing"
+guard_event ask "git status" coordinator >"$(guard_log_file)"
+run_readiness
+expect_not_certifiable "guard log: no anchor" "no increment-start anchor"
+guard_event ask "$start_command" coordinator 2999-01-01T00:00:00Z >"$(guard_log_file)"
+run_readiness
+expect_not_certifiable "guard log: an anchor later than activeAt" "no increment-start anchor"
+guard_event ask "$(printf '%s' "$start_command" | sed 's/WORK-001-I1/WORK-001-I9/')" coordinator 2000-01-01T00:00:00Z >"$(guard_log_file)"
+run_readiness
+expect_not_certifiable "guard log: another increment's start is not this anchor" "no increment-start anchor"
+reset_guard_log
+mv "$(guard_log_file)" "$readiness_root/real-log.jsonl"
+ln -s "$readiness_root/real-log.jsonl" "$(guard_log_file)"
+run_readiness
+expect_not_certifiable "guard log: a linked log file" "guard-log.jsonl is missing, unreadable or not a regular file"
+rm "$(guard_log_file)"
+# Rotation: the anchor in guard-log.jsonl.1 still anchors; events in the newer file count.
+reset_guard_log
+mv "$(guard_log_file)" "$(guard_log_file).1"
+guard_event ask "git status" coordinator >"$(guard_log_file)"
+run_readiness
+expect_equal "guard log rotation: an event after a rotated anchor raises the floor" "1 ACTION FLOOR: 2" "$readiness_status $(readiness_line "ACTION FLOOR:" | cut -c1-15)"
+reset_guard_log
+mv "$(guard_log_file)" "$(guard_log_file).1"
+: >"$(guard_log_file)"
+run_readiness
+expect_ready_yes "guard log rotation: a rotated anchor with nothing after it"
+reset_guard_log
+guard_event ask "git status" coordinator >"$(guard_log_file).1"
+guard_event ask "git status" coordinator >"$(guard_log_file)"
+run_readiness
+expect_not_certifiable "guard log rotation: an anchor rotated away" "no increment-start anchor"
+reset_guard_log
+mkdir "$(guard_log_file).1"
+run_readiness
+expect_not_certifiable "guard log rotation: a rotated file that is not a regular file" "guard-log.jsonl.1 is unreadable or not a regular file"
+reset_guard_log
+head -c 2095000 /dev/zero | tr '\0' 'x' >>"$(guard_log_file)"
+run_readiness
+expect_not_certifiable "guard log: a log near the guard's drop size" "near the size at which the guard drops lines"
+reset_guard_log
+
+# --- action floor from a trigger-2 decision
+ws_ready decision WORK-001 --trigger 2 --question "add a dependency?" --answer "yes" >/dev/null
+run_readiness
+expect_contains "action floor: a trigger-2 decision raises it" "ACTION FLOOR: 2 (trigger-2 decision D1)" "$readiness_output"
+expect_equal "action floor: classified tier 2" "EFFECTIVE TIER: 2 (classified)" "$(readiness_line "EFFECTIVE TIER:")"
+
+# --- state, repository and evidence conditions
+build_readiness_project tier0-state null 0
+printf 'untracked\n' >"$readiness_project/notes.txt"
+run_readiness
+expect_not_certifiable "readiness: an untracked file" "uncommitted changes in the working tree (notes.txt)"
+rm "$readiness_project/notes.txt"
+readiness_git "$readiness_project" switch -q --detach HEAD
+run_readiness
+expect_not_certifiable "readiness: a detached HEAD" "HEAD is detached"
+readiness_git "$readiness_project" switch -q work/WORK-001-I1
+readiness_git "$readiness_project" symbolic-ref --delete refs/remotes/origin/HEAD
+run_readiness
+expect_not_certifiable "readiness: no origin/HEAD" "origin/HEAD is not set"
+readiness_git "$readiness_project" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+readiness_output="$(CLAUDE_CONFIG_DIR="$config_directory" "$installed_readiness" WORK-001 --inc I9 "$readiness_project" 2>&1)"
+readiness_status=$?
+expect_not_certifiable "readiness: an unknown increment" "increment I9 does not exist exactly once"
+readiness_output="$(CLAUDE_CONFIG_DIR="$config_directory" "$installed_readiness" WORK-002 --inc I1 "$readiness_project" 2>&1)"
+readiness_status=$?
+expect_not_certifiable "readiness: standalone use without state" "no valid work-item state for WORK-002"
+printf 'edited\n' >>"$readiness_project/.agents/specs/active/WORK-001.md"
+readiness_git "$readiness_project" add -A .agents/specs/active/WORK-001.md
+readiness_git "$readiness_project" commit -q -m "spec edit"
+run_readiness
+expect_not_certifiable "readiness: a spec changed since approval" "spec does not match its approved hash"
+for bad_arguments in "" "WORK-1" "WORK-001" "WORK-001 --inc" "WORK-001 --inc ../x" "WORK-001 --inc I1 --bogus"; do
+  # shellcheck disable=SC2086 # intentional word splitting of the table entry
+  "$installed_readiness" $bad_arguments >/dev/null 2>&1
+  expect_equal "readiness: usage error for '$bad_arguments'" 2 "$?"
+done
+
+build_readiness_project tier0-evidence null 0
+commit_change README.md
+run_readiness
+expect_equal "evidence: QA for an older commit is stale" "1 QA (internal): STALE" "$readiness_status $(readiness_line "QA (internal):")"
+record_review qa
+run_readiness
+expect_ready_yes "evidence: QA recorded for HEAD"
+ws_ready evidence WORK-001 --inc I1 --kind review --result pass --sha "$(readiness_git "$readiness_project" rev-parse HEAD)" >/dev/null
+run_readiness
+expect_ready_yes "evidence: a later review without a reviewer does not replace QA"
+ws_ready evidence WORK-001 --inc I1 --kind review --reviewer qa --result fail --sha "$(readiness_git "$readiness_project" rev-parse HEAD)" >/dev/null
+run_readiness
+expect_equal "evidence: the latest QA result failing is READY NO" "1 QA (internal): FAILED" "$readiness_status $(readiness_line "QA (internal):")"
+record_review qa
+ws_ready finding-add WORK-001 --finding F1 --source qa --severity low --summary "open" >/dev/null
+run_readiness
+expect_equal "records: an open finding is READY NO" "1" "$readiness_status"
+expect_contains "records: the open finding is the reason" "1 open finding(s)" "$(readiness_line "READY:")"
+ws_ready finding-fixed WORK-001 --finding F1 --sha "$(readiness_git "$readiness_project" rev-parse HEAD)" >/dev/null
+ws_ready propose WORK-001 --question "also a CHANGELOG?" >/dev/null
+run_readiness
+expect_ready_yes "records: an open scope proposal is listed but does not block"
+expect_contains "records: the proposal is listed" "OPEN DECISIONS AND PROPOSALS: D1 (proposal)" "$readiness_output"
+ws_ready block WORK-001 --trigger 5 --question "which reading?" >/dev/null
+run_readiness
+expect_equal "records: a blocked item is READY NO" "1" "$readiness_status"
+expect_contains "records: the open blocking decision is a reason" "1 open blocking decision(s)" "$(readiness_line "READY:")"
+
+# --- effective tier: the state tier never lowers the classifier floor
+build_readiness_project tier-floor null 0
+commit_change package.json
+record_review qa
+run_readiness
+expect_equal "effective tier: state tier 0 with classifier floor 2 is tier 2" "EFFECTIVE TIER: 2 (classified)" "$(readiness_line "EFFECTIVE TIER:")"
+expect_contains "effective tier: the classifier names the dependency" "CLASSIFIER FLOOR: 2 (tier0:markdown, tier2:dependency)" "$readiness_output"
+expect_contains "effective tier: tier 2 needs security evidence" "security review evidence covering HEAD is MISSING" "$(readiness_line "READY:")"
+expect_contains "effective tier: tier 2 needs a residual-risk list" "the residual-risk list covering HEAD is MISSING" "$(readiness_line "READY:")"
+expect_contains "effective tier: tier 2 needs external review" "external review is required at tier 2" "$(readiness_line "READY:")"
+
+# --- tiers 1 and 2 with a configured external reviewer
+build_readiness_project tier1-external '"true"' 1
+run_readiness
+expect_ready_yes "tier 1: READY YES with QA and a passing external review"
+expect_contains "tier 1: external review required" "EXTERNAL REVIEW: PASSED (required at tier 1)" "$readiness_output"
+build_readiness_project tier1-unconfigured null 1
+run_readiness
+expect_equal "tier 1: NOT CONFIGURED external review is READY NO" "1" "$readiness_status"
+expect_contains "tier 1: the external reason" "external review is required at tier 1 and did not pass (NOT CONFIGURED)" "$(readiness_line "READY:")"
+build_readiness_project tier2-external '"true"' 0
+commit_change package.json
+record_review qa
+record_review security
+run_readiness
+expect_equal "tier 2: READY NO without the residual-risk list" "1" "$readiness_status"
+record_review residual-risks
+run_readiness
+expect_ready_yes "tier 2: READY YES with QA, security, residual risks and a passing external review"
+build_readiness_project tier2-reviewer-fails '"exit 1"' 0
+commit_change package.json
+record_review qa
+record_review security
+record_review residual-risks
+run_readiness
+expect_contains "tier 2: blocking external findings are READY NO" "did not pass (BLOCKING FINDINGS)" "$(readiness_line "READY:")"
+build_readiness_project gate-fails null 0 false
+run_readiness
+expect_equal "gate: a failing full gate is READY NO" "1" "$readiness_status"
+expect_contains "gate: the failing verdict is reported" "GATE full: FAILED" "$readiness_output"
+expect_contains "gate: the failure is a reason" "the full gate did not pass" "$(readiness_line "READY:")"
+build_readiness_project gate-redefined null 0
+jq '.full = "false"' "$readiness_project/.agents/gates.json" >"$readiness_root/gates.json"
+cp "$readiness_root/gates.json" "$readiness_project/.agents/gates.json"
+readiness_git "$readiness_project" add .agents/gates.json
+readiness_git "$readiness_project" commit -q -m "gate on the branch only"
+record_review qa
+run_readiness
+expect_contains "gate: the base gate certifies, not the branch's" "GATE full: PASSED" "$readiness_output"
+expect_contains "gate: a change to the gate is READY NO" "the change modifies the full gate" "$(readiness_line "READY:")"
+expect_contains "gate: the gate change is classified tier 2" "tier2:gates" "$(readiness_line "CLASSIFIER FLOOR:")"
 
 # ---------------------------------------------------------------- inject-standards
 output="$(CLAUDE_PLUGIN_ROOT="$repository_directory/plugins/ai-engineering" "$scripts/inject-standards.sh")"

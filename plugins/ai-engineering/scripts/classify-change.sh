@@ -27,7 +27,7 @@
 # Reason identifiers (stable):
 #   tier2:auth tier2:migration tier2:sql tier2:destructive-sql tier2:ci tier2:iac
 #   tier2:secrets tier2:lockfile tier2:dependency tier2:gates tier2:definedBy
-#   tier2:plugin-config tier2:plugin-code tier2:case-collision
+#   tier2:plugin-config tier2:plugin-code tier2:case-collision tier2:hook-target
 #   tier1:executable      (a mode change that makes a file executable, any path)
 #   instruction:claude-config instruction:agent-definition instruction:workflow
 #   instruction:codeowners instruction:agents-md instruction:claude-md instruction:skill
@@ -47,6 +47,13 @@
 # Project configuration (riskPaths, copyPaths, definedBy) comes only from
 # .agents/gates.json at the base commit; values changed on the branch are ignored. A missing
 # file means the plugin defaults only.
+#
+# Hook command targets (tier2:hook-target): every repository-relative file path named in a hook
+# "command" of .claude/settings.json at the base commit is tier 2, because hooks run in every
+# session. Paths are taken from the command's words after removing quotes and a leading
+# $CLAUDE_PROJECT_DIR/ or ./; words with other variables, globs or absolute paths are not
+# resolved, and files those scripts call are not followed. An unreadable, oversized or malformed
+# .claude/settings.json at base is a classifier error (floor 2).
 #
 # Glob semantics (one matcher for defaults and project globs): paths are repository-relative
 # with "/"; "**/" matches zero or more directories, a trailing "/**" matches everything below,
@@ -281,6 +288,30 @@ def rule($tier; $reason; $glob): "\($tier)\t\($reason)\tglob\t\($glob)";
 JQ
   jq -r -f "$config_program" "$gates_file" >"$config_rules" 2>"$work_directory/config-error.txt" ||
     fail_closed "invalid .agents/gates.json at base: $(head -n 1 "$work_directory/config-error.txt" | cut -c 1-200)"
+fi
+
+# ---------------------------------------------------------------- hook command targets (base only)
+if run_git cat-file -e "$base_sha:.claude/settings.json" 2>/dev/null; then
+  settings_file="$work_directory/settings.json"
+  run_git show "$base_sha:.claude/settings.json" 2>/dev/null | head -c $((gates_size_limit + 1)) >"$settings_file"
+  [ "${PIPESTATUS[0]}" -eq 0 ] || [ "$(wc -c <"$settings_file" | tr -d ' ')" -gt "$gates_size_limit" ] || fail_closed "cannot read .claude/settings.json at base"
+  [ "$(wc -c <"$settings_file" | tr -d ' ')" -le "$gates_size_limit" ] || fail_closed ".claude/settings.json at base is too large"
+  hook_program="$work_directory/hooks.jq"
+  cat >"$hook_program" <<'JQ'
+def project_relative: sub("^(\\$CLAUDE_PROJECT_DIR|\\$\\{CLAUDE_PROJECT_DIR\\})/"; "") | sub("^(\\./)+"; "");
+(if type == "object" then . else error("settings must be a JSON object") end)
+| (if has("hooks") then .hooks else {} end) as $hooks
+| (if ($hooks | type) == "object" then $hooks else error("hooks must be an object") end)
+| [$hooks | .. | objects | select(has("command")) | .command
+   | if type == "string" then . else error("a hook command must be a string") end
+   | gsub("[\"']"; "") | gsub("[`;&|()<>\t]"; " ") | split(" ")[] | select(length > 0) | project_relative
+   | select(test("^[A-Za-z0-9._@+][A-Za-z0-9._/@+-]*$") and test("[/.]") and . != "." and . != "..")]
+| unique
+| if length > 1000 then error("too many hook command paths") else .[] end
+| "2\ttier2:hook-target\tci\t\(.)"
+JQ
+  jq -r -f "$hook_program" "$settings_file" >>"$config_rules" 2>"$work_directory/hooks-error.txt" ||
+    fail_closed "invalid .claude/settings.json at base: $(head -n 1 "$work_directory/hooks-error.txt" | cut -c 1-200)"
 fi
 
 # ---------------------------------------------------------------- built-in rules
