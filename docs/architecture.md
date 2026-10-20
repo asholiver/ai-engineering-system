@@ -120,26 +120,40 @@ Current guarantee: reviewers have no file-editing tools and are instructed not t
 `scripts/readiness.sh <WORK-ID> --inc <increment>` is the one readiness procedure. The `review` skill runs it, and `/ai-engineering:deliver` reaches it through `review`. It prints a `READINESS` block ending in `READY: YES | NO`. The script's header documents every rule; in summary:
 
 - **Effective tier** is the maximum of the state tier, the classifier floor and the action floor. Nothing lowers it. It is computed during readiness only; recomputing after each task commit is deferred to v0.3.x.
-- **Base** is the merge-base of HEAD with `origin/<default>` (from `origin/HEAD`), never a chosen ref. Readiness runs the full gate itself with configuration from that commit, and runs the external review. Recorded gate results are never trusted.
+- **Base** is the increment's recorded base: the `origin/<default>` commit recorded once with `workstate.sh increment-set --base-sha` when the increment begins (`origin/HEAD` names the default branch). It is never a chosen ref, and never whatever the local ref says later. Otherwise the result is `NOT CERTIFIABLE`:
+  - the local `origin/<default>` must still equal the recorded base, so a ref moved to HEAD or to a newer commit is rejected. A newer ref is never accepted automatically, and re-anchoring an increment needs a separate owner workflow (not available in v0.3.0);
+  - the base must be an ancestor of HEAD;
+  - the increment branch's reflog must show the branch created from it.
+
+  The ref and the reflog are local records: remote authenticity is not verified (no `ls-remote`).
+- **Full gate:** readiness runs it itself, with configuration from the base commit, in a fresh local clone of the repository at exactly HEAD. The clone's objects are copied, not linked; it is checked out on its own branch (`ai-engineering-readiness-gate`), its remote and every other branch are removed, and Git hooks are off. Readiness reads Git with `GIT_NO_REPLACE_OBJECTS` and `GIT_NO_LAZY_FETCH` set. The gate and external review run without them, because the guard treats the first as a variable that changes what Git sees. Both still receive explicit paths and commits, and a repository with replace refs is `NOT CERTIFIABLE`. The gate never runs in, falls back to, or links anything from the development checkout (no `node_modules`, `.env` or other ignored files), so the project's `full` gate must be self-contained, installing its own dependencies. The verdict counts only together with `run-gate.sh`'s exit status. Recorded gate results are never trusted. **Running the project's gate is not a security sandbox:** it runs with the user's privileges and can reach user-level resources and absolute paths unless separately isolated.
+- **Working tree and records:** `git status` must succeed and show only the active item's state and log, and no tracked file may be marked assume-unchanged or skip-worktree. The spec and state are read once, from a copy. A failed read is `NOT CERTIFIABLE`, never an empty record, and a change to either while readiness runs is `NOT CERTIFIABLE`.
 - **Trusted classifier: a local consistency check, not cryptographic provenance.** All of these must hold, otherwise the result is `NOT CERTIFIABLE`:
-  - readiness runs from the plugin install that Claude Code's registry records for the repository;
-  - that install's version equals the project's base-commit pin (`ref: v<version>`) and is at least 0.3.0;
-  - its recorded commit equals the release tag in the marketplace clone;
-  - the whole installed tree is byte- and mode-identical to the tag, ignoring only `.in_use/`.
+  - readiness runs from the plugin install that Claude Code's registry (`$CLAUDE_CONFIG_DIR`, default `~/.claude`) records for the repository, and every registry entry is strictly validated;
+  - that install's version equals the project's base-commit pin and is at least 0.3.0. The pin must have the form `{source, repo, ref: "v<version>"}`, as a GitHub marketplace source does;
+  - the marketplace source in `known_marketplaces.json` equals the pin;
+  - the install's recorded commit equals the release tag in the marketplace clone;
+  - the whole installed tree is byte- and mode-identical to the tag. The runtime `.in_use/` directory, and everything in it, is ignored.
 
   Signed releases are WORK-004.
 - **Action floor:** tier 2 for any trigger-2 decision, or any guard-log `ask` or `deny` after the increment-start anchor, from any session. Events are ordered by line order, never by timestamp. Only `ask` events for three exact commands are excluded, each matched by the SHA-256 of its exact text: the increment start, the resume of the increment branch, and the merge of a recorded worktree branch. A denial is never excluded.
-- **NOT CERTIFIABLE** means trust or evidence is missing, ambiguous, malformed or untrusted. Examples: an untrusted install, no state, uncommitted changes, a missing or malformed guard log, or no anchor. The effective tier is then 2 and READY is NO. It is reported separately from a valid tier-2 classification.
+- **NOT CERTIFIABLE** means trust or evidence is missing, ambiguous, malformed or untrusted. Examples: an untrusted install, no state, uncommitted changes, a moved default-branch ref, a missing or malformed guard log, or no anchor. The effective tier is then 2 and READY is NO. It is reported separately from a valid tier-2 classification.
+- **Exit codes:**
+  - 0: READY: YES.
+  - 1: READY: NO, certifiable.
+  - 3: NOT CERTIFIABLE, so READY: NO.
+  - 2: a usage or environment error (bad arguments, not a Git repository, no `jq` or `git`, no temporary directory). No block is printed.
 - **Depth:**
   - QA evidence is needed at every tier.
-  - A security review is needed at tier 2, or at tier 1 when the classifier flags a security category.
-  - A residual-risk list is needed at tier 2.
-  - External review must be PASSED at tiers 1 and 2. It is optional at tier 0, so only a genuinely tier-0 increment can be READY without a configured reviewer.
-  - Review evidence counts only when it names its reviewer and a commit that covers HEAD.
+  - A security review and a residual-risk list are needed at tier 2. Security categories (auth, secrets, SQL, migrations) always classify as tier 2.
+  - External review must be PASSED at tiers 1 and 2. At tier 0, `NOT CONFIGURED` is allowed when everything else passes, so only a genuinely tier-0 increment can be READY without a configured reviewer. A configured reviewer's `BLOCKING FINDINGS` or `ERROR` is READY: NO at every tier.
+  - Review and residual-risk evidence count only when they pass and name a commit that covers HEAD, with only the active item's state and log changed since; renames are not followed. Review evidence must also name its reviewer.
 - **Limits:**
   - Evidence and the guard log are workflow records written by the coordinator and the guard. Neither is complete or tamper-proof.
   - A guard-log write that the guard's deadline kills is lost silently.
   - Standalone `/review` without work-item state is always NOT CERTIFIABLE.
+  - Remote authenticity of the default-branch ref is not verified.
+  - A project gate that assumes installed dependencies fails in the fresh clone, which is READY: NO.
 
 ## Work items: state and authority
 

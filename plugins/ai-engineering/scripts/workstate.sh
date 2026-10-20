@@ -56,6 +56,9 @@
 #   check           C  the spec-hash transition check on its own (exit 6 and revert on mismatch)
 #   increment-add, increment-set, increment-recovery, raise-tier, evidence,
 #   finding-add, finding-fixed, finding-invalid, owner-action-add, owner-action-done   C  records
+#   increment-set   --base-sha records the default-branch commit the increment began from. It is
+#                      recorded once: a different base is refused (re-anchoring an increment is not
+#                      available; readiness rejects a moved default-branch ref).
 #   evidence        C  --inc <id> --kind gate|review|residual-risks --result pass|fail
 #                      [--reviewer qa|security] (review evidence for readiness names its reviewer)
 #                      [--sha <commit>] (the commit the evidence covers) [--note <text>]
@@ -263,6 +266,10 @@ need_branch() { # option-name value: a plain Git branch name, so its exact comma
   [ -n "$2" ] || fail "$EXIT_USAGE" "$1 is required"
   [[ $2 =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$ ]] && [[ $2 != *..* && $2 != *//* && $2 != */ && $2 != *.lock && $2 != */.* ]] \
     || fail "$EXIT_USAGE" "$1 must be a plain branch name (letters, digits, dot, dash, underscore and single slashes)"
+  # Names that resolve to something other than a local work branch never become exclusions.
+  case "$2" in
+    HEAD | origin/* | refs/* | remotes/* | heads/* | tags/*) fail "$EXIT_USAGE" "$1 must be a local work branch, not $2" ;;
+  esac
 }
 
 need_sha() { # option-name value (optional: empty allowed)
@@ -336,7 +343,18 @@ mutate() {
 }
 
 query() { jq -r "$@" <<<"$state_json"; }
-holds() { jq -e "$@" <<<"$state_json" >/dev/null 2>&1; }
+# holds: 0 when the test is true, 1 when it is false or yields nothing. A jq error stops the
+# command: a rule that cannot be evaluated is never read as "false" (that would fail open, for
+# example letting a security finding be marked invalid without --confirmed-by).
+holds() {
+  local result=0
+  jq -e "$@" <<<"$state_json" >/dev/null 2>&1 || result=$?
+  case "$result" in
+    0) return 0 ;;
+    1 | 4) return 1 ;;
+    *) fail "$EXIT_ENVIRONMENT" "internal error: a state rule could not be evaluated (jq exit $result); not modified" ;;
+  esac
+}
 
 require_status() { # command, allowed statuses...
   local command_name="$1" allowed
@@ -746,6 +764,12 @@ cmd_increment_set() {
   [ "$current" != merged ] || fail "$EXIT_INVALID_TRANSITION" "increment $opt_inc is merged; its record is final"
   [ -z "$opt_merge_sha" ] || [ "$opt_status" = merged ] \
     || fail "$EXIT_INVALID_TRANSITION" "--merge-sha is recorded only with --status merged"
+  # The base is the default-branch commit the increment began from; it is recorded once.
+  if [ -n "$opt_base_sha" ]; then
+    opt_base_sha="$(printf '%s' "$opt_base_sha" | tr 'A-F' 'a-f')"
+    holds --arg i "$opt_inc" --arg base "$opt_base_sha" '.increments[] | select(.id == $i) | .baseSha == null or (.baseSha | ascii_downcase) == $base' \
+      || fail "$EXIT_INVALID_TRANSITION" "increment $opt_inc already records base $(query --arg i "$opt_inc" '.increments[] | select(.id == $i) | .baseSha'); a recorded base is never replaced (re-anchoring an increment is not available)"
+  fi
   # Repeating the current status records fields only (for example a new head SHA while active);
   # it changes no status or timestamp.
   if [ -n "$opt_status" ] && [ "$opt_status" = "$current" ] && [ "$current" != merged ]; then

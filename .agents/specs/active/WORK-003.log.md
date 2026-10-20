@@ -83,3 +83,54 @@ Append-only delivery narrative, written by the coordinator. Not sent to speciali
   - Three test lines needed line-scoped `SC2016` directives.
 - Process: the owner declined one Bash command that would have edited the docs with a Python heredoc. The guard flagged its text as a deploy/release class. It was not retried, split or rephrased: the four documentation files were edited with the Edit tool instead, and the diff was checked.
 - `GATE full: PASSED (exit 0) command: scripts/check.sh` (3636 passed, 0 failed).
+
+## 2026-10-20: PR C remediation, local
+- Internal reviews of `6f24c6c` (Opus security reviewer and QA; internal checks, not external review evidence):
+  - Security: 1 High (H1: the base came from the local `origin/<default>` ref, which an unguarded `git update-ref` could move to HEAD, emptying the diff). Medium: M1, the gate ran in a working tree that skip-worktree could hide; M2, records failed open to `{}` and were read after the gate. Six Low.
+  - QA: Medium:
+    - M1: an unreachable tier-1 security rule;
+    - M2: a configured reviewer's failure was ignored at tier 0;
+    - M3: the same records fail-open as security M2;
+    - M4 and M5: untested cells and weak assertions;
+    - M6: the residual-risk instruction lacked `--sha`.
+
+    Five Low.
+  - The security reviewer's first command chained read-only commands with `&&`, against its execution limits; it changed nothing and was reported.
+- Owner decisions (conversation, 2026-10-20), verbatim excerpts:
+  - H1: "Record the default-branch commit when the increment begins. Readiness must detect and reject an unexpected change to the recorded default-branch ref, including moving origin/main to HEAD. … Do not automatically accept a newer ref. Any legitimate re-anchor needs a separate explicit and auditable workflow. Do not modify the Guard in PR C. Do not require live `git ls-remote`; document that remote authenticity is not verified."
+  - M1: "Use one validated state snapshot, fail closed on state-read errors, and detect state changes during readiness. Never replace failed reads with `{}` or interpret errors as zero findings."
+  - M2: "Fail closed if git status fails or tracked files have skip-worktree/assume-unchanged flags. Prefer running the full gate in a fresh detached scratch worktree at HEAD …". Asked because Landra's committed `full` gate assumes installed `node_modules`; the owner chose option 1: "Implement the fresh local clone at the exact HEAD commit and run the full gate there. Never fall back to the development checkout or link its node_modules, .env or other ignored/untracked files. … Do not modify Landra as part of PR C. Record its gate update as a separate prerequisite for v0.3.0 adoption …"
+  - M3: "At tier 0, NOT CONFIGURED is permissible only when all other requirements pass. A configured external review returning BLOCKING or ERROR prevents READY: YES at every tier."
+  - M4: "Remove the unreachable tier-1 security-category branch and update the spec, documentation and tests."
+  - Also: fix M5, M6, L1–L3, L6 and L8; regression tests for validator failure at load and write; investigate the finding-confirmation fail-open; a real-guard-to-readiness integration test; keep the trust limitations and the conservative action floor; denials never excluded.
+- Implemented:
+  - **H1:**
+    - the base is the recorded `baseSha` (write-once in `workstate.sh`);
+    - it must equal the local `origin/<default>`, be an ancestor of HEAD and match the branch's oldest reflog entry;
+    - `deliver` records it with the start.
+  - **M1:** the spec and state are copied once and `workstate.sh --dir <copy>` reads only the copy. A failed or invalid read is NOT CERTIFIABLE. The live files are hashed again at the end, along with HEAD and the default-branch ref.
+  - **M2:**
+    - `git status` and `git ls-files -v` must succeed, with no assume-unchanged or skip-worktree flags;
+    - staged renames are checked on both paths;
+    - the gate runs in a `git clone --no-hardlinks` of the repository at exactly HEAD, with origin removed and hooks off, and is removed afterwards. It never falls back to the checkout.
+  - **M3, M4, M5:** as decided; external and gate verdicts count only when the exit status agrees with the verdict line (L2).
+  - **L1:** `--no-renames` in the coverage diff.
+  - **L3:** hashes must be 64 hexadecimal characters, or the result is NOT CERTIFIABLE.
+  - **L6:** ref-like and default-branch names are refused as work or worktree branches.
+  - **L8:** the docs listed above.
+- Defects found while testing the remediation (the first two full runs: 119, then 51 failures):
+  - The index-flag check matched `[a-z]`. In this locale's collation that range also matches capitals, so every ordinary `H` entry from `git ls-files -v` read as assume-unchanged. It now uses `[[:lower:]]`.
+  - Every gate in the clone was refused with `git-lookup-failed`, for two reasons:
+    - readiness exported `GIT_NO_REPLACE_OBJECTS`, which the guard treats as a Git-redirecting variable;
+    - the clone's path contained `checkout`, which makes the guard look Git state up.
+
+    A detached HEAD would also fail the guard's branch lookup. The owner declined one diagnostic Bash command, a chained scratch reproduction with a push to a scratch bare repository's `main`. It was not retried, split or rephrased. The cause was then found by reading `guard-bash.sh` and `guard/hook-git.sh`.
+  - Owner-approved fix, in `readiness.sh` only:
+    - the gate and external review run without the two variables, while readiness's own reads keep them;
+    - the clone is checked out on its own branch `ai-engineering-readiness-gate`, with every other branch removed;
+    - the clone directory is named `gate-tree`;
+    - a repository with replace refs is NOT CERTIFIABLE.
+
+    The guard is unchanged. Tests: a temporary path containing `checkout` and `push`; a gate that checks its environment, branch, refs, remote and HEAD from inside; a replace ref; and a guard-refused unsafe gate in the clone.
+- The finding-confirmation fail-open (`workstate.sh` `holds`): confirmed by reading. A jq error made `holds` return false, so `finding-invalid` would accept a security finding without `--confirmed-by`. It needs a fix, and it is fixed: `holds` now treats a jq error (exit 2, 3 or 5) as an internal error that stops the command. This changes WORK-002 code (a deviation).
+- Not fixed (not in the approved list): security L4 (hook-target extraction misses newline separators and non-hook command settings) and L5 (events logged in other repositories or outside Git; only noted as a residual in the readiness header), QA L2 (jq error text on oddly shaped registry files) and QA L3 (the gate and external review still run on a NOT CERTIFIABLE evaluation).

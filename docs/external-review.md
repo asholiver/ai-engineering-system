@@ -15,7 +15,7 @@ In the project's `.agents/gates.json`, committed to the base branch:
 `null` or a missing key means not configured. The command is read from the file **as committed at the base ref**, so a change under review cannot select or alter its own reviewer; when a change modifies `externalReview`, the report notes that the base command was used. A command that the approval guard classifies as high-impact is refused (`ERROR`).
 
 ## Invocation
-`/ai-engineering:review` runs `scripts/external-review.sh <base-ref> <head-ref> [spec-path]`, which executes the command with `bash -c` from the repository root and these environment variables:
+Readiness (`scripts/readiness.sh`, which `/ai-engineering:review` runs) calls `scripts/external-review.sh <base> <head> [spec-path]` with the increment's recorded base commit and `HEAD`. It executes the command with `bash -c` from the repository root and these environment variables:
 
 | Variable | Meaning |
 | :- | :- |
@@ -36,7 +36,8 @@ Commit the change before review. The command computes the diff itself (for examp
 | not configured | `EXTERNAL REVIEW: NOT CONFIGURED` | 3 |
 
 ## Rules
-- When not configured, the review report says `EXTERNAL REVIEW: NOT CONFIGURED`. At tiers 1 and 2 that is a non-pass: the work is **not** marked ready for final human acceptance, and the owner's merge approval does not substitute for it. At tier 0 external review is optional (see [readiness](architecture.md#readiness-work-003-c2)).
+- When not configured, the review report says `EXTERNAL REVIEW: NOT CONFIGURED`. At tiers 1 and 2 that is a non-pass: the work is **not** marked ready for final human acceptance, and the owner's merge approval does not substitute for it. At tier 0 `NOT CONFIGURED` is allowed when everything else passes (see [readiness](architecture.md#readiness-work-003-c2)).
+- A configured reviewer's `BLOCKING FINDINGS` or `ERROR` is READY: NO at every tier, including tier 0. Readiness counts a verdict only when the script's exit status and its verdict line agree.
 - Missing external review never blocks implementation, local testing, normal commits, draft PRs or other engineering work.
 - Claude reviewing Claude (including the internal `security-reviewer` and `qa` agents) never substitutes for the external review.
 - The reviewer command runs with the user's credentials. Keep provider API keys in the user's environment or secret store, never in `gates.json`.

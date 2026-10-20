@@ -56,10 +56,14 @@ v0.2 specs have no state file. Run `/ai-engineering:setup` and use its import st
 ## Readiness and the version pin
 Readiness (`/ai-engineering:review`, and the end of each delivered increment) is certifiable only when all of these hold:
 - the session runs the plugin install that Claude Code records for the project;
-- that install matches the version pinned in the project's committed `.claude/settings.json` (`ref: v<version>`);
+- that install matches the version pinned in the project's committed `.claude/settings.json`. The pin must be a marketplace source of the form `{source, repo, ref: "v<version>"}`, as a GitHub source is;
 - it matches that version's release tag.
 
-Without a pin, from a `--plugin-dir` checkout, or with any mismatch, readiness reports `NOT CERTIFIABLE` and `READY: NO`. It also reads the guard log under the Git directory, so each increment must start with the exact command `/ai-engineering:deliver` uses. See [readiness](architecture.md#readiness-work-003-c2).
+Without a pin, from a `--plugin-dir` checkout, or with any mismatch, readiness reports `NOT CERTIFIABLE` and `READY: NO`.
+
+It also reads the guard log under the Git directory, so each increment must start with the exact command `/ai-engineering:deliver` uses. The increment's base is recorded once when it begins. Do not fetch or move `origin/<default>` until the increment is merged: readiness rejects a moved default-branch ref.
+
+Readiness runs the `full` gate in a fresh clone of `HEAD`, never in your checkout. **Make the `full` gate self-contained:** install dependencies inside it (for example `pnpm install --frozen-lockfile && …`), and don't rely on `node_modules`, `.env` or other untracked files. A gate that fails there is `READY: NO`. The gate still runs with your privileges and is not a sandbox. See [readiness](architecture.md#readiness-work-003-c2).
 
 ## GitHub authentication
 Delivery waits for CI checks and for your merge through authenticated `gh` (`scripts/wait-github.sh`). Run `gh auth login` first. Without it the wait reports `NOT AUTHENTICATED`, which delivery records as an action for you; it never polls unauthenticated.
@@ -72,7 +76,7 @@ Delivery waits for CI checks and for your merge through authenticated `gh` (`scr
   "externalReview": null
 }
 ```
-`fast` runs whenever an implementation agent finishes, so keep it to seconds. `full` runs before review. The main session runs gates through the Bash tool with `bash -c` from the repository root, so your permission rules and sandbox apply. Gates use the file committed at `HEAD` (uncommitted edits are ignored and reported). Until it is committed, implementation checks fall back to the working-tree file and print a `NOTE`, so commit it. During review the full gate is read only from the base ref, with no fallback. Commands containing high-impact operations are refused. See [external-review.md](external-review.md) for `externalReview`.
+`fast` runs whenever an implementation agent finishes, so keep it to seconds. `full` runs before review. The main session runs gates through the Bash tool with `bash -c` from the repository root, so your permission rules and sandbox apply. Gates use the file committed at `HEAD` (uncommitted edits are ignored and reported). Until it is committed, implementation checks fall back to the working-tree file and print a `NOTE`, so commit it. During review the full gate is read only from the increment's base commit, with no fallback, and runs in a fresh clone of `HEAD`. Commands containing high-impact operations are refused. See [external-review.md](external-review.md) for `externalReview`.
 
 Every gate executes the project's code with the privileges of whoever runs it; see the [trust boundary](architecture.md#trust-boundary-for-project-code).
 

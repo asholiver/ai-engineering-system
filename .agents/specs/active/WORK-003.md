@@ -159,8 +159,8 @@ Included:
     | :- | :- | :- | :- |
     | Full gate (or adapter-verified CI evidence of the trusted gate) at head | yes | yes | yes |
     | QA | spot check against intent | full acceptance-criteria check | full, including negative and failure-path tests |
-    | Internal security review (Opus, delta) | none | only when the classifier flags a security category | yes |
-    | External review | optional | required at head | required at head |
+    | Internal security review (Opus, delta) | none | none (security categories always classify as tier 2; amended 2026-10-20, M4) | yes |
+    | External review | optional (a configured reviewer's blocking findings or error still block; amended 2026-10-20, M3) | required at head | required at head |
     | Explicit residual-risk list | no | no | yes |
 
 12. **One readiness procedure.** A deterministic script evaluates an increment and prints a `READINESS` block. The `review` skill runs it, dispatches the missing assurance, records results and re-runs it. `deliver` uses the same skill at the end of each increment (WORK-002), and there is no separate Prove procedure. The block contains:
@@ -409,7 +409,7 @@ End-to-end scenario in a scratch project (self-development protocol, evidence in
 - D1–D6 are resolved (see `WORK-001-planning.md`).
 - **Trusted-classifier rule: approved 2026-10-20 and strengthened (T-1).**
   - Readiness itself must run from the selected registry entry's `installPath` (real paths compared).
-  - The *whole* installed plugin tree must match the tag's plugin directory in bytes and modes, ignoring only `.in_use/`. Extra files and links are not allowed.
+  - The *whole* installed plugin tree must match the tag's plugin directory in bytes and modes, ignoring only the runtime `.in_use/` directory (and everything in it). Extra files and links are not allowed.
   - The known-marketplace source must equal the base-commit pin.
   - Registry entries are strictly validated. Local, then project, then user scope; more than one entry at a scope is ambiguous and NOT CERTIFIABLE.
   - Condition 4 below is subsumed by the `installPath` match.
@@ -431,22 +431,25 @@ End-to-end scenario in a scratch project (self-development protocol, evidence in
   - C1 owner decisions (2026-10-19): (1) under `docs/`, tier 0 only for recognised documentation and asset file types; other files there are tier 1 at least; (2) `role(s)` and `polic(y|ies)` added to the auth/permission word parts; `security` and `signin`/`signup` deferred pending Landra evidence; (3) see the requirement below; (4) Markdown additions containing destructive statements stay tier 2. Non-empty `.git/info/attributes` fails closed (tier 2, clear error, file never modified): accepted.
   - Requirement for the later readiness integration (not C1): readiness must run the trusted installed classifier (not the copy in the branch under review) against the merge-base of the head with `main`, never a caller-chosen base. It must also treat scripts referenced as hook commands in the base `.claude/settings.json` as tier 2 (security re-check; not C1).
   - C1 follow-ups (minor QA gaps, not in C1 scope): (a) done in PR #9 review: a test that `check.sh`'s documentation version step fails the gate; (b) no test pinning that only the two documented pin shapes are recognised; (c) destructive-statement detection is single-line only (documented in the script header).
-- Increment C2 (PR C; owner-authorised 2026-10-20; branch `feature/work-003-c2-readiness` from `a5e7796`; Scope items 2, 11, 12 and the two C1 readiness requirements). **Status:** implemented locally, not pushed; review pending.
+- Increment C2 (PR C; owner-authorised 2026-10-20; branch `feature/work-003-c2-readiness` from `a5e7796`; Scope items 2, 11, 12 and the two C1 readiness requirements). **Status:** implemented locally (`6f24c6c`), internal reviews done, remediation implemented locally; not pushed.
   - Built:
-    - `scripts/readiness.sh` (effective tier with the action floor, trust check, guard-log anchor and exact exclusions, the full gate run against the merge-base, external review, tier-dependent depth, the `READINESS` block);
-    - `workstate.sh`: evidence `--reviewer` and `--sha`, `residual-risks`, `increment-worktree`, and a validator that fails closed;
+    - `scripts/readiness.sh` (effective tier with the action floor, trust check, guard-log anchor and exact exclusions, the full gate in a fresh clone of HEAD, external review, tier-dependent depth, the `READINESS` block);
+    - `workstate.sh`: evidence `--reviewer` and `--sha`, `residual-risks`, `increment-worktree`, a write-once `--base-sha`, a validator and state rules that fail closed;
     - `classify-change.sh`: base hook command targets are tier 2;
     - `review` and `deliver` skills; docs; CHANGELOG.
-  - `GATE full: PASSED (exit 0) command: scripts/check.sh` (3636 passed, 0 failed).
-  - C2 resolves the C1 requirement above as merge-base with `origin/<default>` (from `origin/HEAD`), not a hard-coded `main`.
-  - Deferred to v0.3.x (owner decision 2026-10-20): per-task recomputation of the effective tier (C2 computes it only during readiness), and every item listed in "v0.3.0 scope and C2 design".
+  - First implementation: `GATE full: PASSED (exit 0) command: scripts/check.sh` (3636 passed, 0 failed). Internal Opus security and QA reviews of `6f24c6c` (not external review): 1 High, 2 Medium and 6 Low (security); 6 Medium and 5 Low (QA). Remediation decisions are in the log entry of 2026-10-20 ("PR C remediation").
+  - C2 resolves the C1 requirement above as follows (owner decision H1, 2026-10-20). The base is the `origin/<default>` commit recorded once when the increment begins, never a hard-coded `main` and never the current local ref. The local ref must still equal it, the base must be an ancestor of HEAD, and the branch reflog must show the branch created from it.
+  - Prerequisite for v0.3.0 adoption in Landra (owner decision M2, 2026-10-20): Landra's `full` gate must become self-contained, installing its own dependencies, because readiness runs it in a fresh clone. Until then, Landra's readiness reports a failed gate (READY: NO). Landra is not changed in PR C; this is addressed in PR E planning or a separately approved Landra change.
+  - Deferred to v0.3.x (owner decision 2026-10-20): per-task recomputation of the effective tier (C2 computes it only during readiness), and every item listed in "v0.3.0 scope and C2 design". Not available in v0.3.0: an explicit, auditable workflow to re-anchor an increment whose default-branch ref legitimately moved (owner decision H1).
   - Accepted limitations (owner decisions 2026-10-20):
     - Guard-log writes killed by the guard's deadline can be lost silently, and the guard's logging is unchanged.
     - The guard log and the evidence records are workflow records, neither complete nor tamper-proof.
     - Any logged event after the anchor raises the tier, including denials and other sessions' events.
     - Standalone `/review` without valid state and an anchor is NOT CERTIFIABLE and READY: NO.
     - Trust is local consistency, not provenance.
-    - Readiness runs the full gate on every evaluation.
+    - Readiness runs the full gate on every evaluation, in a fresh clone of HEAD.
+    - The default-branch ref and branch reflog are local records; remote authenticity is not verified (no `ls-remote`).
+    - Running the project's gate is not a security sandbox: it runs with the user's privileges and can reach user-level resources and absolute paths unless separately isolated.
 ## Review state
 <!-- v0.2 review records its status block here. -->
 -

@@ -4640,6 +4640,75 @@ run_ws evidence "$ws_id" --inc I1 --kind review --reviewer external --result pas
 expect_ws "evidence: external review is never recorded as review evidence" 2
 run_ws evidence "$ws_id" --inc I1 --kind residual-risks --result pass --sha "not a sha"
 expect_ws "evidence: a malformed sha is refused" 2
+# The base an increment began from is recorded once (WORK-003 C2, H1).
+new_item delivering
+first_base=1111111111111111111111111111111111111111
+run_ws increment-set "$ws_id" --inc I1 --status active --branch work/WORK-1-I1 --base-sha "$first_base"
+expect_ws "base: recorded when the increment begins" 0
+run_ws increment-set "$ws_id" --inc I1 --base-sha "$first_base"
+expect_ws "base: repeating the same base is allowed" 0
+before="$(state_checksum)"
+run_ws increment-set "$ws_id" --inc I1 --base-sha 2222222222222222222222222222222222222222
+expect_ws "base: a different base is refused" 3
+expect_contains "base: the refusal says a base is never replaced" "a recorded base is never replaced" "$ws_output"
+expect_equal "base: the state is unchanged" "$before" "$(state_checksum)"
+for bad_branch in HEAD origin/main refs/heads/x remotes/origin/x tags/v1; do
+  run_ws increment-worktree "$ws_id" --inc I1 --branch "$bad_branch"
+  expect_ws "increment-worktree: refuses the ref-like name '$bad_branch'" 2
+done
+
+# --- a jq program that cannot run is never read as "valid" or "false" (WORK-003 C2 review).
+# A stand-in jq on PATH fails only the calls whose program contains a marker, from the Nth such
+# call on; every other call runs the real jq.
+jq_stand_in="$work_directory/jq-stand-in"
+jq_call_count="$work_directory/jq-stand-in-count"
+mkdir -p "$jq_stand_in"
+cat >"$jq_stand_in/jq" <<STANDIN
+#!/bin/bash
+for argument in "\$@"; do
+  case "\$argument" in
+    *"\$JQ_FAIL_MARKER"*)
+      count=\$((\$(cat "\$JQ_CALL_COUNT") + 1))
+      echo "\$count" >"\$JQ_CALL_COUNT"
+      [ "\$count" -lt "\$JQ_FAIL_FROM" ] || exit 3
+      ;;
+  esac
+done
+exec "$(command -v jq)" "\$@"
+STANDIN
+chmod +x "$jq_stand_in/jq"
+run_ws_failing_jq() { # marker first-failing-call workstate-arguments...
+  local marker="$1" first_failing="$2"
+  shift 2
+  printf '0\n' >"$jq_call_count"
+  ws_output="$(PATH="$jq_stand_in:$PATH" JQ_FAIL_MARKER="$marker" JQ_FAIL_FROM="$first_failing" JQ_CALL_COUNT="$jq_call_count" "$workstate" --dir "$ws_directory" "$@" 2>&1)"
+  ws_status=$?
+}
+expect_equal "jq stand-in: the validator marker is defined once in workstate.sh" 1 "$(grep -c 'def each_of' "$workstate")"
+# shellcheck disable=SC2016 # the literal jq text $f is searched for, not expanded
+expect_equal "jq stand-in: the security-finding rule marker appears once in workstate.sh" 1 "$(grep -c 'any(.id == \$f and .security)' "$workstate")"
+new_item delivering
+before="$(state_checksum)"
+run_ws_failing_jq each_of 1 status "$ws_id"
+expect_ws "validator cannot run at load: a schema error, never a pass" 5
+expect_contains "validator cannot run at load: says so" "the schema validator could not run" "$ws_output"
+expect_equal "validator cannot run at load: the stand-in was reached" 1 "$(cat "$jq_call_count")"
+run_ws_failing_jq each_of 2 evidence "$ws_id" --inc I1 --kind gate --result pass
+expect_ws "validator cannot run at write: the write is refused" 5
+expect_contains "validator cannot run at write: refusal" "refusing to write" "$ws_output"
+expect_contains "validator cannot run at write: says so" "the schema validator could not run" "$ws_output"
+expect_equal "validator cannot run: the state is not modified" "$before" "$(state_checksum)"
+expect_equal "validator cannot run: no temporary state file is left" "" "$(find "$ws_directory" -name ".$ws_id.*" | head -n 1)"
+run_ws_failing_jq each_of 99 evidence "$ws_id" --inc I1 --kind gate --result pass
+expect_ws "validator control: the stand-in alone changes nothing" 0
+run_ws finding-add "$ws_id" --finding F1 --source security-reviewer --severity high --summary "security" --security
+before="$(state_checksum)"
+run_ws_failing_jq 'and .security)' 1 finding-invalid "$ws_id" --finding F1 --evidence "looks fine"
+expect_ws "a security-finding rule that cannot run stops finding-invalid" 1
+expect_contains "the rule failure is reported" "a state rule could not be evaluated" "$ws_output"
+expect_equal "the security finding stays open" "$before open" "$(state_checksum) $(state_value '.findings[0].disposition.state')"
+run_ws_failing_jq 'and .security)' 99 finding-invalid "$ws_id" --finding F1 --evidence "looks fine"
+expect_ws "control: without --confirmed-by the security finding is still refused" 3
 new_item proposed
 jq '.approval = {"by": "x"}' "$(state_path)" >"$work_directory/bad-approval.json"
 cp "$work_directory/bad-approval.json" "$(state_path)"
@@ -4953,6 +5022,8 @@ expect_contains "skill deliver: sequential in one checkout by default" "Run task
 expect_contains "skill deliver: parallel worktrees are opt-in" "Parallel worktrees are opt-in" "$deliver_text"
 expect_contains "skill deliver: one guard confirmation per increment start" "Starting an increment from the updated default branch asks one guard confirmation" "$deliver_text"
 expect_contains "skill deliver: each worktree merge also asks" "each worktree merge also asks" "$deliver_text"
+expect_contains "skill deliver: records the base once at the start" "--status active --branch <work-branch> --base-sha <commit>" "$deliver_text"
+expect_contains "skill deliver: never moves the default-branch ref during an increment" "Do not fetch, pull or otherwise move \`origin/<default>\` again until the increment is merged" "$deliver_text"
 expect_contains "skill deliver: confirmation never pre-authorises another prompt" "never replaces, suppresses or pre-authorises any other guard prompt" "$deliver_text"
 expect_contains "skill deliver: owner-command records are not security authority" "workflow records, not security authority" "$deliver_text"
 expect_contains "skill deliver: coordinator owns Git, never merges" "never merge" "$deliver_text"
@@ -5010,7 +5081,12 @@ expect_contains "skill review: runs the readiness script" 'scripts/readiness.sh"
 expect_contains "skill review: never replaces readiness lines with judgement" "Never replace any of its lines with your own judgement" "$review_text"
 expect_contains "skill review: base is the merge-base, never chosen" "never a chosen ref" "$review_text"
 expect_contains "skill review: evidence names reviewer and commit" "--reviewer qa|security --result pass|fail --sha <commit>" "$review_text"
-expect_contains "skill review: tier-2 residual-risk list" "--kind residual-risks" "$review_text"
+expect_contains "skill review: tier-2 residual-risk list with its result and commit" "--kind residual-risks --result pass --sha <commit>" "$review_text"
+expect_contains "skill review: the base is the recorded increment base" "the increment's recorded base commit, which must still equal \`origin/<default>\`" "$review_text"
+expect_contains "skill review: security review at tier 2" "\`ai-engineering:security-reviewer\` at tier 2." "$review_text"
+case "$review_text" in *"security category"*) fail "skill review: the unreachable tier-1 security-category rule is gone" ;; *) pass ;; esac
+expect_contains "skill review: a configured reviewer's failure blocks at every tier" "a configured reviewer's \`BLOCKING FINDINGS\` or \`ERROR\` is READY: NO at every tier" "$review_text"
+expect_contains "skill review: the gate runs in a fresh clone, never re-run in the checkout" "never re-run it in the checkout to get a pass" "$review_text"
 expect_contains "skill review: NOT CERTIFIABLE differs from tier 2" "it is not the same as a valid tier-2 classification" "$review_text"
 expect_contains "skill review: external review required at tiers 1 and 2" "External review is required at tiers 1 and 2" "$review_text"
 expect_contains "skill review: nothing substitutes for external review" "Owner merge approval, Opus or QA reviews never substitute for it" "$review_text"
@@ -5241,8 +5317,8 @@ user_entry() { # [install path] [version] [commit]
   jq -n -c --arg path "${1:-$install_directory}" --arg version "${2:-$readiness_version}" --arg commit "${3:-$marketplace_commit}" \
     '{scope: "user", installPath: $path, version: $version, gitCommitSha: $commit, installedAt: "2026-10-20T00:00:00Z"}'
 }
-write_known() { # ref
-  jq -n --arg ref "${1:-v$readiness_version}" --arg location "$marketplace_clone" \
+write_known() { # [ref] [clone location]
+  jq -n --arg ref "${1:-v$readiness_version}" --arg location "${2:-$marketplace_clone}" \
     '{"ai-engineering-system": {source: {source: "github", repo: "asholiver/ai-engineering-system", ref: $ref}, installLocation: $location, autoUpdate: false}}' \
     >"$config_directory/plugins/known_marketplaces.json"
 }
@@ -5261,17 +5337,28 @@ reset_guard_log() {
   mkdir -p "$readiness_project/.git/ai-engineering"
   guard_event ask "$start_command" coordinator 2000-01-01T00:00:00Z >"$(guard_log_file)"
 }
+real_guard() { # command [session]: one Bash tool call through the real installed guard (never executed)
+  jq -n --arg command "$1" --arg cwd "$readiness_project" --arg session "${2:-real-session}" \
+    '{tool_name: "Bash", tool_input: {command: $command}, cwd: $cwd, session_id: $session}' | "$install_directory/scripts/guard-bash.sh" >/dev/null 2>&1
+}
 
 # Builds a project on main (pin, gates, spec, state), pushes it, and starts increment I1 on
-# its work branch with one tier-0 README change and QA evidence for that commit.
+# its work branch (base recorded) with one tier-0 README change and QA evidence for that commit.
+# readiness_pin_ref overrides the pinned ref ("none": no .claude/settings.json); with
+# readiness_real_guard=yes the start confirmation goes through the real guard instead of a
+# fixture log line.
+readiness_pin_ref=""
+readiness_real_guard=no
 build_readiness_project() { # name external-review-json state-tier [full-gate-command]
   readiness_project="$readiness_root/$1"
   git init -q --bare "$readiness_root/$1.git"
   git init -q -b main "$readiness_project"
   mkdir -p "$readiness_project/.claude" "$readiness_project/.agents/specs/active"
-  jq -n --arg ref "v$readiness_version" '{extraKnownMarketplaces: {"ai-engineering-system": {source: {source: "github", repo: "asholiver/ai-engineering-system", ref: $ref}, autoUpdate: false}}, enabledPlugins: {"ai-engineering@ai-engineering-system": true}}' \
-    >"$readiness_project/.claude/settings.json"
-  jq -n --argjson external "$2" --arg full "${4:-true}" '{fast: "true", full: $full, externalReview: $external}' >"$readiness_project/.agents/gates.json"
+  if [ "$readiness_pin_ref" != none ]; then
+    jq -n --arg ref "${readiness_pin_ref:-v$readiness_version}" '{extraKnownMarketplaces: {"ai-engineering-system": {source: {source: "github", repo: "asholiver/ai-engineering-system", ref: $ref}, autoUpdate: false}}, enabledPlugins: {"ai-engineering@ai-engineering-system": true}}' \
+      >"$readiness_project/.claude/settings.json"
+  fi
+  jq -n --argjson external "$2" --arg full "${4-true}" '{fast: "true", full: $full, externalReview: $external}' >"$readiness_project/.agents/gates.json"
   printf '# WORK-001 readiness fixture\n## Status\nDraft\n## Objective\nReadiness fixture.\n' >"$readiness_project/.agents/specs/active/WORK-001.md"
   printf '# Project\n' >"$readiness_project/README.md"
   printf '{"name": "fixture"}\n' >"$readiness_project/package.json"
@@ -5285,10 +5372,19 @@ build_readiness_project() { # name external-review-json state-tier [full-gate-co
   ws_ready approve WORK-001 spec --owner-command approve >/dev/null
   ws_ready deliver WORK-001 --owner-command deliver >/dev/null
   readiness_git "$readiness_project" switch -q -c work/WORK-001-I1 origin/main
-  ws_ready increment-set WORK-001 --inc I1 --status active --branch work/WORK-001-I1 >/dev/null
+  if [ "$readiness_real_guard" = yes ]; then
+    rm -rf "$readiness_project/.git/ai-engineering"
+    real_guard "$start_command" real-session
+  fi
+  ws_ready increment-set WORK-001 --inc I1 --status active --branch work/WORK-001-I1 \
+    --base-sha "$(readiness_git "$readiness_project" rev-parse refs/remotes/origin/main)" >/dev/null
   commit_change README.md
   ws_ready evidence WORK-001 --inc I1 --kind review --reviewer qa --result pass --sha "$(readiness_git "$readiness_project" rev-parse HEAD)" >/dev/null
-  reset_guard_log
+  [ "$readiness_real_guard" = yes ] || reset_guard_log
+}
+readiness_state_file() { printf '%s/.agents/specs/active/WORK-001.state.json' "$readiness_project"; }
+edit_readiness_state() { # jq filter applied to the live state file
+  jq "$1" "$(readiness_state_file)" >"$readiness_root/edited-state.json" && cp "$readiness_root/edited-state.json" "$(readiness_state_file)"
 }
 commit_change() { # path...: appends a line to each path and commits only those paths
   local changed_path
@@ -5319,6 +5415,13 @@ expect_ready_yes() { # label
   expect_equal "$1: READY YES" "READY: YES" "$(readiness_line "READY:")"
   expect_equal "$1: certifiable" "CERTIFIABLE: YES" "$(readiness_line "CERTIFIABLE:")"
 }
+# A valid tier-2 classification from one raising guard event: certifiable, exit 1, never the
+# NOT CERTIFIABLE form (which also prints "ACTION FLOOR: 2").
+expect_guard_raised() { # label decision session
+  expect_equal "$1: exit 1, classified tier 2" "1 EFFECTIVE TIER: 2 (classified)" "$readiness_status $(readiness_line "EFFECTIVE TIER:")"
+  expect_equal "$1: certifiable" "CERTIFIABLE: YES" "$(readiness_line "CERTIFIABLE:")"
+  expect_equal "$1: the event raises the action floor" "ACTION FLOOR: 2 (guard log: $2 [fixture-class] session $3)" "$(readiness_line "ACTION FLOOR:")"
+}
 
 # --- baseline: a genuinely tier-0 increment is READY: YES without an external reviewer
 build_readiness_project tier0 null 0
@@ -5333,6 +5436,8 @@ expect_contains "readiness tier 0: the anchor was found" "GUARD LOG: anchor at 2
 # --- trust: each failure alone is NOT CERTIFIABLE, tier 2, READY NO
 run_readiness "$plugin_directory/scripts/readiness.sh"
 expect_not_certifiable "trust: running from the repository copy" "not running from the installed plugin"
+expect_equal "trust: an untrusted install is reported" "TRUST: NOT CERTIFIABLE" "$(readiness_line "TRUST:")"
+expect_equal "trust: no classifier runs without trust" "CLASSIFIER FLOOR: 2 (NOT CERTIFIABLE: no trusted classifier)" "$(readiness_line "CLASSIFIER FLOOR:")"
 rm "$config_directory/plugins/installed_plugins.json"
 run_readiness
 expect_not_certifiable "trust: registry missing" "plugin registry is missing"
@@ -5399,21 +5504,37 @@ for near_miss in "git switch  work/WORK-001-I1" "git switch -c work/WORK-001-I1 
   reset_guard_log
   guard_event ask "$near_miss" coordinator >>"$(guard_log_file)"
   run_readiness
-  expect_equal "guard log: near miss '$near_miss' raises the floor" "ACTION FLOOR: 2" "$(readiness_line "ACTION FLOOR:" | cut -c1-15)"
+  expect_guard_raised "guard log: near miss '$near_miss'" ask coordinator
 done
 reset_guard_log
 guard_event deny "git switch work/WORK-001-I1" coordinator >>"$(guard_log_file)"
 run_readiness
-expect_equal "guard log: a denied resume command is not excluded" "ACTION FLOOR: 2" "$(readiness_line "ACTION FLOOR:" | cut -c1-15)"
+expect_guard_raised "guard log: a denied resume command is not excluded" deny coordinator
 ws_ready increment-worktree WORK-001 --inc I1 --branch work/WORK-001-I1-T1 >/dev/null
 reset_guard_log
 guard_event ask "git merge --no-edit work/WORK-001-I1-T1" coordinator >>"$(guard_log_file)"
 run_readiness
 expect_ready_yes "guard log: the exact merge of a recorded worktree branch is excluded"
 reset_guard_log
+guard_event deny "git merge --no-edit work/WORK-001-I1-T1" coordinator >>"$(guard_log_file)"
+run_readiness
+expect_guard_raised "guard log: a denied merge of a recorded worktree branch is not excluded" deny coordinator
+reset_guard_log
 guard_event ask "git merge --no-edit work/WORK-001-I1-T2" coordinator >>"$(guard_log_file)"
 run_readiness
-expect_equal "guard log: a merge of an unrecorded branch raises the floor" "ACTION FLOOR: 2" "$(readiness_line "ACTION FLOOR:" | cut -c1-15)"
+expect_guard_raised "guard log: a merge of an unrecorded branch" ask coordinator
+# Line order, not the one-second timestamps, places an event after the anchor.
+reset_guard_log
+guard_event ask "git status" late-session 1999-01-01T00:00:00Z >>"$(guard_log_file)"
+run_readiness
+expect_guard_raised "guard log: a later line with an earlier timestamp still counts" ask late-session
+mkdir -p "$readiness_project/.git/ai-engineering"
+{
+  guard_event ask "git status" early-session 2000-06-01T00:00:00Z
+  guard_event ask "$start_command" coordinator 2000-01-01T00:00:00Z
+} >"$(guard_log_file)"
+run_readiness
+expect_ready_yes "guard log: an earlier line with a later timestamp is before the anchor"
 # Events before the anchor are outside the window; malformed lines there are ignored.
 mkdir -p "$readiness_project/.git/ai-engineering"
 {
@@ -5461,7 +5582,7 @@ reset_guard_log
 mv "$(guard_log_file)" "$(guard_log_file).1"
 guard_event ask "git status" coordinator >"$(guard_log_file)"
 run_readiness
-expect_equal "guard log rotation: an event after a rotated anchor raises the floor" "1 ACTION FLOOR: 2" "$readiness_status $(readiness_line "ACTION FLOOR:" | cut -c1-15)"
+expect_guard_raised "guard log rotation: an event after a rotated anchor" ask coordinator
 reset_guard_log
 mv "$(guard_log_file)" "$(guard_log_file).1"
 : >"$(guard_log_file)"
@@ -5563,6 +5684,11 @@ build_readiness_project tier1-external '"true"' 1
 run_readiness
 expect_ready_yes "tier 1: READY YES with QA and a passing external review"
 expect_contains "tier 1: external review required" "EXTERNAL REVIEW: PASSED (required at tier 1)" "$readiness_output"
+expect_equal "tier 1: security review is a tier-2 requirement" "SECURITY REVIEW (internal): NOT REQUIRED at tier 1" "$(readiness_line "SECURITY REVIEW")"
+build_readiness_project tier1-reviewer-error '"exit 7"' 1
+run_readiness
+expect_equal "tier 1: an external reviewer error is READY NO" "1" "$readiness_status"
+expect_contains "tier 1: the reviewer error is the reason" "external review is required at tier 1 and did not pass (ERROR (reviewer exit 7))" "$(readiness_line "READY:")"
 build_readiness_project tier1-unconfigured null 1
 run_readiness
 expect_equal "tier 1: NOT CONFIGURED external review is READY NO" "1" "$readiness_status"
@@ -5573,9 +5699,23 @@ record_review qa
 record_review security
 run_readiness
 expect_equal "tier 2: READY NO without the residual-risk list" "1" "$readiness_status"
+expect_contains "tier 2: the missing residual-risk list is the reason" "the residual-risk list covering HEAD is MISSING" "$(readiness_line "READY:")"
 record_review residual-risks
 run_readiness
 expect_ready_yes "tier 2: READY YES with QA, security, residual risks and a passing external review"
+ws_ready evidence WORK-001 --inc I1 --kind review --reviewer security --result fail --sha "$(readiness_git "$readiness_project" rev-parse HEAD)" >/dev/null
+ws_ready evidence WORK-001 --inc I1 --kind residual-risks --result fail --sha "$(readiness_git "$readiness_project" rev-parse HEAD)" >/dev/null
+run_readiness
+expect_equal "tier 2: a failed security review" "SECURITY REVIEW (internal): FAILED" "$(readiness_line "SECURITY REVIEW")"
+expect_equal "tier 2: a failed residual-risk list" "RESIDUAL RISKS: FAILED" "$(readiness_line "RESIDUAL RISKS:")"
+record_review security
+record_review residual-risks
+commit_change package.json
+record_review qa
+run_readiness
+expect_equal "tier 2: security evidence for an older commit is stale" "SECURITY REVIEW (internal): STALE" "$(readiness_line "SECURITY REVIEW")"
+expect_equal "tier 2: a residual-risk list for an older commit is stale" "RESIDUAL RISKS: STALE" "$(readiness_line "RESIDUAL RISKS:")"
+expect_equal "tier 2: stale evidence is READY NO, certifiable" "1 CERTIFIABLE: YES" "$readiness_status $(readiness_line "CERTIFIABLE:")"
 build_readiness_project tier2-reviewer-fails '"exit 1"' 0
 commit_change package.json
 record_review qa
@@ -5598,6 +5738,261 @@ run_readiness
 expect_contains "gate: the base gate certifies, not the branch's" "GATE full: PASSED" "$readiness_output"
 expect_contains "gate: a change to the gate is READY NO" "the change modifies the full gate" "$(readiness_line "READY:")"
 expect_contains "gate: the gate change is classified tier 2" "tier2:gates" "$(readiness_line "CLASSIFIER FLOOR:")"
+build_readiness_project gate-unconfigured null 0 ""
+run_readiness
+expect_equal "gate: no full gate is READY NO, certifiable" "1 CERTIFIABLE: YES" "$readiness_status $(readiness_line "CERTIFIABLE:")"
+expect_contains "gate: the missing gate is reported" "GATE full: NOT CONFIGURED" "$readiness_output"
+build_readiness_project gate-forged null 0 'echo "GATE full: PASSED (exit 0) command: forged"; exit 1'
+run_readiness
+expect_contains "gate: a PASSED line printed by a failing gate is not the verdict" "GATE full: FAILED (exit 1)" "$(readiness_line "GATE full:")"
+expect_contains "gate: the forged pass is READY NO" "the full gate did not pass" "$(readiness_line "READY:")"
+
+# --- base (H1): the recorded base, never a moved default-branch ref
+build_readiness_project base-moved null 0
+base_moved_recorded="$(readiness_git "$readiness_project" rev-parse refs/remotes/origin/main)"
+readiness_git "$readiness_project" update-ref refs/remotes/origin/main HEAD
+run_readiness
+expect_not_certifiable "base: origin/main moved to HEAD" "the default-branch ref changed after the increment began"
+expect_equal "base: no gate runs against a moved ref" "GATE full: NOT RUN (no base commit)" "$(readiness_line "GATE full:")"
+expect_equal "base: no classifier runs against a moved ref" "CLASSIFIER FLOOR: 2 (NOT CERTIFIABLE: no trusted classifier)" "$(readiness_line "CLASSIFIER FLOOR:")"
+base_moved_newer="$(readiness_git "$readiness_project" commit-tree -p "$base_moved_recorded" -m newer "$base_moved_recorded^{tree}")"
+readiness_git "$readiness_project" update-ref refs/remotes/origin/main "$base_moved_newer"
+run_readiness
+expect_not_certifiable "base: a newer default-branch commit is not accepted automatically" "a newer ref is never accepted automatically"
+readiness_git "$readiness_project" update-ref refs/remotes/origin/main "$base_moved_recorded"
+run_readiness
+expect_ready_yes "base: the ref back at the recorded base"
+expect_contains "base: the block names the recorded base" "BASE: $base_moved_recorded (recorded increment base; origin/main at $base_moved_recorded)" "$readiness_output"
+ws_ready increment-set WORK-001 --inc I1 --base-sha "$base_moved_newer" >/dev/null 2>&1
+expect_equal "base: workstate never replaces a recorded base" "$base_moved_recorded" "$(jq -r '.increments[0].baseSha' "$(readiness_state_file)")"
+edit_readiness_state '.increments[0].baseSha = null'
+run_readiness
+expect_not_certifiable "base: no recorded base" "has no recorded base commit"
+# A branch commit recorded as the base, with the ref moved to match: the branch reflog shows
+# where the increment really began.
+build_readiness_project base-forged null 0
+base_forged_commit="$(readiness_git "$readiness_project" rev-parse HEAD)"
+edit_readiness_state ".increments[0].baseSha = \"$base_forged_commit\""
+readiness_git "$readiness_project" update-ref refs/remotes/origin/main "$base_forged_commit"
+commit_change package.json
+record_review qa
+run_readiness
+expect_not_certifiable "base: a recorded base the branch was not created from" "does not show it created from the recorded base"
+build_readiness_project base-empty null 0
+cp "$(readiness_state_file)" "$readiness_root/base-empty-state.json"
+readiness_git "$readiness_project" reset -q --hard refs/remotes/origin/main
+cp "$readiness_root/base-empty-state.json" "$(readiness_state_file)"
+run_readiness
+expect_equal "base: an increment with no commits is READY NO, certifiable" "1 CERTIFIABLE: YES" "$readiness_status $(readiness_line "CERTIFIABLE:")"
+expect_contains "base: no commits is the reason" "the increment has no commits after its base" "$(readiness_line "READY:")"
+
+# --- work-item records (M1): one validated snapshot; a failed read or a change is NOT CERTIFIABLE
+build_readiness_project records-corrupt null 0
+printf '{ not json' >"$(readiness_state_file)"
+run_readiness
+expect_not_certifiable "records: an unreadable state" "work-item records for WORK-001 could not be read and validated"
+expect_equal "records: no records are not reported as zero findings" "OPEN FINDINGS: unknown (no records)" "$(readiness_line "OPEN FINDINGS:")"
+printf '#!/bin/sh\nprintf x >>"%s"\n' "$readiness_root/records-changed/.agents/specs/active/WORK-001.state.json" >"$readiness_root/rewrite-state.sh"
+build_readiness_project records-changed null 0 "sh '$readiness_root/rewrite-state.sh'"
+ws_ready finding-add WORK-001 --finding F1 --source qa --severity low --summary "open" >/dev/null
+run_readiness
+expect_not_certifiable "records: a gate that rewrites the state while readiness runs" "the work-item state or spec changed while readiness ran"
+expect_equal "records: the open finding still comes from the snapshot" "OPEN FINDINGS: 1" "$(readiness_line "OPEN FINDINGS:")"
+
+# --- working tree (M2): hidden changes and an unreadable status fail closed
+build_readiness_project tree-flags null 0
+readiness_git "$readiness_project" update-index --skip-worktree README.md
+printf 'module.exports = () => true;\n' >"$readiness_project/README.md"
+run_readiness
+expect_not_certifiable "working tree: a skip-worktree file" "tracked file README.md is marked assume-unchanged or skip-worktree"
+readiness_git "$readiness_project" update-index --no-skip-worktree README.md
+readiness_git "$readiness_project" checkout -q -- README.md
+readiness_git "$readiness_project" update-index --assume-unchanged package.json
+run_readiness
+expect_not_certifiable "working tree: an assume-unchanged file" "tracked file package.json is marked assume-unchanged or skip-worktree"
+readiness_git "$readiness_project" update-index --no-assume-unchanged package.json
+cp "$readiness_project/.git/index" "$readiness_root/tree-flags-index"
+printf 'garbage' >"$readiness_project/.git/index"
+run_readiness
+expect_not_certifiable "working tree: git status fails" "git status failed"
+cp "$readiness_root/tree-flags-index" "$readiness_project/.git/index"
+readiness_git "$readiness_project" mv README.md README.txt
+run_readiness
+expect_not_certifiable "working tree: a staged rename" "uncommitted changes in the working tree"
+readiness_git "$readiness_project" mv README.txt README.md
+run_readiness
+expect_ready_yes "working tree: restored"
+
+# --- full gate (M2): a fresh local clone at exactly HEAD, never the development checkout
+# The gate checks, from inside, that it runs without readiness's two Git variables, on the
+# clone's own branch at HEAD, with no remote and no copy of the increment branch. The temporary
+# directory's path contains words that make the guard look Git state up ("checkout", "push").
+# shellcheck disable=SC2016 # the gate command is run later by the gate, not by this shell
+{
+  gate_probe_command='test -z "${GIT_NO_REPLACE_OBJECTS+set}" && test -z "${GIT_NO_LAZY_FETCH+set}"'
+  gate_probe_command="$gate_probe_command"' && test "$(git symbolic-ref HEAD)" = refs/heads/ai-engineering-readiness-gate'
+  gate_probe_command="$gate_probe_command"' && test "$(git for-each-ref --format="%(refname)" refs/heads refs/remotes)" = refs/heads/ai-engineering-readiness-gate'
+  gate_probe_command="$gate_probe_command"' && test ! -e local-only.txt && test -z "$(git remote)" && test -z "$(git status --porcelain)"'
+  gate_probe_command="$gate_probe_command"' && git rev-parse HEAD >'"'$readiness_root/gate-head.txt'"' && pwd -P >'"'$readiness_root/gate-directory.txt'"' && touch gate-wrote.txt'
+}
+build_readiness_project gate-isolated null 0 "$gate_probe_command"
+printf 'local-only.txt\n' >>"$readiness_project/.git/info/exclude"
+printf 'ignored, untracked and only in the development checkout\n' >"$readiness_project/local-only.txt"
+gate_tmp="$readiness_root/checkout-push-tmp"
+mkdir -p "$gate_tmp"
+TMPDIR="$gate_tmp" run_readiness
+expect_ready_yes "gate isolation: under a temporary path with guard trigger words, the gate passes only in the clone"
+expect_contains "gate isolation: the base-commit gate passed" "GATE full: PASSED (exit 0)" "$(readiness_line "GATE full:")"
+expect_equal "gate isolation: the gate ran at exactly HEAD" "$(readiness_git "$readiness_project" rev-parse HEAD)" "$(cat "$readiness_root/gate-head.txt" 2>/dev/null)"
+case "$(cat "$readiness_root/gate-directory.txt" 2>/dev/null)" in
+  "$(cd "$gate_tmp" && pwd -P)/"*) pass ;;
+  *) fail "gate isolation: the gate ran in a temporary clone (got '$(cat "$readiness_root/gate-directory.txt" 2>/dev/null)')" ;;
+esac
+if [ -e "$readiness_project/gate-wrote.txt" ]; then fail "gate isolation: the gate wrote into the development checkout"; else pass; fi
+expect_equal "gate isolation: the temporary clone is removed" "" "$(ls -A "$gate_tmp")"
+expect_equal "gate isolation: the clone's branch never reaches the development repository" "" "$(readiness_git "$readiness_project" for-each-ref refs/heads/ai-engineering-readiness-gate)"
+# A replace ref could show the external review other objects than readiness reads.
+readiness_git "$readiness_project" replace "$(readiness_git "$readiness_project" rev-parse HEAD)" "$(readiness_git "$readiness_project" rev-parse HEAD~1)"
+run_readiness
+expect_not_certifiable "gate isolation: a replace ref in the repository" "the repository has replace refs"
+readiness_git "$readiness_project" replace -d "$(readiness_git "$readiness_project" rev-parse HEAD)" >/dev/null
+# The guard still refuses an unsafe gate command inside the clone.
+build_readiness_project gate-unsafe null 0 "terraform apply -auto-approve"
+run_readiness
+expect_contains "gate: the guard still refuses a high-impact gate in the clone" "GATE full: REFUSED" "$(readiness_line "GATE full:")"
+expect_equal "gate: a refused gate is READY NO, certifiable" "1 CERTIFIABLE: YES" "$readiness_status $(readiness_line "CERTIFIABLE:")"
+expect_equal "gate isolation: the development checkout is unchanged" "" "$(readiness_git "$readiness_project" status --porcelain=v1 --untracked-files=all -- . ':!.agents/specs/active/WORK-001.state.json')"
+
+# --- external review at tier 0 (M3): optional when not configured, never ignored when configured
+build_readiness_project tier0-reviewer-blocks '"exit 1"' 0
+run_readiness
+expect_equal "tier 0: a configured reviewer's blocking findings are READY NO" "1 EFFECTIVE TIER: 0 (classified)" "$readiness_status $(readiness_line "EFFECTIVE TIER:")"
+expect_contains "tier 0: the blocking findings are the reason" "the configured external review did not pass (BLOCKING FINDINGS)" "$(readiness_line "READY:")"
+build_readiness_project tier0-reviewer-error '"exit 7"' 0
+run_readiness
+expect_contains "tier 0: a configured reviewer's error is READY NO" "the configured external review did not pass (ERROR (reviewer exit 7))" "$(readiness_line "READY:")"
+build_readiness_project tier0-reviewer-passes '"true"' 0
+run_readiness
+expect_ready_yes "tier 0: a configured reviewer that passes"
+
+# --- more trust cells, branch identity, report lines and classifier floor 1
+build_readiness_project trust-cells null 0
+rm "$config_directory/plugins/known_marketplaces.json"
+run_readiness
+expect_not_certifiable "trust: known marketplaces missing" "known-marketplaces record is missing"
+printf '{"ai-engineering-system": \n' >"$config_directory/plugins/known_marketplaces.json"
+run_readiness
+expect_not_certifiable "trust: known marketplaces malformed" "known-marketplaces record is missing, unreadable or malformed"
+write_known "v$readiness_version" "$readiness_root/no-such-clone"
+run_readiness
+expect_not_certifiable "trust: the marketplace clone is missing" "the marketplace clone does not exist"
+reset_trust
+readiness_git "$marketplace_clone" tag -d "v$readiness_version" >/dev/null
+run_readiness
+expect_not_certifiable "trust: the release tag is missing" "does not resolve to the recorded commit"
+readiness_git "$marketplace_clone" tag "v$readiness_version" "$marketplace_commit"
+write_registry "[$(user_entry "$install_directory" 9.9.9)]"
+run_readiness
+expect_not_certifiable "trust: the registry version differs from plugin.json" "installed plugin.json does not report version 9.9.9"
+write_registry "[$(user_entry), $(jq -n -c --arg p "$readiness_project" --arg c "$marketplace_commit" --arg v "$readiness_version" '{scope: "project", projectPath: $p, installPath: "/nonexistent/install", version: $v, gitCommitSha: $c}')]"
+run_readiness
+expect_not_certifiable "trust: a project-scope install for this project takes precedence" "installed plugin directory does not exist"
+local_entry="$(jq -n -c --arg p "$readiness_project" --arg i "$install_directory" --arg c "$marketplace_commit" --arg v "$readiness_version" '{scope: "local", projectPath: $p, installPath: $i, version: $v, gitCommitSha: $c}')"
+write_registry "[$local_entry, $local_entry]"
+run_readiness
+expect_not_certifiable "trust: two local installs for this project are ambiguous" "more than one local-scope install"
+reset_trust
+run_readiness
+expect_ready_yes "trust: restored again"
+readiness_git "$readiness_project" switch -q -c other-branch
+run_readiness
+expect_not_certifiable "branch: a checked-out branch other than the recorded one" "the checked-out branch is not increment I1's recorded branch"
+readiness_git "$readiness_project" switch -q work/WORK-001-I1
+ws_ready increment-worktree WORK-001 --inc I1 --branch main >/dev/null
+run_readiness
+expect_not_certifiable "branch: a worktree branch named like the default branch" "recorded worktree branch main is not a plain local work branch"
+build_readiness_project report-lines null 0
+ws_ready finding-add WORK-001 --finding F1 --source security-reviewer --severity high --summary "fixed high" --security >/dev/null
+ws_ready finding-fixed WORK-001 --finding F1 --sha "$(readiness_git "$readiness_project" rev-parse HEAD)" >/dev/null
+ws_ready decision WORK-001 --trigger 1 --question "wording?" --answer "plain" >/dev/null
+ws_ready owner-action-add WORK-001 --action-id A1 --description "sign in" --increment I1 >/dev/null
+run_readiness
+expect_equal "report: fixed high findings" "HIGH-OR-ABOVE FIXES: F1" "$(readiness_line "HIGH-OR-ABOVE FIXES:")"
+expect_equal "report: conversation decisions" "CONVERSATION DECISIONS: D1" "$(readiness_line "CONVERSATION DECISIONS:")"
+expect_equal "report: owner-command risk decisions" "OWNER-COMMAND RISK DECISIONS: none" "$(readiness_line "OWNER-COMMAND RISK DECISIONS:")"
+expect_equal "report: pending owner actions" "PENDING OWNER ACTIONS: A1" "$(readiness_line "PENDING OWNER ACTIONS:")"
+expect_equal "report: no open findings" "OPEN FINDINGS: 0" "$(readiness_line "OPEN FINDINGS:")"
+build_readiness_project classifier-floor-1 null 0
+printf 'notes\n' >"$readiness_project/notes.txt"
+readiness_git "$readiness_project" add notes.txt
+readiness_git "$readiness_project" commit -q -m notes
+record_review qa
+run_readiness
+expect_equal "effective tier: classifier floor 1 over state tier 0" "EFFECTIVE TIER: 1 (classified)" "$(readiness_line "EFFECTIVE TIER:")"
+expect_contains "effective tier: tier 1 needs external review" "external review is required at tier 1" "$(readiness_line "READY:")"
+
+# --- pins
+readiness_pin_ref=v0.0.9
+build_readiness_project pin-mismatch null 0
+run_readiness
+expect_not_certifiable "pin: a pin that names another ref" "the base-commit pin does not name ref v$readiness_version"
+readiness_pin_ref=none
+build_readiness_project pin-missing null 0
+run_readiness
+expect_not_certifiable "pin: no project settings at the base commit" "no .claude/settings.json at the base commit"
+readiness_pin_ref=""
+
+# --- evidence covering HEAD: renames are not detected, so a hidden deletion is stale
+build_readiness_project evidence-rename null 0
+readiness_git "$readiness_project" mv package.json .agents/specs/active/WORK-001.log.md
+readiness_git "$readiness_project" commit -q -m "rename into the log"
+run_readiness
+expect_equal "evidence: a rename into a bookkeeping path is not covered" "QA (internal): STALE" "$(readiness_line "QA (internal):")"
+
+# --- hashes that cannot be computed (L3): a stand-in that returns nothing for command text only
+hash_stand_in="$readiness_root/hash-stand-in"
+mkdir -p "$hash_stand_in"
+for hash_tool in shasum sha256sum; do
+  real_hash_tool="$(command -v "$hash_tool" || true)"
+  [ -n "$real_hash_tool" ] || continue
+  cat >"$hash_stand_in/$hash_tool" <<STANDIN
+#!/bin/bash
+# Test stand-in: a file argument hashes normally; standard input hashes normally unless it is
+# command text ("git ..."), which hashes to nothing.
+if [ \$# -gt 0 ]; then
+  last_argument="\${*: -1}"
+  if [ "\$last_argument" != 256 ] && [ "\${last_argument#-}" = "\$last_argument" ]; then exec "$real_hash_tool" "\$@"; fi
+fi
+input_file="\$(mktemp)"
+trap 'rm -f "\$input_file"' EXIT
+cat >"\$input_file"
+if [ "\$(head -c 4 "\$input_file")" = "git " ]; then exit 0; fi
+"$real_hash_tool" "\$@" <"\$input_file"
+STANDIN
+  chmod +x "$hash_stand_in/$hash_tool"
+done
+build_readiness_project hash-failure null 0
+PATH="$hash_stand_in:$PATH" run_readiness
+expect_not_certifiable "guard log: hashes that cannot be computed" "the exact-command hashes could not be computed"
+
+# --- the real guard writes the log readiness reads (no fixture log lines)
+readiness_real_guard=yes
+build_readiness_project real-guard null 0
+readiness_real_guard=no
+expect_equal "real guard: the start confirmation was logged with the exact command's hash" "ask $(text_sha256 "$start_command")" \
+  "$(head -n 1 "$(guard_log_file)" 2>/dev/null | jq -r '"\(.decision) \(.commandSha256)"')"
+run_readiness
+expect_ready_yes "real guard: the guard's own start confirmation anchors the increment"
+real_guard "git switch work/WORK-001-I1"
+ws_ready increment-worktree WORK-001 --inc I1 --branch work/WORK-001-I1-T1 >/dev/null
+real_guard "git merge --no-edit work/WORK-001-I1-T1"
+run_readiness
+expect_ready_yes "real guard: exact resume and recorded worktree merge confirmations"
+expect_contains "real guard: both are excluded" "0 raising event(s), 2 excluded" "$readiness_output"
+real_guard "git pull" other-real-session
+run_readiness
+expect_equal "real guard: another session's prompt is classified tier 2" "1 EFFECTIVE TIER: 2 (classified)" "$readiness_status $(readiness_line "EFFECTIVE TIER:")"
+expect_contains "real guard: the other session raises the floor" "session other-real-session" "$(readiness_line "ACTION FLOOR:")"
 
 # ---------------------------------------------------------------- inject-standards
 output="$(CLAUDE_PLUGIN_ROOT="$repository_directory/plugins/ai-engineering" "$scripts/inject-standards.sh")"
