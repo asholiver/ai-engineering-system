@@ -3887,6 +3887,60 @@ expect_equal "cap: byte cap reason" cap:exceeded "$(jq -r '.paths[-1].reasons[0]
 expect_equal "cap: byte cap is not an error exit" 0 "$classify_status"
 classify_run "$classifier_repository"
 expect_equal "cap: the same diff is fine under the default cap" 1 "$(floor_of)"
+# Caps and malformed input are reported through checked scanner exit statuses, never through
+# marker lines a grep reads: inherited grep options (BSD grep applies GREP_OPTIONS) change nothing.
+grep_repository="$(new_repository grep-options main)"
+scratch_commit "$grep_repository" docs/one.md src/two.ts
+for grep_options in -F '--exclude=*' -v; do
+  GREP_OPTIONS="$grep_options" AI_ENGINEERING_CLASSIFY_MAX_PATHS=1 classify_run "$grep_repository"
+  expect_equal "cap: GREP_OPTIONS='$grep_options' cannot hide the path cap" "0 2 cap:exceeded null" \
+    "$classify_status $(floor_of) $(jq -r '[.paths[].reasons[]] | join(",")' <<<"$classify_output") $(jq -r '.error' <<<"$classify_output")"
+  GREP_OPTIONS="$grep_options" AI_ENGINEERING_CLASSIFY_MAX_BYTES=100 classify_run "$grep_repository"
+  expect_equal "cap: GREP_OPTIONS='$grep_options' cannot hide the byte cap" "0 2 cap:exceeded" \
+    "$classify_status $(floor_of) $(jq -r '.paths[-1].reasons[0]' <<<"$classify_output")"
+  GREP_OPTIONS="$grep_options" classify_run "$grep_repository"
+  expect_equal "cap: GREP_OPTIONS='$grep_options' changes nothing below the caps" "0 1" "$classify_status $(floor_of)"
+done
+# Malformed git output and failing scanners: stand-ins on PATH (the classifier uses PATH's git and
+# awk; readiness gives it only trusted directories).
+classifier_stand_ins="$work_directory/classifier-stand-ins"
+real_classifier_git="$(command -v git)"
+real_classifier_awk="$(command -v awk)"
+mkdir -p "$classifier_stand_ins"
+for malformed_kind in raw-prefix raw-truncated raw-unterminated raw-empty numstat; do
+  mkdir -p "$classifier_stand_ins/$malformed_kind"
+  case "$malformed_kind" in
+    raw-prefix) malformed_filter="*\" --raw \"*) '$real_classifier_git' \"\$@\" | LC_ALL=C tr ':' 'X'; exit 0 ;;" ;;
+    raw-truncated) malformed_filter="*\" --raw \"*) '$real_classifier_git' \"\$@\" | head -c 60; exit 0 ;;" ;;
+    # The last path loses only its terminating NUL: every record still parses.
+    raw-unterminated) malformed_filter="*\" --raw \"*) '$real_classifier_git' \"\$@\" >\"\$0.out\"; head -c \$((\$(wc -c <\"\$0.out\") - 1)) \"\$0.out\"; exit 0 ;;" ;;
+    raw-empty) malformed_filter="*\" --raw \"*) printf '\\\\0\\\\0'; exit 0 ;;" ;;
+    numstat) malformed_filter="*\" --numstat \"*) '$real_classifier_git' \"\$@\" | LC_ALL=C tr '0123456789-' 'xxxxxxxxxxx'; exit 0 ;;" ;;
+  esac
+  printf '#!/bin/bash\ncase " $* " in\n  %s\nesac\nexec %s "$@"\n' "$malformed_filter" "'$real_classifier_git'" >"$classifier_stand_ins/$malformed_kind/git"
+  chmod +x "$classifier_stand_ins/$malformed_kind/git"
+  for grep_options in "" -F; do
+    PATH="$classifier_stand_ins/$malformed_kind:$PATH" GREP_OPTIONS="$grep_options" classify_run "$grep_repository"
+    case "$malformed_kind" in numstat) malformed_reason="unexpected git diff --numstat output" ;; *) malformed_reason="unexpected git diff output" ;; esac
+    expect_equal "malformed: $malformed_kind git output fails closed (GREP_OPTIONS='$grep_options')" "3 2 $malformed_reason" \
+      "$classify_status $(floor_of) $(jq -r '.error' <<<"$classify_output")"
+  done
+done
+for failing_scanner in raw numstat sql; do
+  mkdir -p "$classifier_stand_ins/awk-$failing_scanner"
+  # shellcheck disable=SC2016 # the expansions belong to the stand-in script being written
+  printf '#!/bin/bash\nfor argument in "$@"; do case "$argument" in */%s.awk) cat >/dev/null; exit 2 ;; esac; done\nexec %s "$@"\n' \
+    "$failing_scanner" "'$real_classifier_awk'" >"$classifier_stand_ins/awk-$failing_scanner/awk"
+  chmod +x "$classifier_stand_ins/awk-$failing_scanner/awk"
+  PATH="$classifier_stand_ins/awk-$failing_scanner:$PATH" classify_run "$grep_repository"
+  case "$failing_scanner" in
+    raw) failing_reason="cannot parse the changed path list" ;;
+    numstat) failing_reason="cannot parse numstat output" ;;
+    sql) failing_reason="cannot scan the patch for destructive SQL" ;;
+  esac
+  expect_equal "scanner error: a failing $failing_scanner scanner fails closed" "3 2 $failing_reason" \
+    "$classify_status $(floor_of) $(jq -r '.error' <<<"$classify_output")"
+done
 many_repository="$(new_repository many-paths main)"
 classify_git "$many_repository" checkout -q -B scratch main
 mkdir -p "$many_repository/docs"
@@ -5506,7 +5560,7 @@ expect_guard_raised() { # label decision session
   expect_equal "$1: the event raises the action floor" "ACTION FLOOR: 2 (guard log: $2 [fixture-class] session $3)" "$(readiness_line "ACTION FLOOR:")"
 }
 
-# --- baseline: a genuinely tier-0 increment is READY: YES without an external reviewer
+# --- baseline: a genuinely tier-0 increment passes everything but base provenance without an external reviewer
 build_readiness_project tier0 null 0
 run_readiness
 expect_ready_but_unverified_base "readiness tier 0"
@@ -6461,13 +6515,23 @@ if no_leftovers_within 3 "sleep 1789" "sleep 1788"; then pass; else fail "watchd
 printf '#!/bin/sh\nprintf "%%s\\n" "$$" >>"%s"\nsleep 1033 &\nprintf "%%s\\n" "$!" >>"%s"\n: >"%s"\nwait\n: >"%s"\n' \
   "$readiness_root/slow-gate-pids" "$readiness_root/slow-gate-pids" "$readiness_root/slow-gate-started" "$readiness_root/slow-gate-finished" >"$readiness_root/slow-gate.sh"
 build_readiness_project terminated null 0 "sh '$readiness_root/slow-gate.sh'"
+# A shell started in the background has INT ignored on entry, and bash can neither trap nor reset
+# such a signal, so readiness is started through perl, which restores INT's default first (the
+# INT case is skipped without perl). Readiness started with INT ignored still handles TERM and HUP.
+with_default_interrupt=()
+# shellcheck disable=SC2016 # perl code, not shell expansion
+if command -v perl >/dev/null 2>&1; then with_default_interrupt=(perl -e '$SIG{INT} = "DEFAULT"; exec @ARGV or die "exec: $!"'); fi
 for stop_signal in TERM INT HUP; do
+  if [ "$stop_signal" = INT ] && [ "${#with_default_interrupt[@]}" -eq 0 ]; then
+    skip "termination (INT): perl is needed to undo an INT ignored on entry"
+    continue
+  fi
   rm -f "$readiness_root/slow-gate-pids" "$readiness_root/slow-gate-started" "$readiness_root/slow-gate-finished"
   rm -rf "$readiness_root/terminate-tmp"
   mkdir -p "$readiness_root/terminate-tmp"
   set -m
   CLAUDE_CONFIG_DIR="$config_directory" TMPDIR="$readiness_root/terminate-tmp" READINESS_GATE_TIMEOUT_SECONDS=1787 \
-    "$installed_readiness" WORK-001 --inc I1 "$readiness_project" >"$readiness_root/terminated.out" 2>&1 &
+    "${with_default_interrupt[@]+"${with_default_interrupt[@]}"}" "$installed_readiness" WORK-001 --inc I1 "$readiness_project" >"$readiness_root/terminated.out" 2>&1 &
   terminated_pid=$!
   set +m
   for _ in $(seq 1 300); do [ -e "$readiness_root/slow-gate-started" ] && break; sleep 0.2; done
@@ -6481,7 +6545,12 @@ for stop_signal in TERM INT HUP; do
   gate_survivors=""
   while IFS= read -r gate_pid; do kill -0 "$gate_pid" 2>/dev/null && gate_survivors="$gate_survivors $gate_pid"; done <"$readiness_root/slow-gate-pids"
   expect_equal "termination ($stop_signal): the gate's shell and its child are stopped" "" "$gate_survivors"
-  if no_leftovers_within 3 "sleep 1787" "sleep 1033"; then pass; else fail "termination ($stop_signal): the watchdog or the gate's sleep is still running"; fi
+  if no_leftovers_within 3 "sleep 1787" "sleep 1033"; then pass; else
+    fail "termination ($stop_signal): the watchdog or the gate's sleep is still running"
+    # After a failure only: stop what this iteration left, by the pids just seen running, so later
+    # iterations and the suite are not affected (no delayed or process-group signal).
+    for leftover_pid in $gate_survivors $(leftover_processes "sleep 1787" "sleep 1033" | grep -vx error); do kill -KILL "$leftover_pid" 2>/dev/null; done
+  fi
   if [ -e "$readiness_root/slow-gate-finished" ]; then fail "termination ($stop_signal): the gate ran to its end"; else pass; fi
 done
 # A TERM while a clone runs stops the clone's whole process group, its watchdog included: a stand-in
@@ -6725,7 +6794,7 @@ for escaping_target in ../../outside /etc/hosts ../docs/../../outside ../docs/..
   ln -s "$escaping_target" "$readiness_project/docs/link.md"
   commit_files "an escaping link" docs/link.md
   run_readiness
-  expect_not_certifiable "tracked files: a link to $escaping_target" "tracked symbolic link docs/link.md points outside the repository or has \"..\" after a name ($escaping_target)"
+  expect_not_certifiable "tracked files: a link to $escaping_target" "tracked symbolic link docs/link.md points outside the repository, has \"..\" after a name or holds a control character ($escaping_target)"
   readiness_git "$readiness_project" rm -q docs/link.md
   commit_files "remove it" docs/link.md
 done
@@ -6857,16 +6926,16 @@ chmod +x "$injection_directory/tools/readiness-path-probe"
 printf '[user]\n\tname = test\n\temail = test@example.com\n' >"$injection_directory/home/.gitconfig"
 printf 'def length: 99;\n' >"$injection_directory/home/.jq"
 # The gate checks that its command gets the caller's PATH and HOME and none of the removed variables.
-injection_gate="readiness-path-probe && test \"\$HOME\" = '$injection_directory/home' && test -z \"\$(/usr/bin/env | grep -E '^(LD_PRELOAD|LD_AUDIT|DYLD_INSERT_LIBRARIES|GCONV_PATH|BASHOPTS|SHELLOPTS|BASH_ENV|ENV)=')\""
+injection_gate="readiness-path-probe && test \"\$HOME\" = '$injection_directory/home' && test -z \"\$(/usr/bin/env | grep -E '^(LD_PRELOAD|LD_AUDIT|DYLD_INSERT_LIBRARIES|GCONV_PATH|BASHOPTS|SHELLOPTS|BASH_ENV|ENV|GREP_OPTIONS|GREP_COLOR|GREP_COLORS|POSIXLY_CORRECT)=')\""
 build_readiness_project injection null 0 "$injection_gate"
 readiness_output="$(env 'BASH_FUNC_jq%%=() {  echo forged; }' 'BASH_FUNC_git%%=() {  echo forged; }' \
   BASH_ENV="$injection_directory/bash-env.sh" ENV="$injection_directory/bash-env.sh" LD_PRELOAD=/nonexistent/readiness-preload.so \
   LD_AUDIT=/nonexistent/readiness-audit.so DYLD_INSERT_LIBRARIES=/nonexistent/readiness.dylib GCONV_PATH=/nonexistent/readiness-gconv \
-  SHELLOPTS=xtrace BASHOPTS=nullglob \
+  SHELLOPTS=xtrace BASHOPTS=nullglob GREP_OPTIONS=--color=never GREP_COLOR=1 GREP_COLORS=mt=01 POSIXLY_CORRECT=1 \
   PATH="$injection_directory/tools:$PATH" HOME="$injection_directory/home" XDG_CONFIG_HOME="$injection_directory/home/.config" \
   CLAUDE_CONFIG_DIR="$config_directory" "$installed_readiness" WORK-001 --inc I1 "$readiness_project" 2>&1)"
 readiness_status=$?
-expect_ready_but_unverified_base "environment: injected BASH_ENV, ENV, functions, PATH tools, preload, audit, gconv, SHELLOPTS, BASHOPTS and ~/.jq change nothing"
+expect_ready_but_unverified_base "environment: injected BASH_ENV, ENV, functions, PATH tools, preload, audit, gconv, SHELLOPTS, BASHOPTS, grep options, POSIXLY_CORRECT and ~/.jq change nothing"
 expect_contains "environment: the gate's command still got the caller's PATH and HOME" "GATE full: PASSED" "$(readiness_line "GATE full:")"
 if [ -e "$injection_directory/bash-env-ran" ]; then fail "environment: BASH_ENV or ENV reached readiness or a program it ran"; else pass; fi
 if [ -e "$injection_directory/fake-tool-ran" ]; then fail "environment: a tool from the caller's PATH ran for readiness or a plugin script"; else pass; fi
@@ -6926,6 +6995,145 @@ for binary_index in $(seq 1 201); do png_bytes "$binary_index" >"$readiness_proj
 commit_files "many images" docs/images
 run_readiness
 expect_not_certifiable "binary files: more than 200 changed binaries" "more than 200 changed binary files; they cannot all be checked and reported"
+GREP_OPTIONS=-v run_readiness
+expect_not_certifiable "binary files: GREP_OPTIONS=-v cannot change the count" "more than 200 changed binary files; they cannot all be checked and reported"
+
+# --- links (round 6): split without pattern expansion, read exactly, resolved in the clone
+build_readiness_project link-patterns null 0
+for root_entry in a b c d e f; do printf 'x\n' >"$readiness_project/$root_entry"; done
+commit_files "root entries for pattern expansion" a b c d e f
+for pattern_directory in '*' '[ab]'; do
+  mkdir -p "$readiness_project/$pattern_directory/x"
+  ln -s ../../../outside "$readiness_project/$pattern_directory/x/link"
+  readiness_git "$readiness_project" --literal-pathspecs add -- "$pattern_directory/x/link"
+  readiness_git "$readiness_project" commit -q -m "a link under a pattern-named directory"
+  run_readiness
+  expect_not_certifiable "links: a directory literally named '$pattern_directory' is one name" \
+    "tracked symbolic link $pattern_directory/x/link points outside the repository, has \"..\" after a name or holds a control character (../../../outside)"
+  readiness_git "$readiness_project" --literal-pathspecs rm -q -- "$pattern_directory/x/link"
+  readiness_git "$readiness_project" commit -q -m "remove it"
+done
+mkdir -p "$readiness_project/*/x"
+ln -s ../../README.md "$readiness_project/*/x/inside"
+readiness_git "$readiness_project" --literal-pathspecs add -- '*/x/inside'
+readiness_git "$readiness_project" commit -q -m "a link inside the repository under a '*' directory"
+run_readiness
+expect_equal "links: a contained link under a '*' directory is verified in both clones and allowed" "1 CERTIFIABLE: YES" "$readiness_status $(readiness_line "CERTIFIABLE:")"
+mkdir -p "$readiness_project/docs"
+ln -s ./hop2.md "$readiness_project/docs/hop1.md"
+ln -s ../../outside.md "$readiness_project/docs/hop2.md"
+commit_files "an escaping chain" docs/hop1.md docs/hop2.md
+run_readiness
+expect_not_certifiable "links: a chain whose second link escapes" "tracked symbolic link docs/hop2.md points outside the repository"
+readiness_git "$readiness_project" rm -q docs/hop1.md docs/hop2.md
+commit_files "remove it" docs/hop1.md docs/hop2.md
+mkdir -p "$readiness_project/docs"
+ln -s "$(printf 'README\tx.md')" "$readiness_project/docs/tab-link"
+commit_files "a link target with a control character" docs/tab-link
+run_readiness
+expect_not_certifiable "links: a target with a control character" "tracked symbolic link docs/tab-link points outside the repository, has \"..\" after a name or holds a control character"
+readiness_git "$readiness_project" rm -q docs/tab-link
+commit_files "remove it" docs/tab-link
+# A target ending in a newline: the text command substitution returns is not the link Git writes.
+newline_target_blob="$(printf '../README.md\n' | git -C "$readiness_project" hash-object -w --stdin)" # readiness_git reads /dev/null
+readiness_git "$readiness_project" update-index --add --cacheinfo "120000,$newline_target_blob,docs/newline-link"
+readiness_git "$readiness_project" commit -q -m "a link target ending in a newline"
+readiness_git "$readiness_project" checkout -- docs/newline-link
+run_readiness
+expect_not_certifiable "links: a target that cannot be read exactly" "tracked symbolic link docs/newline-link has a target that cannot be read exactly"
+# The resolution in the clone, on real files (the lexical rule refuses all of these first).
+resolver_definition="$(sed -n '/^link_resolves_inside() {/,/^}/p' "$scripts/readiness.sh")"
+resolver_root="$readiness_root/resolver"
+rm -rf "$resolver_root"
+mkdir -p "$resolver_root/clone/docs" "$resolver_root/outside"
+: >"$resolver_root/clone/README.md"
+ln -s ../README.md "$resolver_root/clone/docs/readme"
+ln -s .. "$resolver_root/clone/docs/up"
+ln -s ./readme "$resolver_root/clone/docs/chain-inside"
+ln -s missing-file "$resolver_root/clone/docs/dangling-file"
+ln -s ../../outside "$resolver_root/clone/docs/out"
+ln -s ./out "$resolver_root/clone/docs/chain-out"
+ln -s up/../.. "$resolver_root/clone/docs/through-directory-link"
+ln -s /etc "$resolver_root/clone/docs/absolute"
+ln -s missing/file "$resolver_root/clone/docs/dangling-directory"
+ln -s loop-b "$resolver_root/clone/docs/loop-a"
+ln -s loop-a "$resolver_root/clone/docs/loop-b"
+resolver_clone="$(cd "$resolver_root/clone" && pwd -P)"
+for resolver_case in readme:inside up:inside chain-inside:inside dangling-file:inside out:outside chain-out:outside \
+  through-directory-link:outside absolute:outside dangling-directory:outside loop-a:outside; do
+  resolver_result="$(eval "$resolver_definition"; if link_resolves_inside "$resolver_clone" "docs/${resolver_case%%:*}"; then echo inside; else echo outside; fi)"
+  expect_equal "links: docs/${resolver_case%%:*} resolves ${resolver_case##*:} the clone" "${resolver_case##*:}" "$resolver_result"
+done
+
+# --- grep options (round 6): BSD grep applies GREP_OPTIONS; readiness's checks never depend on it
+build_readiness_project grep-options '"true"' 0
+printf 'README.md -diff\n' >"$readiness_project/.gitattributes"
+commit_files "attributes: -diff" .gitattributes
+commit_change README.md
+record_review qa
+for grep_options in -F '--exclude=*' -v; do
+  GREP_OPTIONS="$grep_options" run_readiness
+  expect_not_certifiable "environment: GREP_OPTIONS='$grep_options' cannot hide a -diff text file from the review check" "README.md (text) has the -diff attribute"
+done
+
+# --- the classifier's caps are not taken from the caller (round 6)
+build_readiness_project classifier-caps null 0
+AI_ENGINEERING_CLASSIFY_MAX_PATHS=1 AI_ENGINEERING_CLASSIFY_MAX_BYTES=1 run_readiness
+expect_ready_but_unverified_base "classifier: caller-set caps are not passed to the classifier"
+case "$(readiness_line "CLASSIFIER FLOOR:")" in *cap:exceeded*) fail "classifier: a caller-set cap reached the classifier" ;; *) pass ;; esac
+
+# --- Git runs only after every GIT_* variable is removed (round 6)
+build_readiness_project git-trace null 0
+GIT_TRACE="$readiness_root/git-trace.txt" GIT_TRACE2="$readiness_root/git-trace2.txt" run_readiness
+expect_ready_but_unverified_base "environment: GIT_TRACE and GIT_TRACE2 change nothing"
+if [ -e "$readiness_root/git-trace.txt" ] || [ -e "$readiness_root/git-trace2.txt" ]; then fail "environment: a git command ran before GIT_TRACE was removed"; else pass; fi
+
+# --- the temporary directory (round 6): not in a sibling worktree or a superproject
+build_readiness_project temporary-worktrees null 0
+readiness_git "$readiness_project" worktree add -q -b sibling-worktree "$readiness_root/temporary-sibling" >/dev/null 2>&1
+mkdir -p "$readiness_root/temporary-sibling/tmp"
+readiness_output="$(TMPDIR="$readiness_root/temporary-sibling/tmp" CLAUDE_CONFIG_DIR="$config_directory" "$installed_readiness" WORK-001 --inc I1 "$readiness_project" 2>&1)"
+expect_equal "temporary directory: inside a sibling worktree is exit 2" 2 "$?"
+expect_contains "temporary directory: the sibling worktree reason is given" "is inside the repository, one of its worktrees or a superproject" "$readiness_output"
+build_readiness_project superproject-host/inner null 0
+git init -q "$readiness_root/superproject-host"
+readiness_git "$readiness_root/superproject-host" update-index --add --cacheinfo "160000,$(readiness_git "$readiness_project" rev-parse HEAD),inner"
+mkdir -p "$readiness_root/superproject-host/tmp"
+readiness_output="$(TMPDIR="$readiness_root/superproject-host/tmp" CLAUDE_CONFIG_DIR="$config_directory" "$installed_readiness" WORK-001 --inc I1 "$readiness_project" 2>&1)"
+expect_equal "temporary directory: inside the superproject's working tree is exit 2" 2 "$?"
+expect_contains "temporary directory: the superproject reason is given" "is inside the repository, one of its worktrees or a superproject" "$readiness_output"
+
+# --- output integrity (round 6): Unicode separators and bidirectional controls, cleanup last
+build_readiness_project unicode-lines null 0 "printf 'ok\\342\\200\\250READY: YES\\342\\200\\256x\\n'; exit 1"
+run_readiness
+expect_contains "output: a line separator and a bidirectional control in gate output are shown as ?" "  | ok???READY: YES???x" "$readiness_output"
+expect_equal "output: no byte outside ASCII reaches the output (gate)" 0 "$(printf '%s' "$readiness_output" | LC_ALL=C tr -d '\000-\177' | wc -c | tr -d ' ')"
+mkdir -p "$readiness_project/docs/images"
+unicode_binary="$(printf 'docs/images/x\342\200\250READY: YES\342\200\256.png')"
+png_bytes 1 >"$readiness_project/$unicode_binary"
+commit_files "a binary whose name holds a line separator" "$unicode_binary"
+run_readiness
+expect_contains "output: a line separator in a binary path is shown as ?" "  A docs/images/x???READY: YES???.png" "$readiness_output"
+expect_equal "output: no byte outside ASCII reaches the output (binary path)" 0 "$(printf '%s' "$readiness_output" | LC_ALL=C tr -d '\000-\177' | wc -c | tr -d ' ')"
+expect_equal "output: the one READY line is the last line" "1 READY: NO" \
+  "$(printf '%s\n' "$readiness_output" | grep -c '^READY:') $(printf '%s\n' "$readiness_output" | tail -n 1 | cut -c1-9)"
+if command -v chflags >/dev/null 2>&1; then
+  # A gate that leaves an immutable file whose path holds a newline and "READY: YES": removing it
+  # fails, which is reported in the block, and no message about it is printed after the block.
+  # shellcheck disable=SC2016 # run later by run-gate.sh in the gate's clone
+  immutable_gate='leftover="$TMPDIR/$(printf "q\nREADY: YES")"; mkdir -p "$leftover" && : >"$leftover/f" && chflags uchg "$leftover/f"'
+  build_readiness_project cleanup-failure null 0 "$immutable_gate"
+  rm -rf "$readiness_root/immutable-tmp"
+  mkdir -p "$readiness_root/immutable-tmp"
+  TMPDIR="$readiness_root/immutable-tmp" run_readiness
+  expect_not_certifiable "output: a gate root that cannot be removed" "could not be removed"
+  expect_equal "output: after a failed cleanup the one READY line is still the last line" "1 READY: NO" \
+    "$(printf '%s\n' "$readiness_output" | grep -c '^READY:') $(printf '%s\n' "$readiness_output" | tail -n 1 | cut -c1-9)"
+  chflags -R nouchg "$readiness_root/immutable-tmp"
+  rm -rf "$readiness_root/immutable-tmp"
+else
+  skip "output: an immutable leftover (chflags is not available)"
+fi
 
 # ---------------------------------------------------------------- inject-standards
 output="$(CLAUDE_PLUGIN_ROOT="$repository_directory/plugins/ai-engineering" "$scripts/inject-standards.sh")"

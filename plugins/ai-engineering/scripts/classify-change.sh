@@ -210,6 +210,17 @@ fail_closed() {
   exit 3
 }
 
+# The repository comes from the directory argument only: inherited variables that redirect
+# git to another repository, index, object store or configuration are removed before any git
+# command runs (git --version included). grep's option variables go too (BSD grep reads
+# GREP_OPTIONS), although no result here depends on grep.
+unset GIT_EXTERNAL_DIFF GIT_PAGER GIT_DIFF_OPTS GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE \
+  GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT \
+  GIT_COMMON_DIR GIT_REPLACE_REF_BASE GIT_ATTR_SOURCE GREP_OPTIONS GREP_COLOR GREP_COLORS
+# Replace refs could swap the commits or trees being classified; a lazy fetch could run a
+# remote program or change the object set.
+export GIT_NO_REPLACE_OBJECTS=1 GIT_NO_LAZY_FETCH=1
+
 command -v jq >/dev/null 2>&1 || fail_closed "jq is not available"
 command -v git >/dev/null 2>&1 || fail_closed "git is not available"
 git_version_is_supported "$(git --version 2>/dev/null)" || fail_closed "git is older than 2.40 or its version cannot be parsed"
@@ -218,14 +229,6 @@ work_directory="$(mktemp -d "${TMPDIR:-/tmp}/classify-change.XXXXXX")" || fail_c
 write_awk_library "$work_directory/library.awk"
 
 # ---------------------------------------------------------------- repository and refs
-# The repository comes from the directory argument only: inherited variables that redirect
-# git to another repository, index, object store or configuration are removed first.
-unset GIT_EXTERNAL_DIFF GIT_PAGER GIT_DIFF_OPTS GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE \
-  GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT \
-  GIT_COMMON_DIR GIT_REPLACE_REF_BASE GIT_ATTR_SOURCE
-# Replace refs could swap the commits or trees being classified; a lazy fetch could run a
-# remote program or change the object set.
-export GIT_NO_REPLACE_OBJECTS=1 GIT_NO_LAZY_FETCH=1
 
 # Neutralise configuration that could hide or reshape changes or run programs.
 run_git() {
@@ -387,6 +390,14 @@ elif [ "$raw_git_status" -ne 0 ]; then
 fi
 
 encode_stream() { LC_ALL=C tr '\000\n\t' '\001\002\003'; }
+# git's -z output ends every record with NUL; output that does not end with one was cut short.
+ends_with_nul() { [ "$(tail -c 1 "$1" | od -An -tx1 | tr -d ' \n')" = 00 ]; }
+# The awk scanners report through their exit status, never through marker lines in their output:
+# 0 complete, 10 a cap was reached, 11 malformed input. Any other status (awk's own errors, a
+# killed process) is a scanner failure, and every status is checked: nothing is inferred from
+# what the output does or does not contain.
+scanner_cap_status=10
+scanner_malformed_status=11
 
 entries_file="$work_directory/entries.tsv"
 : >"$entries_file"
@@ -394,6 +405,7 @@ if [ "$path_cap_exceeded" -eq 0 ] && [ "$raw_size" -gt 0 ]; then
   if [ "$(LC_ALL=C tr -dc '\001\002\003' <"$raw_file" | wc -c | tr -d ' ')" -ne 0 ]; then
     fail_closed "a changed path contains a reserved control byte"
   fi
+  ends_with_nul "$raw_file" || fail_closed "unexpected git diff output"
   raw_program="$work_directory/raw.awk"
   cat >"$raw_program" <<'AWK_RAW'
 function flags_for(mode) {
@@ -436,17 +448,26 @@ BEGIN { RS = "\001"; state = 0; entry_count = 0; capped = 0 }
   }
 }
 END {
-  if (capped) print "CAP"
-  else if (malformed || state != 0) print "ERR"
+  if (capped) exit 10
+  if (malformed || state != 0) exit 11
+  exit 0
 }
 AWK_RAW
-  encode_stream <"$raw_file" | LC_ALL=C awk -v max_paths="$max_paths" -f "$raw_program" >"$entries_file" ||
-    fail_closed "cannot parse the changed path list"
-  if grep -q '^ERR$' "$entries_file"; then fail_closed "unexpected git diff output"; fi
-  if grep -q '^CAP$' "$entries_file"; then
-    path_cap_exceeded=1
-    : >"$entries_file"
-  fi
+  encode_stream <"$raw_file" | LC_ALL=C awk -v max_paths="$max_paths" -f "$raw_program" >"$entries_file"
+  raw_scan_status=("${PIPESTATUS[@]}")
+  case "${raw_scan_status[1]}" in
+    0)
+      [ "${raw_scan_status[0]}" -eq 0 ] || fail_closed "cannot read the changed path list"
+      # git listed something, so an empty result is malformed output, never an empty diff.
+      [ -s "$entries_file" ] || fail_closed "unexpected git diff output"
+      ;;
+    "$scanner_cap_status")
+      path_cap_exceeded=1
+      : >"$entries_file"
+      ;;
+    "$scanner_malformed_status") fail_closed "unexpected git diff output" ;;
+    *) fail_closed "cannot parse the changed path list" ;;
+  esac
 fi
 
 binary_file="$work_directory/binary.txt"
@@ -463,6 +484,7 @@ if [ "$path_cap_exceeded" -eq 0 ] && [ -s "$entries_file" ]; then
   numstat_git_status="${PIPESTATUS[0]}"
   [ "$(wc -c <"$numstat_file" | tr -d ' ')" -le "$raw_output_limit" ] && [ "$numstat_git_status" -eq 0 ] ||
     fail_closed "git diff --numstat failed: $(head -n 1 "$work_directory/git-error.txt" | cut -c 1-200)"
+  ends_with_nul "$numstat_file" || fail_closed "unexpected git diff --numstat output"
   numstat_program="$work_directory/numstat.awk"
   cat >"$numstat_program" <<'AWK_NUMSTAT'
 BEGIN { RS = "\001"; pending = 0 }
@@ -473,16 +495,24 @@ BEGIN { RS = "\001"; pending = 0 }
     next
   }
   if ($0 == "") next
-  if (match($0, /^[-0-9]+\003[-0-9]+\003/) == 0) { print "ERR"; exit }
+  if (match($0, /^[-0-9]+\003[-0-9]+\003/) == 0) { malformed = 1; exit }
   counts = substr($0, 1, RLENGTH); rest = substr($0, RLENGTH + 1)
   binary = (counts == "-\003-\003")
   if (rest == "") pending = 2
   else if (binary) print rest
 }
+END {
+  if (malformed || pending > 0) exit 11
+  exit 0
+}
 AWK_NUMSTAT
-  encode_stream <"$numstat_file" | LC_ALL=C awk -f "$numstat_program" >"$binary_file" ||
-    fail_closed "cannot parse numstat output"
-  if grep -q '^ERR$' "$binary_file"; then fail_closed "unexpected git diff --numstat output"; fi
+  encode_stream <"$numstat_file" | LC_ALL=C awk -f "$numstat_program" >"$binary_file"
+  numstat_scan_status=("${PIPESTATUS[@]}")
+  case "${numstat_scan_status[1]}:${numstat_scan_status[0]}" in
+    0:0) ;;
+    "$scanner_malformed_status":*) fail_closed "unexpected git diff --numstat output" ;;
+    *) fail_closed "cannot parse numstat output" ;;
+  esac
 
   # ---------------------------------------------------------------- destructive SQL in added lines
   sql_program="$work_directory/sql.awk"
@@ -500,7 +530,7 @@ BEGIN {
 }
 {
   bytes_read += length($0) + 1
-  if (bytes_read > max_bytes) { print "CAP"; exit }
+  if (bytes_read > max_bytes) { capped = 1; exit }
   if (substr($0, 1, 11) == "diff --git ") { in_header = 1; current_path = ""; next }
   if (in_header) {
     if (substr($0, 1, 4) == "+++ ") {
@@ -516,13 +546,19 @@ BEGIN {
     if (!(current_path in reported)) { reported[current_path] = 1; print "SQL\t" current_path }
   }
 }
+END {
+  if (capped) exit 10
+  exit 0
+}
 AWK_SQL
   run_git diff -U0 --text "${patch_options[@]}" "$base_sha" "$head_sha" -- 2>"$work_directory/git-error.txt" |
     LC_ALL=C awk -v max_bytes="$max_bytes" -f "$sql_program" >"$sql_file"
   patch_status=("${PIPESTATUS[@]}")
-  if grep -q '^CAP$' "$sql_file"; then
-    byte_cap_exceeded=1
-  elif [ "${patch_status[0]}" -ne 0 ] || [ "${patch_status[1]}" -ne 0 ]; then
+  if [ "${patch_status[1]}" = "$scanner_cap_status" ]; then
+    byte_cap_exceeded=1 # git may have been stopped by the closed pipe
+  elif [ "${patch_status[1]}" -ne 0 ]; then
+    fail_closed "cannot scan the patch for destructive SQL"
+  elif [ "${patch_status[0]}" -ne 0 ]; then
     fail_closed "git diff -U0 failed: $(head -n 1 "$work_directory/git-error.txt" | cut -c 1-200)"
   fi
 
