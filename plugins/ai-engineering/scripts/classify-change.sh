@@ -620,7 +620,7 @@ AWK_TREE
       LC_ALL=C tr '\000\n\t' '\n\002\003' |
       LC_ALL=C awk -v collisions="${tree_scan##*:}" -v entries_path="$entries_file" -f "$tree_program" "$entries_file" - >>"$tree_facts_file"
     tree_status=("${PIPESTATUS[@]}")
-    if [ "${tree_status[0]}" -ne 0 ] || [ "${tree_status[2]}" -ne 0 ]; then
+    if [ "${tree_status[0]}" -ne 0 ] || [ "${tree_status[1]}" -ne 0 ] || [ "${tree_status[2]}" -ne 0 ]; then
       fail_closed "cannot list the repository tree: $(head -n 1 "$work_directory/git-error.txt" | cut -c 1-200)"
     fi
   done

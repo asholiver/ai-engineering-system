@@ -3941,6 +3941,25 @@ for failing_scanner in raw numstat sql; do
   expect_equal "scanner error: a failing $failing_scanner scanner fails closed" "3 2 $failing_reason" \
     "$classify_status $(floor_of) $(jq -r '.error' <<<"$classify_output")"
 done
+# A failing tr in the tree scan would hide plugin roots and case collisions (plugin code is tier 2).
+plugin_tree_repository="$(new_repository plugin-tree main)"
+mkdir -p "$plugin_tree_repository/.claude-plugin"
+printf '{"name": "fixture"}\n' >"$plugin_tree_repository/.claude-plugin/plugin.json"
+classify_git "$plugin_tree_repository" add -A
+classify_git "$plugin_tree_repository" commit -q -m plugin
+scratch_commit "$plugin_tree_repository" run.txt
+classify_run "$plugin_tree_repository"
+expect_equal "scanner error: plugin code is tier 2 with a working tree scan" "2 tier2:plugin-code" "$(floor_of) $(reasons_of run.txt both)"
+mkdir -p "$classifier_stand_ins/tr-tree"
+# shellcheck disable=SC2016 # the expansions belong to the stand-in script being written
+printf '#!/bin/bash
+if [ "${2-}" = %s ]; then cat >/dev/null; exit 1; fi
+exec %s "$@"
+' "'\\n\\002\\003'" "'$(command -v tr)'" >"$classifier_stand_ins/tr-tree/tr"
+chmod +x "$classifier_stand_ins/tr-tree/tr"
+PATH="$classifier_stand_ins/tr-tree:$PATH" classify_run "$plugin_tree_repository"
+expect_equal "scanner error: a failing tr in the tree scan fails closed" "3 2" "$classify_status $(floor_of)"
+expect_contains "scanner error: the tree-scan failure is named" "cannot list the repository tree" "$(jq -r '.error' <<<"$classify_output")"
 many_repository="$(new_repository many-paths main)"
 classify_git "$many_repository" checkout -q -B scratch main
 mkdir -p "$many_repository/docs"
