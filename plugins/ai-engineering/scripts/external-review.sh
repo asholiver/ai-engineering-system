@@ -36,12 +36,14 @@ if classify_command_impact "$review_command" "$repository_directory"; then
   echo "EXTERNAL REVIEW: ERROR (refused: the configured command contains a high-impact operation; classified $impact_decision: ${impact_classes:-unclassified})"
   exit 2
 fi
+# Readiness passes the caller's PATH and HOME for the configured command only (see run-gate.sh).
 output_file="$(mktemp "${TMPDIR:-/tmp}/ai-engineering-review.XXXXXX")"
 trap 'rm -f "$output_file"' EXIT
 
 (
   cd "$repository_directory" &&
-  REVIEW_BASE_REF="$1" REVIEW_HEAD_REF="$2" REVIEW_SPEC_PATH="${3:-}" bash -c "$review_command"
+  PATH="${AI_ENGINEERING_COMMAND_PATH:-$PATH}" HOME="${AI_ENGINEERING_COMMAND_HOME:-${HOME-}}" \
+    REVIEW_BASE_REF="$1" REVIEW_HEAD_REF="$2" REVIEW_SPEC_PATH="${3:-}" bash -c "$review_command"
 ) >"$output_file" 2>&1
 exit_code=$?
 

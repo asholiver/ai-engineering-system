@@ -60,7 +60,12 @@ fi
 output_file="$(mktemp "${TMPDIR:-/tmp}/ai-engineering-gate.XXXXXX")"
 trap 'rm -f "$output_file"' EXIT
 
-(cd "$repository_directory" && bash -c "$gate_command") >"$output_file" 2>&1
+# Readiness runs this script with controlled tools and an empty HOME, and passes the caller's PATH
+# and HOME for the configured command (AI_ENGINEERING_COMMAND_PATH and _HOME); unset otherwise.
+(
+  cd "$repository_directory" &&
+  PATH="${AI_ENGINEERING_COMMAND_PATH:-$PATH}" HOME="${AI_ENGINEERING_COMMAND_HOME:-${HOME-}}" bash -c "$gate_command"
+) >"$output_file" 2>&1
 exit_code=$?
 
 total_lines=$(wc -l <"$output_file" | tr -d ' ')

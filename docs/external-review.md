@@ -36,7 +36,7 @@ Commit the change before review. The command computes the diff itself (for examp
 | not configured | `EXTERNAL REVIEW: NOT CONFIGURED` | 3 |
 
 ## Rules
-- When not configured, the review report says `EXTERNAL REVIEW: NOT CONFIGURED`. At tiers 1 and 2 that is a non-pass: the work is **not** marked ready for final human acceptance, and the owner's merge approval does not substitute for it. At tier 0 `NOT CONFIGURED` is allowed when everything else passes (see [readiness](architecture.md#readiness-work-003-c2)).
+- When not configured, the review report says `EXTERNAL REVIEW: NOT CONFIGURED`. At tiers 1 and 2 that is a non-pass: the work is **not** marked ready for final human acceptance, and the owner's merge approval does not substitute for it. At tier 0 `NOT CONFIGURED` is allowed. When `"externalReview": null` is committed at the base and the tier is 0, readiness makes no review clone and skips the reviewer's diff checks (see [readiness](architecture.md#readiness-work-003-c2)).
 - A configured reviewer's `BLOCKING FINDINGS` or `ERROR` is READY: NO at every tier, including tier 0. Readiness counts a verdict only when the script's exit status and its verdict line agree.
 - Missing external review never blocks implementation, local testing, normal commits, draft PRs or other engineering work.
 - Claude reviewing Claude (including the internal `security-reviewer` and `qa` agents) never substitutes for the external review.

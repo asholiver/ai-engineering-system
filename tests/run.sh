@@ -5134,7 +5134,7 @@ expect_contains "skill review: a configured reviewer's failure blocks at every t
 expect_contains "skill review: the gate runs in a fresh clone, never re-run in the checkout" "never re-run it in the checkout to get a pass" "$review_text"
 expect_contains "skill review: readiness runs in the background and is waited for" "Run the script as a background Bash command, wait for its completion notification" "$review_text"
 expect_contains "skill review: no verdict before completion" "Never report a verdict before the run has completed" "$review_text"
-expect_contains "skill review: READY YES does not prove approval or the base" "the guard log records that the start command was asked, not that it was approved or ran" "$review_text"
+expect_contains "skill review: base provenance is reported as unverified, not proven" "the guard log records that the start command was asked, not that it was approved or ran" "$review_text"
 expect_contains "skill review: NOT CERTIFIABLE differs from tier 2" "it is not the same as a valid tier-2 classification" "$review_text"
 expect_contains "skill review: external review required at tiers 1 and 2" "External review is required at tiers 1 and 2" "$review_text"
 expect_contains "skill review: nothing substitutes for external review" "Owner merge approval, Opus or QA reviews never substitute for it" "$review_text"
@@ -5372,6 +5372,25 @@ write_known() { # [ref] [clone location]
 }
 reset_trust() { write_registry "[$(user_entry)]"; write_known; }
 reset_trust
+# A trusted variant of the install whose readiness.sh looks for its tools in a stand-in directory
+# first: readiness never takes its own tools from the caller's PATH, so a test stand-in reaches it
+# only through a plugin built that way, committed and tagged in its own marketplace clone and
+# recorded in the registry (reset_trust restores the normal install).
+variant_install() { # name stand-in-directory: sets variant_readiness
+  local variant_clone="$readiness_root/variant-$1" variant_directory="$readiness_root/variant-cache-$1/ai-engineering/$readiness_version" variant_commit
+  rm -rf "$variant_clone" "$readiness_root/variant-cache-$1"
+  cp -R "$marketplace_clone" "$variant_clone"
+  sed "s|^trusted_tool_path=\"|trusted_tool_path=\"$2:|" "$variant_clone/plugins/ai-engineering/scripts/readiness.sh" >"$readiness_root/variant-readiness.sh"
+  cat "$readiness_root/variant-readiness.sh" >"$variant_clone/plugins/ai-engineering/scripts/readiness.sh"
+  readiness_git "$variant_clone" commit -q -am "variant $1"
+  readiness_git "$variant_clone" tag -f "v$readiness_version" >/dev/null
+  variant_commit="$(readiness_git "$variant_clone" rev-parse HEAD)"
+  mkdir -p "$variant_directory"
+  cp -R "$variant_clone/plugins/ai-engineering/." "$variant_directory/"
+  write_registry "[$(user_entry "$variant_directory" "$readiness_version" "$variant_commit")]"
+  write_known "v$readiness_version" "$variant_clone"
+  variant_readiness="$variant_directory/scripts/readiness.sh"
+}
 
 ws_ready() { (cd "$readiness_project" && "$install_directory/scripts/workstate.sh" "$@"); }
 guard_event() { # decision command session [time]
@@ -5398,6 +5417,9 @@ real_guard() { # command [session]: one Bash tool call through the real installe
 readiness_pin_ref=""
 readiness_real_guard=no
 readiness_plant_base=no
+readiness_gates_filter='.' # jq filter applied to the base commit's .agents/gates.json
+readiness_gates_raw=""     # when set, the base commit's .agents/gates.json text instead
+readiness_seed_command=""  # when set, run in the project before the base commit (extra base files)
 build_readiness_project() { # name external-review-json state-tier [full-gate-command]
   readiness_project="$readiness_root/$1"
   git init -q --bare "$readiness_root/$1.git"
@@ -5407,12 +5429,14 @@ build_readiness_project() { # name external-review-json state-tier [full-gate-co
     jq -n --arg ref "${readiness_pin_ref:-v$readiness_version}" '{extraKnownMarketplaces: {"ai-engineering-system": {source: {source: "github", repo: "asholiver/ai-engineering-system", ref: $ref}, autoUpdate: false}}, enabledPlugins: {"ai-engineering@ai-engineering-system": true}}' \
       >"$readiness_project/.claude/settings.json"
   fi
-  jq -n --argjson external "$2" --arg full "${4-true}" '{fast: "true", full: $full, externalReview: $external}' >"$readiness_project/.agents/gates.json"
+  jq -n --argjson external "$2" --arg full "${4-true}" '{fast: "true", full: $full, externalReview: $external}' | jq "$readiness_gates_filter" >"$readiness_project/.agents/gates.json"
+  [ -z "$readiness_gates_raw" ] || printf '%s' "$readiness_gates_raw" >"$readiness_project/.agents/gates.json"
   printf '# WORK-001 readiness fixture\n## Status\nDraft\n## Objective\nReadiness fixture.\n' >"$readiness_project/.agents/specs/active/WORK-001.md"
   printf '# Project\n' >"$readiness_project/README.md"
   printf '{"name": "fixture"}\n' >"$readiness_project/package.json"
   ws_ready create WORK-001 >/dev/null
   ws_ready increment-add WORK-001 --inc I1 --title One --tier "$3" >/dev/null
+  [ -z "$readiness_seed_command" ] || (cd "$readiness_project" && eval "$readiness_seed_command")
   readiness_git "$readiness_project" add -A
   readiness_git "$readiness_project" commit -q -m seed
   readiness_git "$readiness_project" remote add origin "$readiness_root/$1.git"
@@ -5425,7 +5449,7 @@ build_readiness_project() { # name external-review-json state-tier [full-gate-co
     readiness_git "$readiness_project" update-ref refs/remotes/origin/main \
       "$(readiness_git "$readiness_project" commit-tree -p HEAD -m planted "HEAD^{tree}")"
   fi
-  # The owner-approved start command names the full base commit.
+  # The start command names the full base commit (its ask record shows it was asked, no more).
   readiness_base="$(readiness_git "$readiness_project" rev-parse refs/remotes/origin/main)"
   start_command="git switch -c work/WORK-001-I1 $readiness_base"
   readiness_git "$readiness_project" switch -q -c work/WORK-001-I1 "$readiness_base"
@@ -5466,9 +5490,12 @@ expect_not_certifiable() { # label reason-fragment
   expect_contains "$1: names the reason" "$2" "$(readiness_line "CERTIFIABLE:")"
   expect_contains "$1: READY NO" "READY: NO" "$(readiness_line "READY:")"
 }
-expect_ready_yes() { # label
-  expect_equal "$1: exit 0" 0 "$readiness_status"
-  expect_equal "$1: READY YES" "READY: YES" "$(readiness_line "READY:")"
+# READY: YES is unreachable until base provenance can be verified (a separate guard change), so a
+# run where everything else passes is READY: NO for that one reason, exit 1, certifiable.
+provenance_reason="base provenance is unverified (owner-approved base provenance is required for READY: YES and is not yet available)"
+expect_ready_but_unverified_base() { # label
+  expect_equal "$1: exit 1" 1 "$readiness_status"
+  expect_equal "$1: READY NO for base provenance alone" "READY: NO - $provenance_reason" "$(readiness_line "READY:")"
   expect_equal "$1: certifiable" "CERTIFIABLE: YES" "$(readiness_line "CERTIFIABLE:")"
 }
 # A valid tier-2 classification from one raising guard event: certifiable, exit 1, never the
@@ -5482,11 +5509,14 @@ expect_guard_raised() { # label decision session
 # --- baseline: a genuinely tier-0 increment is READY: YES without an external reviewer
 build_readiness_project tier0 null 0
 run_readiness
-expect_ready_yes "readiness tier 0"
+expect_ready_but_unverified_base "readiness tier 0"
 expect_contains "readiness tier 0: trusted install" "TRUST: TRUSTED - ai-engineering $readiness_version at ${marketplace_commit:0:12}" "$readiness_output"
 expect_equal "readiness tier 0: classified tier 0" "EFFECTIVE TIER: 0 (classified)" "$(readiness_line "EFFECTIVE TIER:")"
 expect_contains "readiness tier 0: the gate ran from the base config" "GATE full: PASSED" "$readiness_output"
-expect_contains "readiness tier 0: external review optional and not configured" "EXTERNAL REVIEW: NOT CONFIGURED (optional at tier 0)" "$readiness_output"
+expect_equal "readiness tier 0: externalReview null at the base, so no review clone" "EXTERNAL REVIEW: NOT CONFIGURED (externalReview is null at the base commit; no review clone made) (optional at tier 0)" "$(readiness_line "EXTERNAL REVIEW:")"
+expect_contains "readiness tier 0: base provenance is reported as unverified" "BASE PROVENANCE: UNVERIFIED - the start record is a guard ask (not approval or execution)" "$readiness_output"
+expect_equal "readiness tier 0: no changed binary files" "CHANGED BINARY FILES: none" "$(readiness_line "CHANGED BINARY FILES:")"
+if printf '%s\n' "$readiness_output" | grep -qx 'READY: YES'; then fail "readiness tier 0: READY YES is never printed while base provenance is unverified"; else pass; fi
 expect_contains "readiness tier 0: the anchor was found" "GUARD LOG: anchor at 2000-01-01T00:00:00Z; 0 raising event(s)" "$readiness_output"
 
 # --- trust: each failure alone is NOT CERTIFIABLE, tier 2, READY NO
@@ -5517,7 +5547,7 @@ run_readiness
 expect_not_certifiable "trust: a local-scope install for this project takes precedence" "installed plugin directory does not exist"
 write_registry "[$(user_entry), $(jq -n -c --arg c "$marketplace_commit" --arg v "$readiness_version" '{scope: "local", projectPath: "/some/other/project", installPath: "/nonexistent/install", version: $v, gitCommitSha: $c}')]"
 run_readiness
-expect_ready_yes "trust: a local install for another project does not apply"
+expect_ready_but_unverified_base "trust: a local install for another project does not apply"
 reset_trust
 write_known v0.0.1
 run_readiness
@@ -5541,7 +5571,7 @@ run_readiness
 expect_not_certifiable "trust: a symbolic link in the install" "symbolic link"
 rm "$install_directory/scripts/linked.sh"
 run_readiness
-expect_ready_yes "trust: restored fixtures are trusted again"
+expect_ready_but_unverified_base "trust: restored fixtures are trusted again"
 
 # --- guard log: anchors, exact exclusions, rotation, missing and malformed evidence
 reset_guard_log
@@ -5554,7 +5584,7 @@ reset_guard_log
 guard_event ask "git switch work/WORK-001-I1" coordinator >>"$(guard_log_file)"
 guard_event ask "$start_command" coordinator >>"$(guard_log_file)"
 run_readiness
-expect_ready_yes "guard log: exact resume and repeated start confirmations are excluded"
+expect_ready_but_unverified_base "guard log: exact resume and repeated start confirmations are excluded"
 expect_contains "guard log: two exclusions counted" "0 raising event(s), 2 excluded" "$readiness_output"
 for near_miss in "git switch  work/WORK-001-I1" "$start_command " "git switch -c work/WORK-001-I1 origin/main" "git switch work/WORK-001-I2" "cd . && git switch work/WORK-001-I1" "git checkout work/WORK-001-I1" "git merge --no-edit work/WORK-001-I1-T1"; do
   reset_guard_log
@@ -5570,7 +5600,7 @@ ws_ready increment-worktree WORK-001 --inc I1 --branch work/WORK-001-I1-T1 >/dev
 reset_guard_log
 guard_event ask "git merge --no-edit work/WORK-001-I1-T1" coordinator >>"$(guard_log_file)"
 run_readiness
-expect_ready_yes "guard log: the exact merge of a recorded worktree branch is excluded"
+expect_ready_but_unverified_base "guard log: the exact merge of a recorded worktree branch is excluded"
 reset_guard_log
 guard_event deny "git merge --no-edit work/WORK-001-I1-T1" coordinator >>"$(guard_log_file)"
 run_readiness
@@ -5590,7 +5620,7 @@ mkdir -p "$readiness_project/.git/ai-engineering"
   guard_event ask "$start_command" coordinator 2000-01-01T00:00:00Z
 } >"$(guard_log_file)"
 run_readiness
-expect_ready_yes "guard log: an earlier line with a later timestamp is before the anchor"
+expect_ready_but_unverified_base "guard log: an earlier line with a later timestamp is before the anchor"
 # Events before the anchor are outside the window; malformed lines there are ignored.
 mkdir -p "$readiness_project/.git/ai-engineering"
 {
@@ -5599,7 +5629,7 @@ mkdir -p "$readiness_project/.git/ai-engineering"
   guard_event ask "$start_command" coordinator 2000-01-01T00:00:00Z
 } >"$(guard_log_file)"
 run_readiness
-expect_ready_yes "guard log: events and malformed lines before the anchor are ignored"
+expect_ready_but_unverified_base "guard log: events and malformed lines before the anchor are ignored"
 reset_guard_log
 printf 'not json\n' >>"$(guard_log_file)"
 run_readiness
@@ -5643,7 +5673,7 @@ reset_guard_log
 mv "$(guard_log_file)" "$(guard_log_file).1"
 : >"$(guard_log_file)"
 run_readiness
-expect_ready_yes "guard log rotation: a rotated anchor with nothing after it"
+expect_ready_but_unverified_base "guard log rotation: a rotated anchor with nothing after it"
 reset_guard_log
 guard_event ask "git status" coordinator >"$(guard_log_file).1"
 guard_event ask "git status" coordinator >"$(guard_log_file)"
@@ -5702,10 +5732,10 @@ run_readiness
 expect_equal "evidence: QA for an older commit is stale" "1 QA (internal): STALE" "$readiness_status $(readiness_line "QA (internal):")"
 record_review qa
 run_readiness
-expect_ready_yes "evidence: QA recorded for HEAD"
+expect_ready_but_unverified_base "evidence: QA recorded for HEAD"
 ws_ready evidence WORK-001 --inc I1 --kind review --result pass --sha "$(readiness_git "$readiness_project" rev-parse HEAD)" >/dev/null
 run_readiness
-expect_ready_yes "evidence: a later review without a reviewer does not replace QA"
+expect_ready_but_unverified_base "evidence: a later review without a reviewer does not replace QA"
 ws_ready evidence WORK-001 --inc I1 --kind review --reviewer qa --result fail --sha "$(readiness_git "$readiness_project" rev-parse HEAD)" >/dev/null
 run_readiness
 expect_equal "evidence: the latest QA result failing is READY NO" "1 QA (internal): FAILED" "$readiness_status $(readiness_line "QA (internal):")"
@@ -5717,7 +5747,7 @@ expect_contains "records: the open finding is the reason" "1 open finding(s)" "$
 ws_ready finding-fixed WORK-001 --finding F1 --sha "$(readiness_git "$readiness_project" rev-parse HEAD)" >/dev/null
 ws_ready propose WORK-001 --question "also a CHANGELOG?" >/dev/null
 run_readiness
-expect_ready_yes "records: an open scope proposal is listed but does not block"
+expect_ready_but_unverified_base "records: an open scope proposal is listed but does not block"
 expect_contains "records: the proposal is listed" "OPEN DECISIONS AND PROPOSALS: D1 (proposal)" "$readiness_output"
 ws_ready block WORK-001 --trigger 5 --question "which reading?" >/dev/null
 run_readiness
@@ -5738,7 +5768,7 @@ expect_contains "effective tier: tier 2 needs external review" "external review 
 # --- tiers 1 and 2 with a configured external reviewer
 build_readiness_project tier1-external '"true"' 1
 run_readiness
-expect_ready_yes "tier 1: READY YES with QA and a passing external review"
+expect_ready_but_unverified_base "tier 1: READY YES with QA and a passing external review"
 expect_contains "tier 1: external review required" "EXTERNAL REVIEW: PASSED (required at tier 1)" "$readiness_output"
 expect_equal "tier 1: security review is a tier-2 requirement" "SECURITY REVIEW (internal): NOT REQUIRED at tier 1" "$(readiness_line "SECURITY REVIEW")"
 build_readiness_project tier1-reviewer-error '"exit 7"' 1
@@ -5758,7 +5788,7 @@ expect_equal "tier 2: READY NO without the residual-risk list" "1" "$readiness_s
 expect_contains "tier 2: the missing residual-risk list is the reason" "the residual-risk list covering HEAD is MISSING" "$(readiness_line "READY:")"
 record_review residual-risks
 run_readiness
-expect_ready_yes "tier 2: READY YES with QA, security, residual risks and a passing external review"
+expect_ready_but_unverified_base "tier 2: READY YES with QA, security, residual risks and a passing external review"
 ws_ready evidence WORK-001 --inc I1 --kind review --reviewer security --result fail --sha "$(readiness_git "$readiness_project" rev-parse HEAD)" >/dev/null
 ws_ready evidence WORK-001 --inc I1 --kind residual-risks --result fail --sha "$(readiness_git "$readiness_project" rev-parse HEAD)" >/dev/null
 run_readiness
@@ -5817,7 +5847,7 @@ run_readiness
 expect_not_certifiable "base: a newer default-branch commit is not accepted automatically" "a newer ref is never accepted automatically"
 readiness_git "$readiness_project" update-ref refs/remotes/origin/main "$base_moved_recorded"
 run_readiness
-expect_ready_yes "base: the ref back at the recorded base"
+expect_ready_but_unverified_base "base: the ref back at the recorded base"
 expect_contains "base: the block names the recorded base" "BASE: $base_moved_recorded (recorded increment base; origin/main at $base_moved_recorded)" "$readiness_output"
 ws_ready increment-set WORK-001 --inc I1 --base-sha "$base_moved_newer" >/dev/null 2>&1
 expect_equal "base: workstate never replaces a recorded base" "$base_moved_recorded" "$(jq -r '.increments[0].baseSha' "$(readiness_state_file)")"
@@ -5877,7 +5907,7 @@ run_readiness
 expect_not_certifiable "working tree: a staged rename" "uncommitted changes in the working tree"
 readiness_git "$readiness_project" mv README.txt README.md
 run_readiness
-expect_ready_yes "working tree: restored"
+expect_ready_but_unverified_base "working tree: restored"
 
 # --- full gate (M2): a fresh local clone at exactly HEAD, never the development checkout
 # The gate checks, from inside, that it runs without readiness's two Git variables, on the
@@ -5898,7 +5928,7 @@ printf 'ignored, untracked and only in the development checkout\n' >"$readiness_
 gate_tmp="$readiness_root/checkout-push-tmp"
 mkdir -p "$gate_tmp"
 TMPDIR="$gate_tmp" run_readiness
-expect_ready_yes "gate isolation: under a temporary path with guard trigger words, the gate passes only in the clone"
+expect_ready_but_unverified_base "gate isolation: under a temporary path with guard trigger words, the gate passes only in the clone"
 expect_contains "gate isolation: the base-commit gate passed" "GATE full: PASSED (exit 0)" "$(readiness_line "GATE full:")"
 expect_equal "gate isolation: the gate ran at exactly HEAD" "$(readiness_git "$readiness_project" rev-parse HEAD)" "$(cat "$readiness_root/gate-head.txt" 2>/dev/null)"
 case "$(cat "$readiness_root/gate-directory.txt" 2>/dev/null)" in
@@ -5906,7 +5936,7 @@ case "$(cat "$readiness_root/gate-directory.txt" 2>/dev/null)" in
   *) fail "gate isolation: the gate ran in a temporary clone (got '$(cat "$readiness_root/gate-directory.txt" 2>/dev/null)')" ;;
 esac
 case "$(cat "$readiness_root/gate-tmpdir.txt" 2>/dev/null)" in
-  "$gate_tmp/readiness-clone."*/tmp) pass ;;
+  "$(cd "$gate_tmp" && pwd -P)/readiness-clone."*/tmp) pass ;;
   *) fail "gate isolation: the gate's TMPDIR is private to its clone root (got '$(cat "$readiness_root/gate-tmpdir.txt" 2>/dev/null)')" ;;
 esac
 if [ -e "$readiness_project/gate-wrote.txt" ]; then fail "gate isolation: the gate wrote into the development checkout"; else pass; fi
@@ -5934,7 +5964,7 @@ run_readiness
 expect_contains "tier 0: a configured reviewer's error is READY NO" "the configured external review did not pass (ERROR (reviewer exit 7))" "$(readiness_line "READY:")"
 build_readiness_project tier0-reviewer-passes '"true"' 0
 run_readiness
-expect_ready_yes "tier 0: a configured reviewer that passes"
+expect_ready_but_unverified_base "tier 0: a configured reviewer that passes"
 
 # --- more trust cells, branch identity, report lines and classifier floor 1
 build_readiness_project trust-cells null 0
@@ -5964,7 +5994,7 @@ run_readiness
 expect_not_certifiable "trust: two local installs for this project are ambiguous" "more than one local-scope install"
 reset_trust
 run_readiness
-expect_ready_yes "trust: restored again"
+expect_ready_but_unverified_base "trust: restored again"
 readiness_git "$readiness_project" switch -q -c other-branch
 run_readiness
 expect_not_certifiable "branch: a checked-out branch other than the recorded one" "the checked-out branch is not increment I1's recorded branch"
@@ -6033,8 +6063,13 @@ STANDIN
   chmod +x "$hash_stand_in/$hash_tool"
 done
 build_readiness_project hash-failure null 0
-PATH="$hash_stand_in:$PATH" run_readiness
+variant_install hash-failure "$hash_stand_in"
+run_readiness "$variant_readiness"
 expect_not_certifiable "guard log: hashes that cannot be computed" "the exact-command hashes could not be computed"
+reset_trust
+# The same stand-in on the caller's PATH is never used: readiness's tools come from fixed directories.
+PATH="$hash_stand_in:$PATH" run_readiness
+expect_ready_but_unverified_base "environment: a hash stand-in on the caller's PATH is not used"
 
 # --- the real guard writes the log readiness reads (no fixture log lines)
 readiness_real_guard=yes
@@ -6043,19 +6078,19 @@ readiness_real_guard=no
 expect_equal "real guard: the start confirmation was logged with the exact command's hash" "ask $(text_sha256 "$start_command")" \
   "$(head -n 1 "$(guard_log_file)" 2>/dev/null | jq -r '"\(.decision) \(.commandSha256)"')"
 run_readiness
-expect_ready_yes "real guard: the guard's own start confirmation anchors the increment"
+expect_ready_but_unverified_base "real guard: the guard's own start confirmation anchors the increment"
 real_guard "git switch work/WORK-001-I1"
 ws_ready increment-worktree WORK-001 --inc I1 --branch work/WORK-001-I1-T1 >/dev/null
 real_guard "git merge --no-edit work/WORK-001-I1-T1"
 run_readiness
-expect_ready_yes "real guard: exact resume and recorded worktree merge confirmations"
+expect_ready_but_unverified_base "real guard: exact resume and recorded worktree merge confirmations"
 expect_contains "real guard: both are excluded" "0 raising event(s), 2 excluded" "$readiness_output"
 real_guard "git pull" other-real-session
 run_readiness
 expect_equal "real guard: another session's prompt is classified tier 2" "1 EFFECTIVE TIER: 2 (classified)" "$readiness_status $(readiness_line "EFFECTIVE TIER:")"
 expect_contains "real guard: the other session raises the floor" "session other-real-session" "$(readiness_line "ACTION FLOOR:")"
 
-# --- H1 path B: the owner-approved start command must name the recorded base commit
+# --- H1 path B: the start command must name the recorded base commit
 build_readiness_project start-names-base null 0
 rm -rf "${readiness_project:?}/.git/ai-engineering"
 mkdir -p "$readiness_project/.git/ai-engineering"
@@ -6067,12 +6102,12 @@ run_readiness
 expect_not_certifiable "base: a start command naming another commit is no anchor" "no increment-start anchor"
 reset_guard_log
 run_readiness
-expect_ready_yes "base: the start command naming the recorded base anchors"
+expect_ready_but_unverified_base "base: the start command naming the recorded base anchors"
 # A default-branch ref planted before the start. Workstate accepts only what origin/main names at
 # that moment, and the start command names that commit, but an ask record proves neither the
 # owner's approval nor that the command ran, and nothing local authenticates the remote. This is
-# the open trust-boundary gap (closing it needs separate guard evidence): readiness still
-# certifies, and this test records that outcome so a change to it is deliberate.
+# the open trust-boundary gap (closing it needs separate guard evidence). Base provenance is
+# therefore never verified, so readiness is READY: NO for that reason, as for every increment.
 readiness_plant_base=yes
 build_readiness_project base-planted null 0
 readiness_plant_base=no
@@ -6082,7 +6117,7 @@ if [ "$readiness_base" = "$(git --git-dir="$readiness_root/base-planted.git" rev
   fail "base: the planted fixture differs from the remote's main"
 else pass; fi
 run_readiness
-expect_ready_yes "base (open gap, see the trust boundary): a base planted before the start still certifies"
+expect_ready_but_unverified_base "base (open gap, see the trust boundary): a planted base is not READY YES"
 
 # --- H1 path A: a renamed and recreated branch cannot substitute another starting point
 build_readiness_project base-recreated null 0
@@ -6103,16 +6138,16 @@ readiness_git "$readiness_project" add README.md
 readiness_git "$readiness_project" commit -q -m payload
 record_review qa
 run_readiness
-expect_ready_yes "external review: the reviewer sees the payload in its own clone"
+expect_ready_but_unverified_base "external review: the reviewer sees the payload in its own clone"
 expect_equal "external review: the reviewer receives the recorded base and HEAD" \
   "$readiness_base $(readiness_git "$readiness_project" rev-parse HEAD)" "$(cat "$readiness_root/review-refs.txt" 2>/dev/null)"
 GIT_EXTERNAL_DIFF=true run_readiness
-expect_ready_yes "external review: an inherited GIT_EXTERNAL_DIFF is removed"
+expect_ready_but_unverified_base "external review: an inherited GIT_EXTERNAL_DIFF is removed"
 # Settings of the development repository do not reach the reviewer's fresh clone.
 readiness_git "$readiness_project" config diff.external true
 readiness_git "$readiness_project" config core.bigFileThreshold 1
 run_readiness
-expect_ready_yes "external review: the development repository's diff settings do not reach the clone"
+expect_ready_but_unverified_base "external review: the development repository's diff settings do not reach the clone"
 readiness_git "$readiness_project" config --unset diff.external
 readiness_git "$readiness_project" config --unset core.bigFileThreshold
 # User-level settings (a fixture HOME) that would blind the reviewer are neutralised in the clone.
@@ -6124,23 +6159,23 @@ review_home() { # name: a fixture HOME with its own Git configuration and attrib
 blind_home="$(review_home big-file)"
 printf '[core]\n\tbigFileThreshold = 1\n' >>"$blind_home/.gitconfig"
 HOME="$blind_home" XDG_CONFIG_HOME="$blind_home/.config" run_readiness
-expect_ready_yes "external review: a user-level core.bigFileThreshold (binary diffs) is neutralised"
+expect_ready_but_unverified_base "external review: a user-level core.bigFileThreshold (binary diffs) is neutralised"
 blind_home="$(review_home xdg-attributes)"
 printf '* -diff\n' >"$blind_home/.config/git/attributes"
 HOME="$blind_home" XDG_CONFIG_HOME="$blind_home/.config" run_readiness
-expect_ready_yes "external review: a user-level attributes file with -diff is neutralised"
+expect_ready_but_unverified_base "external review: a user-level attributes file with -diff is neutralised"
 blind_home="$(review_home prefixes)"
 printf '[diff]\n\tnoprefix = true\n\tdstPrefix = b/docs/\n\trelative = true\n' >>"$blind_home/.gitconfig"
 HOME="$blind_home" XDG_CONFIG_HOME="$blind_home/.config" run_readiness
-expect_ready_yes "external review: user-level diff path prefixes are neutralised"
+expect_ready_but_unverified_base "external review: user-level diff path prefixes are neutralised"
 blind_home="$(review_home template)"
 mkdir -p "$blind_home/template/info"
 printf '* -diff\n' >"$blind_home/template/info/attributes"
 printf '[init]\n\ttemplateDir = %s\n' "$blind_home/template" >>"$blind_home/.gitconfig"
 HOME="$blind_home" XDG_CONFIG_HOME="$blind_home/.config" run_readiness
-expect_ready_yes "external review: a user-level template with info/attributes is not used"
+expect_ready_but_unverified_base "external review: a user-level template with info/attributes is not used"
 GIT_TEMPLATE_DIR="$blind_home/template" run_readiness
-expect_ready_yes "external review: an inherited GIT_TEMPLATE_DIR is removed"
+expect_ready_but_unverified_base "external review: an inherited GIT_TEMPLATE_DIR is removed"
 blind_home="$(review_home external-diff)"
 printf '[diff]\n\texternal = true\n' >>"$blind_home/.gitconfig"
 HOME="$blind_home" XDG_CONFIG_HOME="$blind_home/.config" run_readiness
@@ -6149,7 +6184,7 @@ expect_equal "external review: not run when its diff cannot be trusted" "EXTERNA
 blind_home="$(review_home textconv)"
 printf '[diff "hide"]\n\ttextconv = true\n' >>"$blind_home/.gitconfig"
 HOME="$blind_home" XDG_CONFIG_HOME="$blind_home/.config" run_readiness
-expect_ready_yes "external review: a user-level textconv driver that no changed file uses"
+expect_ready_but_unverified_base "external review: a user-level textconv driver that no changed file uses"
 # Repository-controlled diff behaviour: a committed .gitattributes in HEAD.
 printf 'README.md diff=hide\n' >"$readiness_project/.gitattributes"
 readiness_git "$readiness_project" add .gitattributes
@@ -6216,7 +6251,7 @@ expect_not_certifiable "gate tampering: the state rewritten by the gate" "the wo
 cp "$readiness_root/gate-tamper-state.json" "$(readiness_state_file)"
 set_gate_action ":"
 run_readiness
-expect_ready_yes "gate tampering: a gate that changes nothing"
+expect_ready_but_unverified_base "gate tampering: a gate that changes nothing"
 # A gate that kills run-gate.sh leaves no verdict.
 # The gate walks up its own process ancestry, stopping at readiness.sh, and kills the outermost
 # run-gate.sh that readiness started on its gate clone (the subshell run-gate.sh forks shows the
@@ -6248,9 +6283,11 @@ printf '%s\n' '#!/bin/bash' \
 chmod +x "$cat_stand_in/cat"
 build_readiness_project log-rotation null 0
 guard_event ask "git status" other-session >>"$(guard_log_file)"
-PATH="$cat_stand_in:$PATH" run_readiness
+variant_install log-rotation "$cat_stand_in"
+run_readiness "$variant_readiness"
 expect_not_certifiable "guard log: rotated between its two reads" "the log was rotated or replaced while it was being read"
 rm -f "$readiness_root/rotated-once"
+reset_trust
 
 # --- more negative cells
 edit_readiness_state '.decisions += [{id: "", trigger: 2, question: "q", options: [], askedAt: "2000-01-01T00:00:00Z", answeredAt: "2000-01-01T00:00:00Z", answer: "a", source: "conversation", by: null, blocking: false}]'
@@ -6280,16 +6317,18 @@ ln -s "$(guard_log_file)" "$(guard_log_file).1"
 run_readiness
 expect_not_certifiable "guard log: a linked rotated log" "guard-log.jsonl.1 is unreadable or not a regular file"
 rm "$(guard_log_file).1"
-git_stand_in="$readiness_root/git-stand-in"
-mkdir -p "$git_stand_in"
-# shellcheck disable=SC2016 # the stand-in script's own text, expanded when it runs
-printf '%s\n' '#!/bin/bash' 'for argument in "$@"; do [ "$argument" = clone ] && exit 128; done' "exec '$(command -v git)' \"\$@\"" >"$git_stand_in/git"
-chmod +x "$git_stand_in/git"
-PATH="$git_stand_in:$PATH" run_readiness
-expect_not_certifiable "clones: the external review's clone cannot be created" "the external review could not run: a fresh clone of HEAD could not be created and verified"
-expect_equal "clones: then the gate is not run" "GATE full: NOT RUN (not certifiable)" "$(readiness_line "GATE full:")"
 run_readiness
-expect_ready_yes "negative cells: restored"
+expect_ready_but_unverified_base "negative cells: restored"
+# A clone that fails is reported with Git's own last message. The development repository hides
+# its branches from upload-pack, so the clone of the increment branch fails.
+build_readiness_project clone-failure '"true"' 0
+readiness_git "$readiness_project" config uploadpack.hideRefs refs/heads/
+run_readiness
+expect_not_certifiable "clones: the external review's clone cannot be created" "the external review could not run: a fresh clone of HEAD could not be created and verified: git clone failed (git: "
+expect_equal "clones: then the gate is not run" "GATE full: NOT RUN (not certifiable)" "$(readiness_line "GATE full:")"
+readiness_git "$readiness_project" config --unset uploadpack.hideRefs
+run_readiness
+expect_ready_but_unverified_base "clones: restored"
 build_readiness_project tier2-reviewer-error '"exit 7"' 0
 commit_change package.json
 record_review qa
@@ -6304,10 +6343,12 @@ printf '%s\n' '#!/bin/bash' "printf '%s\\n' \"\${LC_ALL-unset}\" >>'$readiness_r
 chmod +x "$locale_stand_in/jq"
 build_readiness_project locale null 0 "test \"\${LC_ALL-}\" = POSIX"
 : >"$readiness_root/jq-locales"
-PATH="$locale_stand_in:$PATH" LC_ALL=POSIX run_readiness
-expect_ready_yes "locale: the gate gets the caller's locale (POSIX) back"
+variant_install locale "$locale_stand_in"
+LC_ALL=POSIX run_readiness "$variant_readiness"
+expect_ready_but_unverified_base "locale: the gate gets the caller's locale (POSIX) back"
 expect_equal "locale: every jq call readiness makes runs with LC_ALL=C" "C" "$(sort -u "$readiness_root/jq-locales" | grep -v '^POSIX$' | tr '\n' ' ' | sed 's/ $//')"
 if grep -qx POSIX "$readiness_root/jq-locales"; then pass; else fail "locale: the gate's and reviewer's own jq calls did not get the caller's locale (POSIX)"; fi
+reset_trust
 
 # --- the gate's checkout: user-level filters, attributes and templates cannot alter it
 # A committed gate script ends in "exit 1"; a user-level smudge filter would turn it into
@@ -6335,33 +6376,85 @@ HOME="$forge_home" XDG_CONFIG_HOME="$forge_home/.config" run_readiness
 expect_contains "forged gate: a user-level template with attributes does not reach the gate's checkout" "GATE full: FAILED (exit 1)" "$(readiness_line "GATE full:")"
 
 # --- time limits, termination and skipping
-build_readiness_project gate-timeout null 0 "sleep 30"
+# Readiness's watchdogs are "sleep <limit>" processes; these tests give each limit a value no other
+# test uses, so a leftover watchdog or gate process can be found by its exact command line.
+leftover_processes() { # command line...: pids of processes whose whole command line is one of them
+  ps -A -o pid= -o args= | awk -v list="$(printf '%s\n' "$@")" '
+    BEGIN { count = split(list, wanted, "\n") }
+    { pid = $1; $1 = ""; sub(/^ +/, ""); for (index_ = 1; index_ <= count; index_++) if ($0 == wanted[index_]) print pid }'
+}
+no_leftovers_within() { # seconds command-line...: succeeds once none of them is running
+  local deadline=$((SECONDS + $1))
+  shift
+  while [ -n "$(leftover_processes "$@")" ]; do
+    [ "$SECONDS" -lt "$deadline" ] || return 1
+    sleep 0.2
+  done
+}
+build_readiness_project gate-timeout null 0 "sleep 1031"
 mkdir -p "$readiness_root/timeout-tmp"
 READINESS_GATE_TIMEOUT_SECONDS=2 TMPDIR="$readiness_root/timeout-tmp" run_readiness
 expect_contains "time limits: a gate past its limit is stopped" "GATE full: TIMED OUT (after 2 s; stopped, exit" "$(readiness_line "GATE full:")"
 expect_equal "time limits: a gate timeout is READY NO, certifiable" "1 CERTIFIABLE: YES" "$readiness_status $(readiness_line "CERTIFIABLE:")"
 expect_contains "time limits: the timeout is the reason" "the full gate timed out" "$(readiness_line "READY:")"
 expect_equal "time limits: nothing is left in the temporary directory" "" "$(ls -A "$readiness_root/timeout-tmp")"
-build_readiness_project review-timeout '"sleep 30"' 0
+if no_leftovers_within 1 "sleep 1031"; then pass; else fail "time limits: the timed-out gate's process is still running"; fi
+build_readiness_project review-timeout '"sleep 1032"' 0
 READINESS_REVIEW_TIMEOUT_SECONDS=2 run_readiness
 expect_contains "time limits: a reviewer past its limit is an error" "EXTERNAL REVIEW: ERROR (timed out after 2 s; stopped, exit" "$(readiness_line "EXTERNAL REVIEW:")"
 expect_contains "time limits: a reviewer timeout is READY NO at tier 0" "the configured external review did not pass (ERROR (timed out" "$(readiness_line "READY:")"
-READINESS_TOTAL_TIMEOUT_SECONDS=1 run_readiness
-expect_not_certifiable "time limits: the overall limit" "the readiness time limit of 1 s was reached before the external review"
-# A handled TERM stops the running gate's process group and removes every temporary root.
+if no_leftovers_within 1 "sleep 1032"; then pass; else fail "time limits: the timed-out reviewer's process is still running"; fi
+# The overall limit, deterministically: before the full gate, a reviewer that takes 3 s leaves
+# less than the minute readiness keeps for the checks after the gate (limit 61 s).
+build_readiness_project total-limit-gate '"sleep 3"' 0
+READINESS_TOTAL_TIMEOUT_SECONDS=61 run_readiness
+expect_contains "time limits: the reviewer finished first" "EXTERNAL REVIEW: PASSED" "$(readiness_line "EXTERNAL REVIEW:")"
+expect_not_certifiable "time limits: the overall limit before the full gate" "the readiness time limit of 61 s was reached before the full gate"
+expect_equal "time limits: then the gate is not run" "GATE full: NOT RUN (readiness time limit reached)" "$(readiness_line "GATE full:")"
+# Before the external review: a stand-in git makes readiness's first Git call take 2 s.
+slow_git_stand_in="$readiness_root/slow-git-stand-in"
+mkdir -p "$slow_git_stand_in"
+printf '%s\n' '#!/bin/bash' 'case " $* " in *" --show-toplevel "*) sleep 2 ;; esac' "exec '$(command -v git)' \"\$@\"" >"$slow_git_stand_in/git"
+chmod +x "$slow_git_stand_in/git"
+build_readiness_project total-limit-review '"true"' 0
+variant_install total-limit "$slow_git_stand_in"
+READINESS_TOTAL_TIMEOUT_SECONDS=1 run_readiness "$variant_readiness"
+expect_not_certifiable "time limits: the overall limit before the external review" "the readiness time limit of 1 s was reached before the external review"
+reset_trust
+# A completed run leaves no watchdog behind (limits that no other test uses).
+build_readiness_project watchdog-cleanup '"true"' 0
+READINESS_GATE_TIMEOUT_SECONDS=1789 READINESS_REVIEW_TIMEOUT_SECONDS=1788 run_readiness
+expect_ready_but_unverified_base "watchdogs: a completed run"
+if no_leftovers_within 1 "sleep 1789" "sleep 1788"; then pass; else fail "watchdogs: a completed run left a gate or review watchdog running"; fi
+# A handled INT, TERM or HUP stops the running gate's whole process group (the gate's shell and
+# its child), its watchdog and readiness, and removes every temporary root. Job control gives
+# readiness its own process group, so INT is not ignored as it would be for a background job.
+printf '#!/bin/sh\nprintf "%%s\\n" "$$" >>"%s"\nsleep 1033 &\nprintf "%%s\\n" "$!" >>"%s"\n: >"%s"\nwait\n: >"%s"\n' \
+  "$readiness_root/slow-gate-pids" "$readiness_root/slow-gate-pids" "$readiness_root/slow-gate-started" "$readiness_root/slow-gate-finished" >"$readiness_root/slow-gate.sh"
 build_readiness_project terminated null 0 "sh '$readiness_root/slow-gate.sh'"
-printf '#!/bin/sh\n: >"%s"\nsleep 30\n: >"%s"\n' "$readiness_root/slow-gate-started" "$readiness_root/slow-gate-finished" >"$readiness_root/slow-gate.sh"
-mkdir -p "$readiness_root/terminate-tmp"
-CLAUDE_CONFIG_DIR="$config_directory" TMPDIR="$readiness_root/terminate-tmp" "$installed_readiness" WORK-001 --inc I1 "$readiness_project" >"$readiness_root/terminated.out" 2>&1 &
-terminated_pid=$!
-for _ in $(seq 1 300); do [ -e "$readiness_root/slow-gate-started" ] && break; sleep 0.2; done
-kill -TERM "$terminated_pid" 2>/dev/null
-wait "$terminated_pid"
-expect_equal "termination: exit 4" 4 "$?"
-case "$(cat "$readiness_root/terminated.out")" in *"READY:"*) fail "termination: no READY verdict is printed" ;; *) pass ;; esac
-sleep 1
-expect_equal "termination: every temporary root is removed" "" "$(ls -A "$readiness_root/terminate-tmp")"
-if [ -e "$readiness_root/slow-gate-finished" ]; then fail "termination: the gate kept running"; else pass; fi
+for stop_signal in TERM INT HUP; do
+  rm -f "$readiness_root/slow-gate-pids" "$readiness_root/slow-gate-started" "$readiness_root/slow-gate-finished"
+  rm -rf "$readiness_root/terminate-tmp"
+  mkdir -p "$readiness_root/terminate-tmp"
+  set -m
+  CLAUDE_CONFIG_DIR="$config_directory" TMPDIR="$readiness_root/terminate-tmp" READINESS_GATE_TIMEOUT_SECONDS=1787 \
+    "$installed_readiness" WORK-001 --inc I1 "$readiness_project" >"$readiness_root/terminated.out" 2>&1 &
+  terminated_pid=$!
+  set +m
+  for _ in $(seq 1 300); do [ -e "$readiness_root/slow-gate-started" ] && break; sleep 0.2; done
+  if [ -e "$readiness_root/slow-gate-started" ]; then pass; else fail "termination ($stop_signal): the gate never started"; fi
+  kill "-$stop_signal" "$terminated_pid" 2>/dev/null
+  wait "$terminated_pid"
+  expect_equal "termination ($stop_signal): exit 4" 4 "$?"
+  case "$(cat "$readiness_root/terminated.out")" in *"READY:"*) fail "termination ($stop_signal): no READY verdict is printed" ;; *) pass ;; esac
+  expect_contains "termination ($stop_signal): reported" "stopped by SIG$stop_signal; no READINESS verdict" "$(cat "$readiness_root/terminated.out")"
+  expect_equal "termination ($stop_signal): every temporary root is removed" "" "$(ls -A "$readiness_root/terminate-tmp")"
+  gate_survivors=""
+  while IFS= read -r gate_pid; do kill -0 "$gate_pid" 2>/dev/null && gate_survivors="$gate_survivors $gate_pid"; done <"$readiness_root/slow-gate-pids"
+  expect_equal "termination ($stop_signal): the gate's shell and its child are stopped" "" "$gate_survivors"
+  if no_leftovers_within 1 "sleep 1787" "sleep 1033"; then pass; else fail "termination ($stop_signal): the watchdog or the gate's sleep is still running"; fi
+  if [ -e "$readiness_root/slow-gate-finished" ]; then fail "termination ($stop_signal): the gate ran to its end"; else pass; fi
+done
 # Already NOT CERTIFIABLE: neither the external review nor the gate runs.
 build_readiness_project skip-not-certifiable '"true"' 0 "sh '$readiness_root/marker-gate.sh'"
 printf '#!/bin/sh\n: >"%s"\n' "$readiness_root/marker-gate-ran" >"$readiness_root/marker-gate.sh"
@@ -6373,7 +6466,7 @@ expect_equal "skipping: the external review is not run" "EXTERNAL REVIEW: NOT RU
 if [ -e "$readiness_root/marker-gate-ran" ]; then fail "skipping: the gate command ran"; else pass; fi
 rm "$readiness_project/notes.txt"
 run_readiness
-expect_ready_yes "skipping: control, a certifiable run"
+expect_ready_but_unverified_base "skipping: control, a certifiable run"
 if [ -e "$readiness_root/marker-gate-ran" ]; then pass; else fail "skipping: control, the gate command ran"; fi
 
 # --- more negative cells: base, increment record, item status, evidence, environment
@@ -6429,11 +6522,295 @@ run_readiness
 expect_not_certifiable "classifier: an error is NOT CERTIFIABLE" "the classifier failed"
 rm "$readiness_project/.git/info/attributes"
 run_readiness
-expect_ready_yes "more negatives: restored"
+expect_ready_but_unverified_base "more negatives: restored"
 mkdir -p "$readiness_root/not-a-repository"
 readiness_output="$(CLAUDE_CONFIG_DIR="$config_directory" "$installed_readiness" WORK-001 --inc I1 "$readiness_root/not-a-repository" 2>/dev/null)"
 expect_equal "environment: not a Git repository is exit 2" 2 "$?"
 expect_equal "environment: no block is printed" "" "$readiness_output"
+
+# --- external review with no reviewer configured (round 4): skipped only at tier 0, only when
+# the base commit's externalReview is explicitly null
+external_home="$(review_home null-external)"
+printf '[diff]\n\texternal = true\n' >>"$external_home/.gitconfig"
+build_readiness_project null-tier0 null 0
+HOME="$external_home" XDG_CONFIG_HOME="$external_home/.config" run_readiness
+expect_ready_but_unverified_base "external review: tier 0 with externalReview null makes no review clone, so a user-level diff.external does not matter"
+build_readiness_project null-tier1 null 1
+HOME="$external_home" XDG_CONFIG_HOME="$external_home/.config" run_readiness
+expect_not_certifiable "external review: at tier 1 the diff checks still run with externalReview null" "diff.external is set in the user or system Git configuration"
+readiness_gates_filter='del(.externalReview)'
+build_readiness_project missing-external-key null 0
+readiness_gates_filter='.'
+HOME="$external_home" XDG_CONFIG_HOME="$external_home/.config" run_readiness
+expect_not_certifiable "external review: a missing externalReview key does not skip the checks" "diff.external is set in the user or system Git configuration"
+run_readiness
+expect_equal "external review: a missing key runs external-review.sh (NOT CONFIGURED)" "EXTERNAL REVIEW: NOT CONFIGURED (optional at tier 0)" "$(readiness_line "EXTERNAL REVIEW:")"
+readiness_gates_raw='{"full": "true", "externalReview": null'
+build_readiness_project malformed-gates null 0
+readiness_gates_raw=""
+run_readiness
+expect_not_certifiable "external review: a malformed gates.json at the base commit" ".agents/gates.json at the base commit is malformed or oversized"
+
+# --- changed binary files (round 4): only allowlisted image and font assets, reported in full
+png_bytes() { printf '\211PNG\r\n\032\n\000\000\000\015IHDR\000\000\000\001%s' "$1"; } # a PNG signature and some bytes
+file_sha256() { if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | cut -d' ' -f1; else sha256sum "$1" | cut -d' ' -f1; fi; }
+commit_files() { # message path...: commits exactly those paths (added, changed or removed)
+  local message="$1"
+  shift
+  readiness_git "$readiness_project" add -A -- "$@"
+  readiness_git "$readiness_project" commit -q -m "$message"
+  record_review qa
+}
+readiness_gates_filter='.binaryAssets = ["docs/images/"]'
+readiness_seed_command='mkdir -p docs/images && png_bytes old >docs/images/old.png && png_bytes keep >docs/images/keep.png'
+build_readiness_project binary-assets '"true"' 0 # binaries classify as tier 1, which needs a reviewer
+readiness_seed_command=""
+readiness_gates_filter='.'
+png_bytes logo >"$readiness_project/docs/images/logo.png"
+commit_files "add an image" docs/images/logo.png
+run_readiness
+expect_ready_but_unverified_base "binary files: an allowlisted PNG asset"
+expect_equal "binary files: one changed binary is listed" "CHANGED BINARY FILES: 1" "$(readiness_line "CHANGED BINARY FILES:")"
+expect_contains "binary files: path, status, size and SHA-256 are reported" \
+  "A docs/images/logo.png $(wc -c <"$readiness_project/docs/images/logo.png" | tr -d ' ') bytes sha256 $(file_sha256 "$readiness_project/docs/images/logo.png")" "$readiness_output"
+readiness_git "$readiness_project" rm -q docs/images/old.png
+commit_files "remove an image" docs/images/old.png
+run_readiness
+expect_contains "binary files: a deleted binary is reported" "D docs/images/old.png (deleted; allowed)" "$readiness_output"
+expect_equal "binary files: a deletion is allowed" "CERTIFIABLE: YES" "$(readiness_line "CERTIFIABLE:")"
+mkdir -p "$readiness_project/docs/other"
+png_bytes outside >"$readiness_project/docs/other/logo.png"
+commit_files "an image outside the allowlist" docs/other/logo.png
+run_readiness
+expect_not_certifiable "binary files: a PNG outside the allowlisted directories" "changed binary file docs/other/logo.png is not under a binaryAssets directory"
+readiness_git "$readiness_project" rm -q docs/other/logo.png
+commit_files "remove it" docs/other/logo.png
+printf '#!/bin/sh\necho payload\n\000\n' >"$readiness_project/docs/images/tool.png"
+commit_files "a script named like an image" docs/images/tool.png
+run_readiness
+expect_not_certifiable "binary files: a script named .png" "changed binary file docs/images/tool.png is not an image or font asset"
+readiness_git "$readiness_project" rm -q docs/images/tool.png
+commit_files "remove it" docs/images/tool.png
+printf '#!/bin/sh\necho payload\n\000\n' >"$readiness_project/docs/images/run.sh"
+commit_files "a binary script in the asset directory" docs/images/run.sh
+run_readiness
+expect_not_certifiable "binary files: a binary with a script extension" "changed binary file docs/images/run.sh is not an image or font asset"
+readiness_git "$readiness_project" rm -q docs/images/run.sh
+commit_files "remove it" docs/images/run.sh
+png_bytes executable >"$readiness_project/docs/images/run.png"
+chmod +x "$readiness_project/docs/images/run.png"
+commit_files "an executable image" docs/images/run.png
+run_readiness
+expect_not_certifiable "binary files: an executable PNG" "changed binary file docs/images/run.png is not a plain non-executable file (mode 100755)"
+readiness_git "$readiness_project" rm -q docs/images/run.png
+commit_files "remove it" docs/images/run.png
+printf 'echo payload\n' >"$readiness_project/docs/images/keep.png"
+commit_files "a binary at the base replaced by text" docs/images/keep.png
+run_readiness
+expect_not_certifiable "binary files: text replacing a binary (shown only as Binary files differ)" "changed binary file docs/images/keep.png is not an image or font asset"
+png_bytes keep >"$readiness_project/docs/images/keep.png"
+commit_files "restore it" docs/images/keep.png
+jq '.binaryAssets += ["src/"]' "$readiness_project/.agents/gates.json" >"$readiness_root/gates.json"
+cp "$readiness_root/gates.json" "$readiness_project/.agents/gates.json"
+commit_files "widen the allowlist on the branch" .agents/gates.json
+run_readiness
+expect_not_certifiable "binary files: a branch that changes binaryAssets" "this branch changes binaryAssets in .agents/gates.json"
+build_readiness_project binary-default null 0
+mkdir -p "$readiness_project/docs/images"
+png_bytes default >"$readiness_project/docs/images/logo.png"
+commit_files "an image without an allowlist" docs/images/logo.png
+run_readiness
+expect_not_certifiable "binary files: no allowlist at the base commit" "changed binary file docs/images/logo.png is not under a binaryAssets directory"
+unsafe_entry_number=0
+for unsafe_entry in '"../docs/"' '"/docs/"' '".github/"' '"docs"' '"docs/*/"' '""' '"docs/./images/"'; do
+  unsafe_entry_number=$((unsafe_entry_number + 1))
+  readiness_gates_filter=".binaryAssets = [$unsafe_entry]"
+  build_readiness_project "binary-unsafe-$unsafe_entry_number" null 0
+  readiness_gates_filter='.'
+  run_readiness
+  expect_not_certifiable "binary files: unsafe binaryAssets entry $unsafe_entry" "binaryAssets entry $unsafe_entry at the base commit is not a plain relative directory"
+done
+readiness_gates_filter='.binaryAssets = "docs/images/"'
+build_readiness_project binary-not-a-list null 0
+readiness_gates_filter='.'
+run_readiness
+expect_not_certifiable "binary files: binaryAssets that is not a list" "binaryAssets in .agents/gates.json at the base commit is not a list"
+
+# --- tracked files at HEAD (round 4): names verification could misread, links out of the clone
+build_readiness_project tracked-names null 0
+for unsafe_name in '"quoted.txt' $'carriage\r.txt'; do
+  printf 'x\n' >"$readiness_project/$unsafe_name"
+  commit_files "an unsafe name" "$unsafe_name"
+  run_readiness
+  expect_not_certifiable "tracked files: an unsafe path name" "a tracked path at HEAD starts with a double quote or holds a carriage return or newline"
+  readiness_git "$readiness_project" rm -q -- "$unsafe_name"
+  commit_files "remove it" "$unsafe_name"
+done
+mkdir -p "$readiness_project/docs"
+for escaping_target in ../../outside /etc/hosts ../docs/../../outside; do
+  mkdir -p "$readiness_project/docs" # removing the last file in docs removed the directory
+  ln -s "$escaping_target" "$readiness_project/docs/link.md"
+  commit_files "an escaping link" docs/link.md
+  run_readiness
+  expect_not_certifiable "tracked files: a link to $escaping_target" "tracked symbolic link docs/link.md points outside the repository ($escaping_target)"
+  readiness_git "$readiness_project" rm -q docs/link.md
+  commit_files "remove it" docs/link.md
+done
+mkdir -p "$readiness_project/docs"
+ln -s ../README.md "$readiness_project/docs/readme-link.md"
+commit_files "a link inside the repository" docs/readme-link.md
+run_readiness
+expect_equal "tracked files: a link inside the repository is verified and allowed" "1 CERTIFIABLE: YES" "$readiness_status $(readiness_line "CERTIFIABLE:")"
+# A grafts file rewrites parents even with replace objects off.
+printf '%s\n' "$(readiness_git "$readiness_project" rev-parse HEAD)" >"$readiness_project/.git/info/grafts"
+run_readiness
+expect_not_certifiable "repository: a grafts file" "the repository has a grafts file (info/grafts)"
+rm "$readiness_project/.git/info/grafts"
+
+# --- submodules (round 4): an ignore setting cannot hide a submodule bump from evidence or review
+submodule_source="$readiness_root/submodule-source"
+rm -rf "$submodule_source"
+git init -q "$submodule_source"
+readiness_git "$submodule_source" commit -q --allow-empty -m one
+submodule_first="$(readiness_git "$submodule_source" rev-parse HEAD)"
+readiness_git "$submodule_source" commit -q --allow-empty -m two
+submodule_second="$(readiness_git "$submodule_source" rev-parse HEAD)"
+# shellcheck disable=SC2016 # the reviewer command is run later by external-review.sh
+submodule_probe='git diff --name-only "$REVIEW_BASE_REF" "$REVIEW_HEAD_REF" | grep -qx lib'
+readiness_seed_command="mkdir lib && git update-index --add --cacheinfo 160000,$submodule_first,lib && printf '[submodule \"lib\"]\\n\\tpath = lib\\n\\turl = ../submodule-source\\n\\tignore = all\\n' >.gitmodules"
+build_readiness_project submodule-ignore "$(jq -n --arg command "$submodule_probe" '$command')" 0
+readiness_seed_command=""
+readiness_git "$readiness_project" update-index --cacheinfo "160000,$submodule_second,lib"
+readiness_git "$readiness_project" commit -q -m "bump the submodule"
+run_readiness
+expect_equal "submodules: QA recorded before a hidden bump is stale" "QA (internal): STALE" "$(readiness_line "QA (internal):")"
+record_review qa
+submodule_home="$(review_home submodule-ignore)"
+printf '[diff]\n\tignoreSubmodules = all\n' >>"$submodule_home/.gitconfig"
+HOME="$submodule_home" XDG_CONFIG_HOME="$submodule_home/.config" run_readiness
+expect_equal "submodules: the reviewer's own diff shows the bump despite ignore=all and diff.ignoreSubmodules=all" \
+  "EXTERNAL REVIEW: PASSED (required at tier 1)" "$(readiness_line "EXTERNAL REVIEW:")"
+expect_ready_but_unverified_base "submodules: a visible bump with current evidence"
+# A changed path the reviewer's own diff does not show fails closed (a stand-in git hides README.md
+# from every plain "diff --name-only", the form readiness checks the reviewer's view with).
+hiding_git_stand_in="$readiness_root/hiding-git-stand-in"
+mkdir -p "$hiding_git_stand_in"
+cat >"$hiding_git_stand_in/git" <<STANDIN
+#!/bin/bash
+case " \$* " in
+  *" --ignore-submodules=none "*) ;;
+  *" diff --name-only "*) '$(command -v git)' "\$@" | tr '\\0' '\\n' | grep -vx README.md | tr '\\n' '\\0'; exit 0 ;;
+esac
+exec '$(command -v git)' "\$@"
+STANDIN
+chmod +x "$hiding_git_stand_in/git"
+build_readiness_project review-visibility '"true"' 0
+variant_install review-visibility "$hiding_git_stand_in"
+run_readiness "$variant_readiness"
+expect_not_certifiable "external review: a changed path hidden from the reviewer's diff" "changed path README.md does not appear in the reviewer's own diff"
+reset_trust
+
+# --- verification byte for byte (round 4): a checkout that differs from HEAD is refused
+mismatch_git_stand_in="$readiness_root/mismatch-git-stand-in"
+mkdir -p "$mismatch_git_stand_in"
+cat >"$mismatch_git_stand_in/git" <<STANDIN
+#!/bin/bash
+'$(command -v git)' "\$@"
+status=\$?
+previous=""
+directory=""
+checkout=no
+for argument in "\$@"; do
+  [ "\$previous" = -C ] && directory="\$argument"
+  [ "\$argument" = checkout ] && checkout=yes
+  previous="\$argument"
+done
+if [ "\$checkout" = yes ] && [ -n "\$directory" ] && [ -f "\$directory/README.md" ]; then printf 'altered\n' >>"\$directory/README.md"; fi
+exit \$status
+STANDIN
+chmod +x "$mismatch_git_stand_in/git"
+build_readiness_project verify-mismatch null 0
+variant_install verify-mismatch "$mismatch_git_stand_in"
+run_readiness "$variant_readiness"
+expect_not_certifiable "clones: a checkout that differs from HEAD" "a fresh clone of HEAD could not be created and verified: its files do not match HEAD byte for byte"
+reset_trust
+
+# --- the reviewer's filter and diff-driver settings (round 4 cells)
+build_readiness_project driver-keys '"true"' 0
+printf 'README.md filter=forge\n' >"$readiness_project/.gitattributes"
+commit_files "attributes: filter" .gitattributes
+commit_change README.md
+record_review qa
+driver_home="$(review_home driver-filter)"
+printf '[filter "forge"]\n\tclean = cat\n' >>"$driver_home/.gitconfig"
+HOME="$driver_home" XDG_CONFIG_HOME="$driver_home/.config" run_readiness
+expect_not_certifiable "external review: a configured filter driver on a changed file" "README.md has filter=forge, a configured filter driver"
+printf 'README.md diff=hide\n' >"$readiness_project/.gitattributes"
+commit_files "attributes: diff driver" .gitattributes
+for driver_key in command binary; do
+  driver_home="$(review_home "driver-$driver_key")"
+  printf '[diff "hide"]\n\t%s = true\n' "$driver_key" >>"$driver_home/.gitconfig"
+  HOME="$driver_home" XDG_CONFIG_HOME="$driver_home/.config" run_readiness
+  expect_not_certifiable "external review: a diff driver with $driver_key" "README.md uses diff driver hide with diff.hide.$driver_key set"
+done
+
+# --- the reviewer's private TMPDIR and the caller's HOME for its command
+# shellcheck disable=SC2016 # the reviewer command is run later by external-review.sh
+review_environment_probe='printf "%s\n%s\n" "$TMPDIR" "$HOME" >'"'$readiness_root/review-environment.txt'"
+build_readiness_project review-environment "$(jq -n --arg command "$review_environment_probe" '$command')" 0
+run_readiness
+expect_ready_but_unverified_base "external review: the reviewer runs"
+case "$(sed -n 1p "$readiness_root/review-environment.txt" 2>/dev/null)" in
+  "$(cd "${TMPDIR:-/tmp}" && pwd -P)/readiness-clone."*/tmp) pass ;;
+  *) fail "external review: the reviewer's TMPDIR is private to its clone root (got '$(sed -n 1p "$readiness_root/review-environment.txt" 2>/dev/null)')" ;;
+esac
+expect_equal "external review: the reviewer's command gets the caller's HOME" "$HOME" "$(sed -n 2p "$readiness_root/review-environment.txt" 2>/dev/null)"
+
+# --- readiness's own environment (round 4): injected shell code, functions, PATH and HOME
+injection_directory="$readiness_root/injection"
+rm -rf "$injection_directory"
+mkdir -p "$injection_directory/tools" "$injection_directory/home"
+printf ': >"%s"\n' "$injection_directory/bash-env-ran" >"$injection_directory/bash-env.sh"
+for injected_tool in git jq cat shasum sha256sum awk sort; do
+  real_injected_tool="$(command -v "$injected_tool" || true)"
+  [ -n "$real_injected_tool" ] || continue
+  printf '#!/bin/bash\n: >"%s"\nexec "%s" "$@"\n' "$injection_directory/fake-tool-ran" "$real_injected_tool" >"$injection_directory/tools/$injected_tool"
+  chmod +x "$injection_directory/tools/$injected_tool"
+done
+printf '#!/bin/sh\nexit 0\n' >"$injection_directory/tools/readiness-path-probe"
+chmod +x "$injection_directory/tools/readiness-path-probe"
+printf '[user]\n\tname = test\n\temail = test@example.com\n' >"$injection_directory/home/.gitconfig"
+printf 'def length: 99;\n' >"$injection_directory/home/.jq"
+# The gate checks that its command gets the caller's PATH and HOME and no preload variable.
+injection_gate="readiness-path-probe && test \"\$HOME\" = '$injection_directory/home' && test -z \"\${LD_PRELOAD+set}\""
+build_readiness_project injection null 0 "$injection_gate"
+readiness_output="$(env 'BASH_FUNC_jq%%=() {  echo forged; }' 'BASH_FUNC_git%%=() {  echo forged; }' \
+  BASH_ENV="$injection_directory/bash-env.sh" ENV="$injection_directory/bash-env.sh" LD_PRELOAD=/nonexistent/readiness-preload.so \
+  PATH="$injection_directory/tools:$PATH" HOME="$injection_directory/home" XDG_CONFIG_HOME="$injection_directory/home/.config" \
+  CLAUDE_CONFIG_DIR="$config_directory" "$installed_readiness" WORK-001 --inc I1 "$readiness_project" 2>&1)"
+readiness_status=$?
+expect_ready_but_unverified_base "environment: injected BASH_ENV, ENV, functions, PATH tools, preload and ~/.jq change nothing"
+expect_contains "environment: the gate's command still got the caller's PATH and HOME" "GATE full: PASSED" "$(readiness_line "GATE full:")"
+if [ -e "$injection_directory/bash-env-ran" ]; then fail "environment: BASH_ENV or ENV reached readiness or a program it ran"; else pass; fi
+if [ -e "$injection_directory/fake-tool-ran" ]; then fail "environment: a tool from the caller's PATH ran for readiness or a plugin script"; else pass; fi
+readiness_output="$(AI_ENGINEERING_READINESS_RESTARTED=1 BASH_ENV="$injection_directory/bash-env.sh" CLAUDE_CONFIG_DIR="$config_directory" "$installed_readiness" WORK-001 --inc I1 "$readiness_project" 2>&1)"
+expect_equal "environment: an environment that cannot be cleared is exit 2" 2 "$?"
+if [ -e "$injection_directory/bash-env-ran" ]; then fail "environment: BASH_ENV ran before the refusal"; else pass; fi
+
+# --- the temporary directory (round 4): real path, outside the repository
+build_readiness_project temporary-directory null 0
+mkdir -p "$readiness_root/real-tmp"
+ln -s "$readiness_root/real-tmp" "$readiness_root/linked-tmp"
+TMPDIR="$readiness_root/linked-tmp" run_readiness
+expect_ready_but_unverified_base "temporary directory: a linked TMPDIR resolves to its real directory"
+expect_equal "temporary directory: nothing left in it" "" "$(ls -A "$readiness_root/real-tmp")"
+for bad_temporary in "relative-tmp" "$readiness_project/tmp-inside" "$readiness_project"; do
+  mkdir -p "$readiness_project/tmp-inside"
+  readiness_output="$(cd "$readiness_root" && mkdir -p relative-tmp && TMPDIR="$bad_temporary" CLAUDE_CONFIG_DIR="$config_directory" "$installed_readiness" WORK-001 --inc I1 "$readiness_project" 2>&1)"
+  expect_equal "temporary directory: '$bad_temporary' is exit 2" 2 "$?"
+  rmdir "$readiness_project/tmp-inside"
+done
+expect_contains "temporary directory: the reason is given" "is inside the repository" "$readiness_output"
 
 # ---------------------------------------------------------------- inject-standards
 output="$(CLAUDE_PLUGIN_ROOT="$repository_directory/plugins/ai-engineering" "$scripts/inject-standards.sh")"

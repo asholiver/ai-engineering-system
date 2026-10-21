@@ -61,7 +61,9 @@ Readiness (`/ai-engineering:review`, and the end of each delivered increment) is
 
 Without a pin, from a `--plugin-dir` checkout, or with any mismatch, readiness reports `NOT CERTIFIABLE` and `READY: NO`.
 
-It also reads the guard log under the Git directory, so each increment must start with the exact command `/ai-engineering:deliver` uses: `git switch -c <work-branch> <commit>`, naming the full `origin/<default>` commit. That command's confirmation shows you the base commit. The guard log records only that the command was asked, not that you approved it or that it ran, and readiness doesn't contact the remote. So `READY: YES` assumes, without proving, that `origin/<default>` named the remote's commit when the increment started. The base is recorded when the increment starts and never changes.
+It also reads the guard log under the Git directory, so each increment must start with the exact command `/ai-engineering:deliver` uses: `git switch -c <work-branch> <commit>`, naming the full `origin/<default>` commit. The base is recorded when the increment starts and never changes. An increment that became active before v0.3.0 has no recorded base and is `NOT CERTIFIABLE`; start a new increment.
+
+**`READY: YES` is not reachable in v0.3.0.** The guard log records only that the start command was asked, not that you approved it or that it ran, and readiness doesn't contact the remote. So readiness can't verify where the base came from: the block says `BASE PROVENANCE: UNVERIFIED`, and READY is NO for that reason. Every other check still runs and is reported. A separate guard change, not yet approved, would close this.
 
 Practical requirements and limits:
 - **`origin/HEAD` must be set.** Repositories created with `git init` and `git remote add` don't set it. Run `git remote set-head origin -a` once.
@@ -73,10 +75,16 @@ Practical requirements and limits:
   - sparse checkouts (skip-worktree flags);
   - submodules, unless the gate initialises them;
   - Git LFS content, unless the gate fetches it.
-- **Diff configuration.** Readiness neutralises most user-level diff settings in its clones, such as an attributes file, the big-file threshold and diff prefixes. Some it cannot neutralise, so these make readiness `NOT CERTIFIABLE`:
+- **Diff configuration.** Readiness neutralises most user-level diff settings in its clones, such as an attributes file, the big-file threshold, diff prefixes and submodule ignore settings. When an external reviewer is configured, or the tier is 1 or 2, some it cannot neutralise make readiness `NOT CERTIFIABLE`:
   - `diff.external`, set in your user or system configuration (for example for a structural diff tool);
-  - a changed text file with `-diff`, `binary` or a diff driver that has `textconv` or `command` configured;
-  - a changed file with a configured filter driver.
+  - a changed text file with `-diff`, `binary`, or a diff driver that has `textconv`, `command` or `binary` configured;
+  - a changed file with a configured filter driver;
+  - a changed path that the reviewer's own `git diff` doesn't show.
+
+  At tier 0 with `"externalReview": null` committed, none of these apply.
+- **Binary files.** Reviewers see a binary change only as `Binary files differ`, so a changed binary file is `NOT CERTIFIABLE` unless it is an image or font asset (`png`, `jpg`, `jpeg`, `gif`, `webp`, `ico`, `avif`, `woff`, `woff2`, `ttf`, `otf`, non-executable, with matching leading bytes) under a directory listed in `binaryAssets` in the base commit's `.agents/gates.json`, for example `"binaryAssets": ["public/images/", "src/assets/fonts/"]`. Entries are relative directories ending in `/`. Change the list in its own pull request: a branch that changes it is `NOT CERTIFIABLE`. Each changed binary is listed with its size and SHA-256.
+- **File names and links.** A tracked path that starts with `"` or contains a carriage return or newline, and a symbolic link that points outside the repository (or to an absolute path), are `NOT CERTIFIABLE`.
+- **Tools and temporary directory.** Readiness takes its own `git`, `jq` and other tools only from system directories (Homebrew, `/usr/local/bin`, `/usr/bin`, `/bin`), not from your `PATH`; your `full` gate and reviewer commands still get your `PATH` and `HOME`. Readiness drops `BASH_ENV`, `ENV`, exported shell functions and every `GIT_*` variable for everything it runs. `TMPDIR` must be outside the repository.
 - **Time.** A readiness run can take up to 50 minutes: the gate is limited to 30, the external review to 15. A timeout is `READY: NO`.
 - **Reviewer commands** run in a clone with no remote, so use `REVIEW_BASE_REF` and `REVIEW_HEAD_REF` rather than `origin/...` or `gh pr diff`.
 

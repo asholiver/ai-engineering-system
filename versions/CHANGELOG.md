@@ -31,16 +31,20 @@ Readiness (WORK-003 C2, ADR-0005).
 - New `scripts/readiness.sh`: one deterministic readiness procedure that `/ai-engineering:review` runs (and `/ai-engineering:deliver` through it).
   - Effective tier = max(state tier, classifier floor, action floor), and it never goes lower.
   - It runs the full gate itself in a fresh local clone at HEAD, with configuration from the increment's recorded base, and runs the external review.
-- **Behaviour change:** an increment starts with `git switch -c <work-branch> <commit>`, naming the full `origin/<default>` commit, so its confirmation shows the base.
-  - The guard log records only that the command was asked, not that it was approved or ran, and the base is not authenticated against the remote. READY: YES rests on that unproven assumption.
+- **Behaviour change:** an increment starts with `git switch -c <work-branch> <commit>`, naming the full `origin/<default>` commit, so its start record names the base.
+  - The guard log records only that the command was asked, not that it was approved or ran, and the base is not authenticated against the remote.
+  - **Behaviour change:** readiness therefore reports `BASE PROVENANCE: UNVERIFIED` and never `READY: YES` in v0.3.0. A run that passes everything else ends `READY: NO` for that reason alone (exit 1). A separate guard change, not yet approved, would close this.
   - `workstate.sh increment-set --status active` (planned to active) requires that full commit as `--base-sha`, checks it against `origin/<default>` at that moment, and never records a base later or changes it.
   - A default-branch ref that moves afterwards is `NOT CERTIFIABLE`; a newer ref is never accepted automatically.
-- **Behaviour change:** the external review and the gate each run in their own fresh clone of HEAD, review first. Inherited Git overrides are removed.
-  - Clones are checked out with controlled Git (no user, system, XDG or template configuration, no attributes) and verified byte for byte.
-  - User-level diff settings are neutralised in the clone.
-  - An effective `diff.external`, or a diff or filter driver on a changed file, is `NOT CERTIFIABLE`.
+- **Behaviour change:** the external review and the gate each run in their own fresh clone of HEAD, review first. Every inherited `GIT_*` variable is removed.
+  - Only the increment branch is cloned, through Git's transport with every object checked (`--no-local`, `transfer.fsckObjects`). Clones are checked out with controlled Git (no user, system, XDG or template configuration, no attributes) and verified byte for byte. A failed clone is reported with Git's last message.
+  - User-level diff settings and `.gitmodules` ignore settings are neutralised in the clone.
+  - An effective `diff.external`, a diff or filter driver on a changed file, or a changed path missing from the reviewer's own diff is `NOT CERTIFIABLE`. At tier 0 with `externalReview` explicitly `null` at the base commit, no review clone is made and these checks don't apply.
+- **Behaviour change:** a changed binary file is `NOT CERTIFIABLE` unless it is a non-executable image or font asset under a directory listed in `binaryAssets` in the base commit's `.agents/gates.json`. A branch can't change that list. Each changed binary is listed with its size and SHA-256.
+- **Behaviour change:** readiness refuses tracked paths starting with `"` or containing a carriage return or newline, symbolic links that leave the repository, a grafts file and `info/attributes`. Evidence and review diffs never hide a submodule bump.
+- **Behaviour change:** readiness runs in bash privileged mode, drops `BASH_ENV`, `ENV`, exported functions and preload variables for everything it runs, and takes its own tools only from system directories, never from `PATH`. The gate's and the reviewer's configured commands still get the caller's `PATH` and `HOME`. `TMPDIR` must be outside the repository.
   - After the gate, readiness revalidates the state, refs, HEAD, replace refs, the installed plugin and the evidence. The whole script is parsed before it runs.
-- **Behaviour change:** time limits (gate 30 minutes, external review 15, readiness 50). A timeout fails. INT, TERM or HUP stops the run (exit 4) and cleans up. The `review` skill runs readiness in the background and waits for the result.
+- **Behaviour change:** time limits (gate 30 minutes, external review 15, readiness 50). A timeout fails. INT, TERM or HUP stops the run (exit 4), the child's whole process group and its watchdog, and cleans up. Readiness reads at most the last MiB of a child's output. The `review` skill runs readiness in the background and waits for the result.
 - When readiness is already `NOT CERTIFIABLE`, the gate and external review are not run.
 - **Behaviour change:** the full gate never runs in the development checkout, so a consuming project's `full` gate must install its own dependencies. Running a project gate is not a sandbox.
 - **Behaviour change:** `/ai-engineering:review` no longer takes a base ref, and reports the `READINESS` block.

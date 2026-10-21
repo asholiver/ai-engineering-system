@@ -24,6 +24,7 @@ A run can take up to 50 minutes (the gate is limited to 30, the external review 
 - If the gate line says `THIS CHANGE MODIFIES THE "full" GATE`, list that under open items for the human.
 - The gate runs in a fresh clone of `HEAD`, never in the checkout, so it must install its own dependencies. A gate that fails there is READY: NO; never re-run it in the checkout to get a pass.
 - When readiness is already NOT CERTIFIABLE, the gate and external review lines say `NOT RUN (not certifiable)`: fix the reported reasons first.
-- READY: YES is not proof that the owner approved the increment's start or that its base is the remote's commit: the guard log records that the start command was asked, not that it was approved or ran.
+- `BASE PROVENANCE: UNVERIFIED` is expected on every run: the guard log records that the start command was asked, not that it was approved or ran, and nothing authenticates the base against the remote. READY is therefore NO for that reason on every increment, and READY: YES is not reachable until a separate guard change exists. When it is the only READY reason, say that everything else passed and that final acceptance is the owner's judgement; never describe the increment as ready.
+- `CHANGED BINARY FILES` lists each binary change with its size and SHA-256. Reviewers cannot read a binary diff, so only allowlisted image and font assets are certifiable; list the files for the owner.
 
 Report findings; do not rewrite the implementation unless the user asks.

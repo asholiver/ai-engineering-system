@@ -275,9 +275,10 @@ Readiness needs these:
 - the version pin in `.claude/settings.json`;
 - `origin/HEAD` (`git remote set-head origin -a`);
 - an increment started with the exact command `/ai-engineering:deliver` uses;
-- a `full` gate that installs its own dependencies.
+- a `full` gate that installs its own dependencies;
+- a `binaryAssets` list in `.agents/gates.json` for any image or font assets a change touches.
 
-A run can take up to 50 minutes. See [docs/consuming-project.md](docs/consuming-project.md#readiness-and-the-version-pin).
+A run can take up to 50 minutes. In v0.3.0 it never reports `READY: YES`: the increment's base can't yet be verified, so the block says `BASE PROVENANCE: UNVERIFIED` and you judge readiness from the rest of it. See [docs/consuming-project.md](docs/consuming-project.md#readiness-and-the-version-pin).
 
 What runs without prompts once you authorise delivery: fixes inside the approved intent, commits, pushing the work branch, opening or updating the increment pull request (per the spec's delivery policy), gates, review and moving on to the next increment after you merge. Delivery interrupts you only for an intent or scope change, an owner-level trade-off, accepting or downgrading risk, a reserved operation, or an ambiguity. Starting each increment from the updated default branch asks one guard confirmation, and that confirmation pre-authorises nothing else. Every deploy, merge, release, publish, protected push and other reserved operation still asks, whatever the work item's state says. You merge; delivery never does.
 

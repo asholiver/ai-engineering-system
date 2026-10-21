@@ -252,3 +252,45 @@ Append-only delivery narrative, written by the coordinator. Not sent to speciali
   4. Ref protection: the guard asks for writes to `refs/remotes/*` (`update-ref`, `fetch` refspecs into `refs/remotes`, `remote set-head`, `symbolic-ref`) and for `git branch -f/-m` of the increment branch, so tampering after the anchor raises the floor.
 
   With 1 and 3, A3 would rest on recorded execution and a remote check instead of an unproven assumption. Direct edits of the local log files remain the accepted A2 residual.
+
+## 2026-10-21: PR C remediation round 4, local
+- Fresh internal reviews of `a5e7796..74c72a2` (Opus security and QA; internal checks, not external review evidence):
+  - security: three Medium (binary files hidden from reviewers, submodule bumps hidden by ignore settings, readiness's own tools controllable through `BASH_ENV`, functions and `PATH`) and five Low;
+  - QA: one High (review checks ran with no reviewer configured), nine Medium (leaked watchdog, a vacuous termination test, untested cells, the timing conclusion, unbounded output, clone diagnostics, suite runtime, a flaky limit test, stale wording) and Lows.
+  - Three leaked watchdog process groups from the termination test were stopped by the coordinator and checked gone.
+- Owner decisions (2026-10-21), verbatim excerpts:
+  - "When the trusted base-commit configuration explicitly has externalReview: null, skip the external-review clone and its diff checks. This exception applies only to tier 0. Missing, malformed or untrusted configuration must fail closed."
+  - "Implement a narrow allowlist defined at the trusted base commit for non-executable assets such as images and fonts. … Reject unsafe patterns and branch-controlled allowlist changes."
+  - "Until the separate Guard trust-boundary protocol is approved and implemented, fail closed for READY: YES where owner-approved base provenance is required. Add an explicit base-provenance status to the READINESS block."
+  - "Keep the complete existing gate. Defer splitting out a faster subset."
+  - "Fix the leaked watchdog and process-group termination. … Do not run another full suite until the focused termination test passes."
+  - Items 6–11: environment hardening, submodules, bounded output and diagnostics, clone and temporary-directory hardening, missing tests and wording, and the timing-test history.
+  - On the timing investigation (after declining a replica with a load generator): "Please use read-only inspection first … Do not run another stress test until I approve its design."
+- Implemented (readiness.sh unless noted):
+  - **Base provenance:** `BASE PROVENANCE: UNVERIFIED` on every run, and READY: NO for that reason alone. No workflow reaches READY: YES; exit 0 is unreachable until the guard change is approved and built.
+  - **External review:** at effective tier 0 with `externalReview` explicitly null in a valid base `.agents/gates.json`, no review clone and no diff checks. A missing file or key doesn't skip them; a malformed or oversized file is NOT CERTIFIABLE.
+  - **Binary files:** allowlist `binaryAssets` (relative directories ending in `/`, no `..` or hidden segment, at most 32) read only from the base commit. Allowed files must be `100644`, an image or font extension, and match that format's leading bytes. Every changed binary is reported with its status, size and SHA-256. A branch that changes the list is NOT CERTIFIABLE (literal reading of "reject branch-controlled allowlist changes": the list changes only in its own owner-reviewed change).
+  - **Watchdog:** the watchdog runs inside the child's process group, ignoring TERM. Readiness signals the group only while the watchdog is alive (before its `.final` marker), so a signal never reaches a reused process-group id. The group, watchdog included, is killed when the child ends and on a handled signal.
+  - **Environment:** `#!/bin/bash -p`, plus one restart without `BASH_ENV`, `ENV`, exported functions, `LD_PRELOAD`, `LD_AUDIT` or `DYLD_INSERT_LIBRARIES`. Tools come from fixed system directories. Every `GIT_*` variable is removed. Library-path and Perl variables are removed for readiness's own tools. `jq` and the helper scripts get an empty `HOME`.
+    - `run-gate.sh` and `external-review.sh` get the controlled tools and an empty `HOME`; only their configured command gets the caller's `PATH` and `HOME` (`AI_ENGINEERING_COMMAND_PATH`/`_HOME`).
+    - No Guard-conflicting variable is exported to them; the real-guard and gate tests still pass.
+  - **Submodules:** evidence coverage and the review checks use `--ignore-submodules=none`. Each `.gitmodules` submodule's `ignore` is overridden to `none` in the review clone. A changed path missing from the reviewer's own `git diff --name-only` is NOT CERTIFIABLE.
+  - **Output and diagnostics:** readiness reads at most the last MiB of gate output and 4 KiB for the reviewer's verdict lines. A failed clone or checkout reports Git's last line.
+  - **Clones:** `--no-local --single-branch --branch <increment branch> --no-tags`, `transfer.fsckObjects`, and `safe.directory` for the repository readiness already read.
+    - Readiness's own reads use no commit-graph.
+    - A grafts file and non-empty `info/attributes` are NOT CERTIFIABLE.
+    - `TMPDIR` is resolved to its real path and must be outside the repository and the main worktree (exit 2).
+    - Tracked paths starting with `"` or holding CR or LF, and symbolic links that are absolute or leave the repository, are NOT CERTIFIABLE.
+  - **Tests:**
+    - stand-in tests moved to trusted variant installs (readiness no longer takes tools from `PATH`);
+    - the overall limit tested deterministically (a reviewer taking 3 s before the gate; a slow stand-in Git before the review);
+    - termination with TERM, INT and HUP proves that the gate's shell and child stopped and that no watchdog survived;
+    - plus the binary, submodule, visibility, byte-mismatch, filter and driver-key, reviewer TMPDIR, environment-injection and TMPDIR cells.
+  - **Docs:** architecture, consuming project, external review, README, review and deliver skills, CHANGELOG, spec (stale status and approval wording fixed).
+- **Defect found by the focused run:** `env -u … LC_ALL=POSIX -u …` stops parsing options at the first assignment, so a caller with `LC_ALL` set broke the gate's environment. Every `-u` now comes before the assignments; the locale test caught it.
+- **Timing test (`tests/run.sh` "guard log deadline"), read-only:**
+  - Two different failures are on record: "the stalled git shim never ran" (C1 era) and a 6 s hook (QA, round 3).
+  - In `guard/hook-git.sh` the 5 s Git budget runs from hook start (`hook_git_started_at`), so a hook that is slow before it logs skips the Git call entirely. A 2 s log deadline that expires before the shim's first line has the same effect.
+  - The test measures wall-clock time (`SECONDS`), including sleep or suspension.
+  - Both failures are consistent with a slow or suspended hook; neither is proven, and the current test can't tell the phases apart.
+  - A bounded single-run regression design was proposed to the owner (inert command, no detached watchdog or delayed group signal, reaps its child, distinguishes a slow guard from a shim that never started). Not implemented; the timeout is unchanged.
