@@ -36,18 +36,33 @@ if classify_command_impact "$review_command" "$repository_directory"; then
   echo "EXTERNAL REVIEW: ERROR (refused: the configured command contains a high-impact operation; classified $impact_decision: ${impact_classes:-unclassified})"
   exit 2
 fi
-# Readiness passes the caller's PATH and HOME for the configured command only (see run-gate.sh).
 output_file="$(mktemp "${TMPDIR:-/tmp}/ai-engineering-review.XXXXXX")"
 trap 'rm -f "$output_file"' EXIT
 
+# Readiness runs this script with controlled tools, the C locale and a private HOME, and passes
+# the caller's PATH, HOME, locale, library paths and Perl settings for the configured command
+# only (AI_ENGINEERING_COMMAND_PATH, _HOME and _SAVED_<name>); unset when run directly.
+command_environment=()
+if [ -n "${AI_ENGINEERING_COMMAND_PATH+set}" ]; then
+  for saved_name in LC_ALL LD_LIBRARY_PATH DYLD_LIBRARY_PATH DYLD_FALLBACK_LIBRARY_PATH DYLD_FRAMEWORK_PATH \
+    DYLD_FALLBACK_FRAMEWORK_PATH PERL5LIB PERLLIB PERL5OPT; do
+    saved_variable="AI_ENGINEERING_COMMAND_SAVED_$saved_name"
+    if [ -n "${!saved_variable+set}" ]; then
+      command_environment+=("$saved_name=${!saved_variable}")
+    else
+      command_environment=(-u "$saved_name" "${command_environment[@]+"${command_environment[@]}"}")
+    fi
+  done
+fi
 (
   cd "$repository_directory" &&
   PATH="${AI_ENGINEERING_COMMAND_PATH:-$PATH}" HOME="${AI_ENGINEERING_COMMAND_HOME:-${HOME-}}" \
-    REVIEW_BASE_REF="$1" REVIEW_HEAD_REF="$2" REVIEW_SPEC_PATH="${3:-}" bash -c "$review_command"
+    REVIEW_BASE_REF="$1" REVIEW_HEAD_REF="$2" REVIEW_SPEC_PATH="${3:-}" \
+    /usr/bin/env "${command_environment[@]+"${command_environment[@]}"}" bash -c "$review_command"
 ) >"$output_file" 2>&1
 exit_code=$?
 
-head -n "$output_line_limit" "$output_file"
+head -n "$output_line_limit" "$output_file" | cut -c1-400
 total_lines=$(wc -l <"$output_file" | tr -d ' ')
 if [ "$total_lines" -gt "$output_line_limit" ]; then
   echo "[... $((total_lines - output_line_limit)) further lines omitted ...]"

@@ -138,7 +138,8 @@ Current guarantee: reviewers have no file-editing tools and are instructed not t
   No earlier result is reused. This catches persistent or accidental changes, not a determined hostile gate (see Limits).
 - **Time limits:** the gate is limited to 30 minutes, the external review to 15 and readiness as a whole to 50, clones included. A caller can lower these limits (`READINESS_*_TIMEOUT_SECONDS`) but never raise them.
   - Each child runs in its own process group, together with its watchdog, so every signal targets a group that still has a live member (a reused process-group id is never signalled). The group is stopped on timeout, when the child ends, and when readiness gets INT, TERM or HUP; on a signal readiness exits 4 with no verdict.
-  - Readiness reads at most the last MiB of a child's output; `run-gate.sh` and `external-review.sh` bound what they print.
+  - After the first signal, further INT, TERM and HUP are ignored until the cleanup ends. A SIGKILL of readiness itself can't be handled: the watchdog then stops the child at its limit.
+  - Readiness reads at most the last MiB of a child's output; `run-gate.sh` and `external-review.sh` bound what they print (400 characters a line). The child's whole output is first written to readiness's temporary directory, which has no size limit.
   - A timeout or a missing verdict is a failure.
   - Temporary files and clones are removed on every exit readiness handles.
   - Progress lines go to standard error. The `review` skill runs readiness in the background and waits for the completed result.
@@ -148,11 +149,12 @@ Current guarantee: reviewers have no file-editing tools and are instructed not t
   - **Byte-for-byte verification.** Every tracked file must equal HEAD's blob and mode, and nothing untracked or ignored may exist.
   - Only the increment branch is cloned, through Git's transport (`--no-local`), so objects are copied and every received object is checked (`transfer.fsckObjects`); no hard links, alternates or commit-graph are shared. The clone is checked out on its own branch, `ai-engineering-readiness-gate`; its remote, every other branch and every replace ref are removed. A clone that fails is reported with Git's last message.
   - The clone's local configuration neutralises user-level diff settings, because local configuration overrides user and system configuration. That covers the attributes file (including the XDG default), the big-file threshold, path prefixes, relative and submodule-hiding diffs, each submodule's own `ignore` setting from `.gitmodules` (which only local configuration overrides), and hooks.
-  - Readiness reads Git with `GIT_NO_REPLACE_OBJECTS` and `GIT_NO_LAZY_FETCH` set, with `LC_ALL=C`, and without commit-graph files for its ancestry checks. The gate and the external review run without those two variables and with the caller's locale. They don't get the controlled configuration either, because the guard treats `GIT_CONFIG_*` and `GIT_NO_REPLACE_OBJECTS` as variables that change what Git reads, and would refuse their commands. Both still receive explicit commits.
-- **Environment:** readiness starts in bash privileged mode (`#!/bin/bash -p`) and restarts itself once without `BASH_ENV`, `ENV`, exported shell functions, `LD_PRELOAD`, `LD_AUDIT` or `DYLD_INSERT_LIBRARIES`, so nothing it runs inherits them.
-  - Its own tools come only from fixed system directories (Homebrew, `/usr/local/bin`, `/usr/bin`, `/bin`, the `sbin` directories and Linuxbrew), never from the caller's `PATH`. `jq` and `git` must be found there, or readiness exits 2.
-  - Every inherited `GIT_*` variable is removed. The library-path and Perl variables are removed for its own commands. `jq` and readiness's helper scripts run with an empty `HOME`, so `~/.jq` is never loaded.
-  - `run-gate.sh` and `external-review.sh` use the same controlled tools with an empty `HOME`. Only their configured command gets the caller's `PATH`, `HOME`, library paths and locale back (`AI_ENGINEERING_COMMAND_PATH` and `AI_ENGINEERING_COMMAND_HOME`), so the gate's and the reviewer's own tools still come from the caller's `PATH`.
+  - Readiness reads Git with `GIT_NO_REPLACE_OBJECTS` and `GIT_NO_LAZY_FETCH` set, with `LC_ALL=C`, and without commit-graph files for its ancestry checks. The gate and the external review run without those two variables; their configured command gets the caller's locale. They don't get the controlled configuration either, because the guard treats `GIT_CONFIG_*` and `GIT_NO_REPLACE_OBJECTS` as variables that change what Git reads, and would refuse their commands. Both still receive explicit commits.
+- **Environment:** readiness starts in bash privileged mode (`#!/bin/bash -p`) and restarts itself once without `BASH_ENV`, `ENV`, `SHELLOPTS`, `BASHOPTS`, exported shell functions, `LD_PRELOAD`, `LD_AUDIT`, `DYLD_INSERT_LIBRARIES`, `GCONV_PATH`, the library-path variables (`LD_LIBRARY_PATH`, `DYLD_*_PATH`) and the Perl variables (`PERL5LIB`, `PERLLIB`, `PERL5OPT`), so nothing it runs inherits them.
+  - Its own tools come only from these directories, in this order: `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`, `/bin`, `/usr/sbin`, `/sbin`, `/home/linuxbrew/.linuxbrew/bin`. The caller's `PATH` is never used for them, so a `jq` or `git` installed only elsewhere (nix, mise, `~/.local/bin`) makes readiness exit 2 with a message naming the directories.
+  - Git 2.40 or later is required (older Git ignores `GIT_ATTR_SOURCE`, which readiness uses to switch committed attributes off); older Git exits 2.
+  - Every inherited `GIT_*` variable is removed. Readiness parses with `LC_ALL=C`. `jq` and readiness's helper scripts run with an empty `HOME`, so `~/.jq` is never loaded.
+  - `run-gate.sh` and `external-review.sh` run in the same controlled environment, with a private `HOME` and `TMPDIR`. Only their configured command gets the caller's `PATH`, `HOME`, locale, library paths and Perl settings back (`AI_ENGINEERING_COMMAND_PATH`, `AI_ENGINEERING_COMMAND_HOME` and `AI_ENGINEERING_COMMAND_SAVED_<name>`), so the gate's and the reviewer's own tools still come from the caller's `PATH`.
   - The skill runs the script directly. A caller that runs it through another shell (`bash readiness.sh`), or that controls the system directories, defeats this.
 - **External review:** it receives the recorded base and HEAD.
   - At tier 0, when the base commit's `.agents/gates.json` is a valid object whose `externalReview` is explicitly `null`, no review clone is made and none of the checks below apply: the line says `NOT CONFIGURED`, which tier 0 allows. A missing file or key doesn't skip them, and a malformed or oversized file is `NOT CERTIFIABLE`. At tiers 1 and 2 they always run.
@@ -171,12 +173,13 @@ Current guarantee: reviewers have no file-editing tools and are instructed not t
   - The file at HEAD must be mode `100644`, with an allowed extension (`png`, `jpg`, `jpeg`, `gif`, `webp`, `ico`, `avif`, `woff`, `woff2`, `ttf`, `otf`) and that format's leading bytes.
   - Every changed binary is listed under `CHANGED BINARY FILES` with its status, size and SHA-256. A deleted binary is listed and allowed.
   - Anything else is `NOT CERTIFIABLE`: another changed binary (scripts, executables, archives, WebAssembly), an unsafe entry, or a branch that changes `binaryAssets` itself. The allowlist can change only in a separate owner-reviewed change.
-- **Tracked files at HEAD:** a path that starts with a double quote or holds a carriage return or newline is `NOT CERTIFIABLE`, because verification could misread it. So is a symbolic link whose target is absolute or leaves the repository, because the gate could write through it outside its clone.
+  - More than 200 changed binaries is `NOT CERTIFIABLE` (counted before any is read), as is reaching the overall time limit while they are checked. The leading-byte check identifies the format; it doesn't validate the whole file.
+- **Tracked files at HEAD:** a path that starts with a double quote or holds a carriage return or newline is `NOT CERTIFIABLE`, because verification could misread it. So is a symbolic link whose target is absolute, leaves the repository, or has `..` after a name (that name could itself be a link), because the gate could write through it outside its clone.
 - **Working tree and records:**
   - `git status` (with fsmonitor off) must succeed and show only the active item's state and log.
   - No tracked file may be marked assume-unchanged or skip-worktree.
   - A repository with replace refs, a grafts file (`info/grafts`) or local attributes (`info/attributes`) is `NOT CERTIFIABLE`.
-  - The temporary directory (`TMPDIR`, default `/tmp`) is resolved to its real path and must be outside the repository; otherwise readiness exits 2.
+  - The temporary directory (`TMPDIR`, default `/tmp`) is resolved to its real path and must be outside the repository and its main worktree, compared by device and inode so a differently cased path is caught; otherwise readiness exits 2.
   - The spec and state are read once, from a copy. A failed read is `NOT CERTIFIABLE`, never an empty record.
 - **Trusted classifier: a local consistency check, not cryptographic provenance.** All of these must hold, otherwise the result is `NOT CERTIFIABLE`:
   - readiness runs from the plugin install that Claude Code's registry (`$CLAUDE_CONFIG_DIR`, default `~/.claude`) records for the repository, and every registry entry is strictly validated;
@@ -192,7 +195,8 @@ Current guarantee: reviewers have no file-editing tools and are instructed not t
   - 0: READY: YES (not reachable while base provenance is unverified).
   - 1: READY: NO, certifiable.
   - 3: NOT CERTIFIABLE, so READY: NO.
-  - 2: a usage or environment error. Examples: bad arguments, not a Git repository, no `jq` or `git` in the trusted directories, a temporary directory that is unusable or inside the repository, or an environment that can't be cleared. No block is printed.
+  - 2: a usage or environment error. Examples: bad arguments, not a Git repository, no `jq` or `git` in the trusted directories, Git older than 2.40, a temporary directory that is unusable or inside the repository, or an environment that can't be cleared. No block is printed.
+- **Output:** every line of the block has its control characters, newlines included, shown as `?`, and the gate's output is quoted with a `  | ` prefix. A path, record id, guard-log value or gate output therefore can't start a line of its own. The verdict is the final `READY:` line together with the exit code.
   - 4: stopped by INT, TERM or HUP. No block is printed, and the run is never READY.
 - **Depth:**
   - QA evidence is needed at every tier.

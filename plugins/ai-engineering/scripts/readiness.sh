@@ -7,20 +7,24 @@
 # Exit codes: 0 READY: YES (not reachable until base provenance can be verified, below);
 #             1 READY: NO (certifiable); 3 NOT CERTIFIABLE (READY: NO);
 #             2 usage or environment error (bad arguments, not a Git repository, jq or git
-#             not in a trusted directory, no usable temporary directory): no READINESS block;
+#             not in a trusted directory, Git older than 2.40, no usable temporary directory, an
+#             environment that cannot be cleared): no READINESS block;
 #             4 stopped by a signal (INT, TERM, HUP): no READINESS block, never READY.
 #
 # Environment: readiness starts in bash privileged mode (-p: no BASH_ENV or ENV file, no
-# imported shell functions) and, when the environment carries BASH_ENV, ENV, exported functions
-# or LD_PRELOAD, LD_AUDIT or DYLD_INSERT_LIBRARIES, starts itself again once without them, so
-# nothing it runs inherits them either. Its own tools come only from fixed system directories
-# (trusted_tool_path), never from the caller's PATH; every inherited GIT_* variable and the Perl
-# and library-path variables are removed for its own commands; jq and readiness's own helper
-# scripts run with an empty HOME (no ~/.jq). The gate and the external review get the caller's
-# PATH, HOME, library paths and locale back for their configured command only; the plugin
-# scripts that run it (run-gate.sh, external-review.sh) use readiness's controlled tools. This
-# is invoked directly (the skill runs the script, not "bash readiness.sh"); a caller that starts
-# it through another shell, or controls the system directories, defeats it.
+# imported shell functions, SHELLOPTS or BASHOPTS) and, when the environment carries any of
+# those, exported functions, a preload or audit library (LD_PRELOAD, LD_AUDIT,
+# DYLD_INSERT_LIBRARIES), GCONV_PATH, a library path or a Perl setting, starts itself again once
+# without them, so nothing it runs inherits them. Its own tools come only from fixed directories
+# (trusted_tool_path: /opt/homebrew/bin, /usr/local/bin, /usr/bin, /bin, /usr/sbin, /sbin,
+# /home/linuxbrew/.linuxbrew/bin), never from the caller's PATH; jq and git elsewhere (nix, mise,
+# ~/.local/bin) are exit 2. Every inherited GIT_* variable is removed; it parses with LC_ALL=C;
+# jq and its helper scripts run with an empty HOME (no ~/.jq). The plugin scripts that run the
+# gate and the external review (run-gate.sh, external-review.sh) get the same controlled
+# environment; only their configured command gets the caller's PATH, HOME, locale, library paths
+# and Perl settings back. This is invoked directly (the skill runs the script, not
+# "bash readiness.sh"); a caller that starts it through another shell, or controls the system
+# directories, defeats it.
 # Progress lines go to standard error; the block goes to standard output. Readiness can take
 # up to its overall limit (50 minutes), so callers run it in the background and wait for it.
 #
@@ -56,12 +60,13 @@
 # Replace refs, a grafts file and a non-empty .git/info/attributes are NOT CERTIFIABLE.
 # Readiness parses with LC_ALL=C. Its ancestry checks ignore commit-graph files. The temporary
 # directory (TMPDIR, default /tmp) is resolved to its real path and must lie outside the
-# repository (exit 2 otherwise).
+# repository and its main worktree, compared by device and inode, not by name (exit 2 otherwise).
 #
 # Tracked files at HEAD: a path that starts with a double quote or holds a carriage return or
-# newline, or a symbolic link whose target is absolute or leaves the repository, is NOT
-# CERTIFIABLE (the byte-for-byte verification below could not name it exactly, or the gate could
-# write through it outside its clone).
+# newline, or a symbolic link whose target is absolute, leaves the repository or has ".." after a
+# name (so another link could take it elsewhere), is NOT CERTIFIABLE (the byte-for-byte
+# verification below could not name it exactly, or the gate could write through it outside its
+# clone).
 #
 # Changed binary files (Git's own rule: a NUL byte in the first 8000 bytes, or larger than the
 # clones' 512 MiB big-file threshold, on either side): a diff shows only "Binary files differ",
@@ -70,8 +75,10 @@
 # ending in "/", no "..", no hidden segment). The file at HEAD must be mode 100644 with an
 # allowed extension (png jpg jpeg gif webp ico avif woff woff2 ttf otf) and that format's
 # leading bytes. Each changed binary is reported with its status, size and SHA-256. Any other
-# changed binary, an unsafe entry, or a branch that changes binaryAssets is NOT CERTIFIABLE.
-# Deleted binaries are reported and allowed.
+# changed binary, an unsafe entry, or a branch that changes binaryAssets is NOT CERTIFIABLE, as
+# are more than 200 changed binaries (counted before any is read) and reaching the overall time
+# limit while they are checked. Deleted binaries are reported and allowed. The leading-byte check
+# identifies the format; it does not validate the whole file.
 #
 # Trust (local consistency, not cryptographic provenance; signed releases are WORK-004):
 #   1. Claude Code's plugin registry ($CLAUDE_CONFIG_DIR, default ~/.claude, then
@@ -125,7 +132,7 @@
 # submodule-hiding diffs, and each submodule's own ignore setting). Both children run without the
 # GIT_NO_REPLACE_OBJECTS and GIT_NO_LAZY_FETCH protections readiness uses for its own reads (the
 # guard would refuse every gate command with them set), and their configured command gets the
-# caller's PATH, HOME and locale.
+# caller's PATH, HOME, locale, library paths and Perl settings.
 #
 # External review: external-review.sh with configuration from the base commit and the explicit
 # base and HEAD commits, limited to 15 minutes. When .agents/gates.json at the base commit is a
@@ -156,10 +163,19 @@
 # child runs in its own process group together with its watchdog, so every signal the watchdog
 # or readiness sends targets a group that still has a live member (its process-group id cannot
 # have been reused). The group is stopped on timeout, when the child ends, and on INT, TERM or
-# HUP; temporary files and clones are removed on every exit readiness handles. Readiness reads
-# at most the last MiB of a child's output (run-gate.sh and external-review.sh bound what they
-# print themselves). A process the gate moves into another process group, or that kills the
-# watchdog, escapes this; it is not protection against a hostile gate.
+# HUP (further signals are then ignored until the cleanup ends); temporary files and clones are
+# removed on every exit readiness handles. Readiness reads at most the last MiB of a child's
+# output (run-gate.sh and external-review.sh bound what they print themselves, 400 characters a
+# line); the child's whole output is written to readiness's temporary directory first, which is
+# not size-limited (the gate could fill the disk in other ways too). A process the gate moves
+# into another process group, or that kills the watchdog, escapes this, as does SIGKILL of
+# readiness itself (the watchdog then stops the child at its limit); it is not protection
+# against a hostile gate.
+#
+# Output: every line of the READINESS block has its control characters (newlines included)
+# shown as "?", and the gate's output is quoted with a "  | " prefix, so nothing readiness
+# reports can start a line of its own. The verdict is the final "READY:" line together with the
+# exit status, never any other line.
 #
 # Tier-dependent depth (WORK-003 Scope item 11): QA evidence always; security review and a
 # residual-risk list at tier 2. Review and residual-risk evidence count only when they pass and
@@ -175,51 +191,56 @@ set -u
 main() {
 
 # ---------------------------------------------------------------- environment
-# Privileged mode (the -p on the first line) already ignored BASH_ENV, ENV and exported
-# functions for this shell; they would still reach every program it starts, so readiness starts
-# itself once more without them (and without the preload variables). A second pass that still
-# finds them stops: the environment cannot be cleared.
+# Privileged mode (the -p on the first line) already ignored BASH_ENV, ENV, exported functions,
+# SHELLOPTS and BASHOPTS for this shell; they would still reach every program it starts (and
+# bash re-exports an inherited SHELLOPTS), so readiness starts itself once more without them and
+# without the preload, library-path, Perl and gconv variables. The library-path and Perl values
+# go along under AI_ENGINEERING_COMMAND_SAVED_<name>, which only run-gate.sh and
+# external-review.sh read, to restore them for the configured command alone. A second pass that
+# still finds any of them stops: the environment cannot be cleared.
+saved_names="LD_LIBRARY_PATH DYLD_LIBRARY_PATH DYLD_FALLBACK_LIBRARY_PATH DYLD_FRAMEWORK_PATH DYLD_FALLBACK_FRAMEWORK_PATH PERL5LIB PERLLIB PERL5OPT"
+removed_names="BASH_ENV ENV SHELLOPTS BASHOPTS LD_PRELOAD LD_AUDIT DYLD_INSERT_LIBRARIES GCONV_PATH $saved_names"
 injected_variables=()
+saved_assignments=()
 while IFS= read -r environment_line; do
-  case "$environment_line" in
-    BASH_FUNC_*=*) injected_variables+=(-u "${environment_line%%=*}") ;;
+  environment_name="${environment_line%%=*}"
+  case "$environment_name" in
+    BASH_FUNC_*) injected_variables+=(-u "$environment_name") ;;
+    *)
+      case " $removed_names " in
+        *" $environment_name "*)
+          injected_variables+=(-u "$environment_name")
+          case " $saved_names " in
+            *" $environment_name "*) saved_assignments+=("AI_ENGINEERING_COMMAND_SAVED_$environment_line") ;;
+          esac
+          ;;
+      esac
+      ;;
   esac
 done < <(/usr/bin/env)
-for injected_name in BASH_ENV ENV LD_PRELOAD LD_AUDIT DYLD_INSERT_LIBRARIES; do
-  [ -z "$(eval "printf '%s' \"\${$injected_name+set}\"")" ] || injected_variables+=(-u "$injected_name")
-done
 if [ "${#injected_variables[@]}" -gt 0 ]; then
   if [ -n "${AI_ENGINEERING_READINESS_RESTARTED+set}" ]; then
-    echo "readiness.sh: the environment still carries exported shell functions or BASH_ENV, ENV or preload variables" >&2
+    echo "readiness.sh: the environment still carries exported shell functions or BASH_ENV, ENV, SHELLOPTS, BASHOPTS, preload, library-path, Perl or gconv variables" >&2
     exit 2
   fi
-  exec /usr/bin/env "${injected_variables[@]}" AI_ENGINEERING_READINESS_RESTARTED=1 /bin/bash -p "$0" "$@"
+  exec /usr/bin/env "${injected_variables[@]}" AI_ENGINEERING_READINESS_RESTARTED=1 \
+    "${saved_assignments[@]+"${saved_assignments[@]}"}" /bin/bash -p "$0" "$@"
 fi
 unset AI_ENGINEERING_READINESS_RESTARTED CDPATH GLOBIGNORE
 IFS=$' \t\n'
 
 # Readiness's own tools come only from fixed system directories (Homebrew first, as on most
-# macOS PATHs). The caller's PATH, library paths, Perl settings and locale are kept for the gate's
-# and the external reviewer's configured commands only (child_environment, child_command_path).
+# macOS PATHs). The caller's PATH, HOME and locale are kept for the gate's and the external
+# reviewer's configured commands only (plugin_child), with the saved library-path and Perl values.
 trusted_tool_path="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/home/linuxbrew/.linuxbrew/bin"
-# env arguments that give a child back the caller's values (PATH separately): every -u first,
-# because env takes the first NAME=value as the end of its options.
-child_unset=()
-child_assign=()
-for restored_name in LC_ALL LD_LIBRARY_PATH DYLD_LIBRARY_PATH DYLD_FALLBACK_LIBRARY_PATH DYLD_FRAMEWORK_PATH PERL5LIB PERLLIB PERL5OPT; do
-  if [ -n "$(eval "printf '%s' \"\${$restored_name+set}\"")" ]; then
-    child_assign+=("$restored_name=$(eval "printf '%s' \"\${$restored_name}\"")")
-  else
-    child_unset+=(-u "$restored_name")
-  fi
-  unset "$restored_name"
-done
+command_locale_assignment=(-u AI_ENGINEERING_COMMAND_SAVED_LC_ALL)
+[ -z "${LC_ALL+set}" ] || command_locale_assignment=("AI_ENGINEERING_COMMAND_SAVED_LC_ALL=$LC_ALL")
 child_command_path="${PATH-}"
 child_command_home="${HOME-}"
 export PATH="$trusted_tool_path"
 hash -r
-# Readiness parses with a fixed locale (pattern ranges such as [a-z] follow collation in some
-# locales). The gate and the external review get the caller's locale back (child_environment).
+# Readiness and its plugin scripts parse with a fixed locale (pattern ranges such as [a-z] follow
+# collation in some locales). The configured commands get the caller's locale back.
 export LC_ALL=C
 
 self_root="$(cd "$(dirname "$0")/.." && pwd -P)"
@@ -290,6 +311,7 @@ remove_tree() { # a directory inside one of readiness's temporary roots
     case "$1" in "$root" | "$root"/*) inside=yes ;; esac
   done
   [ "$inside" = yes ] || return 1
+  if [ -L "$1" ]; then rm -f "$1"; return; fi
   [ -e "$1" ] || return 0
   chmod -R u+rwx "$1" 2>/dev/null
   rm -rf "$1"
@@ -321,13 +343,16 @@ stop_active_child() {
 }
 # shellcheck disable=SC2329 # invoked by the signal traps below
 terminated() { # signal name: stop the child, clean up (EXIT trap) and report; never READY
-  trap - INT TERM HUP
+  # Further signals are ignored so the cleanup completes (only SIGKILL stops it; the watchdog
+  # then stops the child at its limit).
+  trap '' INT TERM HUP
   progress "stopped by SIG$1; no READINESS verdict"
   exit 4
 }
 
 # run_bounded limit output-file command...: runs the command in its own process group with its
-# output in output-file, stops the whole group after limit seconds (TERM, then KILL 5 s later),
+# output in output-file, stops the whole group after limit seconds (TERM, then KILL as soon as
+# the command itself has ended, or 5 s later),
 # and sets bounded_status (the command's own exit status) and bounded_timed_out (yes or no).
 # The watchdog runs inside the same group, ignoring TERM, so the group exists for as long as any
 # signal can be sent to it: by the watchdog itself, by readiness when the command ends (every
@@ -338,6 +363,7 @@ run_bounded() {
   local limit="$1" output="$2" pid markers
   shift 2
   markers="$temporary_directory/watchdog.$RANDOM$RANDOM"
+  active_child_markers="$markers"
   set -m
   (
     set +m
@@ -354,10 +380,9 @@ run_bounded() {
     ) &
     "$@"
   ) >"$output" 2>&1 </dev/null &
-  pid=$!
+  active_child_group=$!
+  pid="$active_child_group"
   set +m
-  active_child_group="$pid"
-  active_child_markers="$markers"
   wait "$pid"
   bounded_status=$?
   group_signal KILL "$pid" "$markers"
@@ -425,9 +450,17 @@ real_directory() { [ -d "$1" ] && (cd "$1" && pwd -P); }
 for required_tool in jq git; do
   case "$(command -v "$required_tool" 2>/dev/null)" in
     /*) ;;
-    *) echo "readiness.sh: $required_tool is required in one of $trusted_tool_path" >&2; exit 2 ;;
+    *) echo "readiness.sh: $required_tool is required in one of $trusted_tool_path (the caller's PATH is not used)" >&2; exit 2 ;;
   esac
 done
+# Git 2.40 or later: older Git ignores GIT_ATTR_SOURCE, so the controlled reads could not switch
+# committed attributes off and every run would fail with a misleading reason.
+git_version="$(git --version 2>/dev/null)"
+if ! [[ $git_version =~ ^git\ version\ ([0-9]+)\.([0-9]+) ]] \
+  || [ "${BASH_REMATCH[1]}" -lt 2 ] || { [ "${BASH_REMATCH[1]}" -eq 2 ] && [ "${BASH_REMATCH[2]}" -lt 40 ]; }; then
+  echo "readiness.sh: Git 2.40 or later is required (found: ${git_version:-no version})" >&2
+  exit 2
+fi
 # Every inherited GIT_* variable is removed for readiness and every child it runs: they can
 # redirect Git to another repository, index, object store, namespace, graft or shallow file or
 # configuration, or reshape diffs (external diff, attribute sources, templates).
@@ -443,19 +476,20 @@ done < <(/usr/bin/env)
 # explicit commit ids, the clones hold no replace refs, and a repository with replace refs is
 # NOT CERTIFIABLE (below).
 export GIT_NO_REPLACE_OBJECTS=1 GIT_NO_LAZY_FETCH=1
-# command...: runs a trusted tool without readiness's Git protections, with the caller's locale,
-# library and Perl settings (the tool itself still comes from the trusted directories).
+# command...: runs a trusted tool without readiness's two Git protections, as the gate and the
+# external review run (readiness's own environment otherwise).
 child_environment() {
-  env -u GIT_NO_REPLACE_OBJECTS -u GIT_NO_LAZY_FETCH "${child_unset[@]+"${child_unset[@]}"}" "${child_assign[@]+"${child_assign[@]}"}" "$@"
+  env -u GIT_NO_REPLACE_OBJECTS -u GIT_NO_LAZY_FETCH "$@"
 }
 # root command...: runs a plugin script (run-gate.sh, external-review.sh) for a clone root. The
-# script uses the trusted tools, an empty HOME and the root's private TMPDIR; its configured
-# command gets the caller's PATH and HOME (AI_ENGINEERING_COMMAND_PATH and _HOME).
+# script uses the trusted tools, the C locale, the root's private HOME and TMPDIR; its configured
+# command gets the caller's PATH, HOME, locale, library paths and Perl settings back
+# (AI_ENGINEERING_COMMAND_PATH, _HOME and _SAVED_<name>).
 # shellcheck disable=SC2329 # passed to run_bounded as the command to run
 plugin_child() {
   local root="$1"
   shift
-  child_environment TMPDIR="$root/tmp" HOME="$root/home" \
+  child_environment "${command_locale_assignment[@]}" TMPDIR="$root/tmp" HOME="$root/home" \
     AI_ENGINEERING_COMMAND_PATH="$child_command_path" AI_ENGINEERING_COMMAND_HOME="$child_command_home" "$@"
 }
 
@@ -477,14 +511,18 @@ main_worktree_real=""
 common_directory_path="$(git rev-parse --git-common-dir 2>/dev/null)" || common_directory_path=""
 case "$common_directory_path" in "" | /*) ;; *) common_directory_path="$repository_root/$common_directory_path" ;; esac
 [ -z "$common_directory_path" ] || main_worktree_real="$(cd "$common_directory_path/.." 2>/dev/null && pwd -P)" || main_worktree_real=""
-for repository_directory in "$repository_real" "$main_worktree_real"; do
-  [ -n "$repository_directory" ] || continue
-  case "$temporary_base/" in
-    "$repository_directory"/*)
+# Each directory from TMPDIR up to / is compared by device and inode (-ef), not by name: on a
+# case-insensitive file system a differently cased path names the same directory.
+containing_directory="$temporary_base"
+while :; do
+  for repository_directory in "$repository_real" "$main_worktree_real"; do
+    if [ -n "$repository_directory" ] && [ "$containing_directory" -ef "$repository_directory" ]; then
       echo "readiness.sh: TMPDIR ($temporary_base) is inside the repository; use a directory outside it" >&2
       exit 2
-      ;;
-  esac
+    fi
+  done
+  [ "$containing_directory" != / ] || break
+  containing_directory="$(dirname "$containing_directory")"
 done
 temporary_directory="$(mktemp -d "$temporary_base/readiness.XXXXXX")" || {
   echo "readiness.sh: cannot create a temporary directory" >&2
@@ -963,7 +1001,7 @@ evaluate_guard_log() {
       end' 2>/dev/null)" || result='{"status": "unreadable"}'
   case "$(jq -r '.status' <<<"$result")" in
     ok)
-      guard_log_summary="anchor at $(jq -r '.anchorTime' <<<"$result"); $(jq -r '.raising | length' <<<"$result") raising event(s), $(jq -r '.excluded' <<<"$result") excluded start/resume/merge confirmation(s)"
+      guard_log_summary="anchor at $(jq -r '.anchorTime' <<<"$result"); $(jq -r '.raising | length' <<<"$result") raising event(s), $(jq -r '.excluded' <<<"$result") excluded start/resume/merge ask(s)"
       if [ "$(jq -r '.raising | length' <<<"$result")" -gt 0 ]; then
         action_reasons+=("$(jq -r '"guard log: " + (.raising | map("\(.decision) [\(.classes | join(","))] session \(.sessionId // "?")") | unique | join("; "))' <<<"$result")")
       fi
@@ -1084,8 +1122,11 @@ fi
 # ---------------------------------------------------------------- tracked files at HEAD
 # Names the byte-for-byte verification could not name exactly, and links the gate could follow
 # out of its clone, are refused before any clone is made.
-link_leaves_repository() { # link-path target: succeeds when the target is absolute or climbs out
-  local link_path="$1" target="$2" depth=0 segment
+# A ".." after a name is refused too: that name may itself be a link (to "..", say), so the
+# target's real location would differ from its text. With ".." only at the start, every link
+# resolves inside the repository when its text does (the link's own directory is real).
+link_leaves_repository() { # link-path target: succeeds when the target is absolute, climbs out or has a later ".."
+  local link_path="$1" target="$2" depth=0 segment named=no
   case "$target" in "" | /*) return 0 ;; esac
   local IFS=/
   for segment in ${link_path%/*}; do
@@ -1096,10 +1137,14 @@ link_leaves_repository() { # link-path target: succeeds when the target is absol
     case "$segment" in
       "" | .) ;;
       ..)
+        [ "$named" = no ] || return 0
         depth=$((depth - 1))
         [ "$depth" -ge 0 ] || return 0
         ;;
-      *) depth=$((depth + 1)) ;;
+      *)
+        named=yes
+        depth=$((depth + 1))
+        ;;
     esac
   done
   return 1
@@ -1121,7 +1166,7 @@ check_tracked_files() {
     if [ "$mode" = 120000 ]; then
       target="$(controlled_git cat-file blob "$object" 2>/dev/null | head -c 4096)"
       if link_leaves_repository "$tracked_path" "$target"; then
-        not_certifiable "tracked symbolic link $tracked_path points outside the repository ($target)"
+        not_certifiable "tracked symbolic link $tracked_path points outside the repository or has \"..\" after a name ($target)"
         return
       fi
     fi
@@ -1133,6 +1178,7 @@ check_tracked_files() {
 # A binary change shows only "Binary files differ" to every reviewer, so it is allowed only for
 # an image or font asset under a directory the base commit allowlists (see the header).
 binary_lines=()
+binary_file_limit=200 # changed binary files checked and reported at most (each is hashed)
 asset_signature_matches() { # extension leading-bytes-hex
   case "$1" in
     png) [ "${2:0:16}" = 89504e470d0a1a0a ] ;;
@@ -1149,11 +1195,11 @@ asset_signature_matches() { # extension leading-bytes-hex
   esac
 }
 check_changed_binaries() {
-  local entry added rest changed_path status mode object size digest extension leading allowed prefix
-  local base_allowlist head_allowlist code listed_path allowlist_entries=() status_file="$temporary_directory/changed-status"
+  local entry added changed_path raw_entry raw_path status mode object size digest extension leading allowed prefix
+  local base_allowlist head_allowlist allowlist_entries=() raw_file="$temporary_directory/changed-raw" binary_count=0
   if ! controlled_git diff --numstat -z --no-renames --no-ext-diff --no-textconv --ignore-submodules=none "$base_sha" "$head_sha" -- \
     >"$temporary_directory/changed-numstat" 2>/dev/null \
-    || ! controlled_git diff --name-status -z --no-renames --ignore-submodules=none "$base_sha" "$head_sha" -- >"$status_file" 2>/dev/null; then
+    || ! controlled_git diff --raw -z --no-abbrev --no-renames --ignore-submodules=none "$base_sha" "$head_sha" -- >"$raw_file" 2>/dev/null; then
     not_certifiable "the changed files cannot be listed to find binary changes"
     return
   fi
@@ -1182,21 +1228,34 @@ check_changed_binaries() {
     not_certifiable "this branch changes binaryAssets in .agents/gates.json; the allowlist can change only in a separate owner-reviewed change, never on the branch it would admit"
     return
   fi
+  # Counted before any file is read (a name holding a newline can only raise the count).
+  binary_count="$(tr '\0' '\n' <"$temporary_directory/changed-numstat" | grep -c $'^-\t-\t')"
+  if [ "$binary_count" -gt "$binary_file_limit" ]; then
+    not_certifiable "more than $binary_file_limit changed binary files; they cannot all be checked and reported"
+    return
+  fi
+  # --numstat and --raw list the same paths in the same order, so they are read side by side
+  # (one pass; any disagreement is refused). --raw gives each path's status, mode and object.
+  exec 7<"$raw_file"
   while IFS= read -r -d '' entry; do
     added="${entry%%$'\t'*}"
-    rest="${entry#*$'\t'}"
-    changed_path="${rest#*$'\t'}"
+    changed_path="${entry#*$'\t'}"
+    changed_path="${changed_path#*$'\t'}"
+    if ! IFS= read -r -d '' raw_entry <&7 || ! IFS= read -r -d '' raw_path <&7 || [ "$raw_path" != "$changed_path" ]; then
+      not_certifiable "the changed files cannot be listed consistently to find binary changes"
+      break
+    fi
     [ "$added" = - ] || continue
-    status=""
-    while IFS= read -r -d '' code && IFS= read -r -d '' listed_path; do
-      [ "$listed_path" = "$changed_path" ] && { status="$code"; break; }
-    done <"$status_file"
+    if [ "$(remaining_seconds)" -le 60 ]; then
+      not_certifiable "the readiness time limit of $total_limit_seconds s was reached while checking changed binary files"
+      break
+    fi
+    # :old-mode new-mode old-object new-object status
+    read -r _ mode _ object status <<<"$raw_entry"
     if [ "$status" = D ]; then
       binary_lines+=("D $changed_path (deleted; allowed)")
       continue
     fi
-    mode="$(controlled_git --literal-pathspecs ls-tree --full-tree "$head_sha" -- "$changed_path" 2>/dev/null | awk '{print $1}')"
-    object="$(controlled_git rev-parse --verify --quiet "$head_sha:$changed_path" 2>/dev/null)" || object=""
     size="$(controlled_git cat-file -s "$object" 2>/dev/null)" || size=""
     digest="$(controlled_git cat-file blob "$object" 2>/dev/null | { shasum -a 256 2>/dev/null || sha256sum; } | cut -d' ' -f1)"
     leading="$(controlled_git cat-file blob "$object" 2>/dev/null | head -c 16 | od -An -tx1 | tr -d ' \n')"
@@ -1217,6 +1276,7 @@ check_changed_binaries() {
       not_certifiable "changed binary file $changed_path cannot be measured"
     fi
   done <"$temporary_directory/changed-numstat"
+  exec 7<&-
 }
 [ -z "$base_sha" ] || [ -z "$head_sha" ] || check_changed_binaries
 
@@ -1565,6 +1625,11 @@ fi
 [ "$(evidence_summary)" = "$evidence_before" ] || not_certifiable "the review evidence covering HEAD changed while readiness ran"
 
 # ---------------------------------------------------------------- report
+# Every line of the block goes through block_line, which turns control characters (newlines and
+# carriage returns included) into "?": a path, record id, guard-log value or reason cannot start
+# a line of its own. The gate's output is quoted with a "  | " prefix. Only the final "READY:"
+# line, with the exit status, is the verdict.
+block_line() { printf '%s\n' "$(printf '%s' "$1" | LC_ALL=C tr '\001-\037\177' '?')"; }
 certifiable=yes
 [ "${#not_certifiable_reasons[@]}" -eq 0 ] || certifiable=no
 if [ "$certifiable" = yes ]; then
@@ -1575,47 +1640,52 @@ else
   not_ready "not certifiable"
 fi
 
-echo "READINESS - $work_id increment $increment_id"
-echo "BASE: ${base_sha:-unknown} (recorded increment base; origin/${default_branch:-?} at ${default_ref_commit:-unknown})  HEAD: ${head_sha:-unknown}"
-echo "BASE PROVENANCE: $base_provenance"
-if [ "$trusted" = yes ]; then echo "TRUST: TRUSTED - $trust_summary"; else echo "TRUST: NOT CERTIFIABLE"; fi
-echo "STATE TIER: $state_tier"
-echo "CLASSIFIER FLOOR: $classifier_summary"
-echo "ACTION FLOOR: $action_summary"
-echo "GUARD LOG: $guard_log_summary"
-echo "EFFECTIVE TIER: $tier_label"
-echo "$gate_line"
+block_line "READINESS - $work_id increment $increment_id"
+block_line "BASE: ${base_sha:-unknown} (recorded increment base; origin/${default_branch:-?} at ${default_ref_commit:-unknown})  HEAD: ${head_sha:-unknown}"
+block_line "BASE PROVENANCE: $base_provenance"
+if [ "$trusted" = yes ]; then block_line "TRUST: TRUSTED - $trust_summary"; else block_line "TRUST: NOT CERTIFIABLE"; fi
+block_line "STATE TIER: $state_tier"
+block_line "CLASSIFIER FLOOR: $classifier_summary"
+block_line "ACTION FLOOR: $action_summary"
+block_line "GUARD LOG: $guard_log_summary"
+block_line "EFFECTIVE TIER: $tier_label"
+block_line "$gate_line"
 case "$gate_line" in
   "GATE full: PASSED"*) ;;
-  *) [ -n "$gate_output" ] && { echo "GATE OUTPUT (last 20 lines):"; printf '%s\n' "$gate_output" | tail -n 20 | cut -c1-400; } ;;
+  *)
+    if [ -n "$gate_output" ]; then
+      block_line "GATE OUTPUT (last 20 lines, each prefixed with \"  | \"):"
+      printf '%s\n' "$gate_output" | tail -n 20 | cut -c1-400 | LC_ALL=C tr '\001-\011\013-\037\177' '?' | sed 's/^/  | /'
+    fi
+    ;;
 esac
 if [ "${#binary_lines[@]}" -eq 0 ]; then
-  echo "CHANGED BINARY FILES: none"
+  block_line "CHANGED BINARY FILES: none"
 else
-  echo "CHANGED BINARY FILES: ${#binary_lines[@]}"
-  printf '  %s\n' "${binary_lines[@]:0:50}"
-  [ "${#binary_lines[@]}" -le 50 ] || echo "  ... $((${#binary_lines[@]} - 50)) more"
+  block_line "CHANGED BINARY FILES: ${#binary_lines[@]}"
+  for binary_line in "${binary_lines[@]:0:50}"; do block_line "  $binary_line"; done
+  [ "${#binary_lines[@]}" -le 50 ] || block_line "  ... $((${#binary_lines[@]} - 50)) more"
 fi
-echo "QA (internal): $qa_status"
-echo "SECURITY REVIEW (internal): $security_status"
-echo "$external_line ($external_requirement)"
-echo "RESIDUAL RISKS: $residual_status"
-echo "HIGH-OR-ABOVE FIXES: $(record_list '.highFindings[] | select(.disposition.state == "fixed") | .id')"
-echo "OWNER-COMMAND RISK DECISIONS: $(record_list '.ownerDecisions[] | .id')"
-echo "CONVERSATION DECISIONS: $(record_list '.conversationDecisions[] | .id')"
-echo "OPEN DECISIONS AND PROPOSALS: $(record_list '.openDecisions[] | "\(.id)\(if .blocking then "" else " (proposal)" end)"')"
-echo "OPEN FINDINGS: $open_findings"
-echo "PENDING OWNER ACTIONS: $(record_list '.pendingOwnerActions[] | .id')"
+block_line "QA (internal): $qa_status"
+block_line "SECURITY REVIEW (internal): $security_status"
+block_line "$external_line ($external_requirement)"
+block_line "RESIDUAL RISKS: $residual_status"
+block_line "HIGH-OR-ABOVE FIXES: $(record_list '.highFindings[] | select(.disposition.state == "fixed") | .id')"
+block_line "OWNER-COMMAND RISK DECISIONS: $(record_list '.ownerDecisions[] | .id')"
+block_line "CONVERSATION DECISIONS: $(record_list '.conversationDecisions[] | .id')"
+block_line "OPEN DECISIONS AND PROPOSALS: $(record_list '.openDecisions[] | "\(.id)\(if .blocking then "" else " (proposal)" end)"')"
+block_line "OPEN FINDINGS: $open_findings"
+block_line "PENDING OWNER ACTIONS: $(record_list '.pendingOwnerActions[] | .id')"
 if [ "$certifiable" = yes ]; then
-  echo "CERTIFIABLE: YES"
+  block_line "CERTIFIABLE: YES"
 else
-  echo "CERTIFIABLE: NOT CERTIFIABLE - $(printf '%s; ' "${not_certifiable_reasons[@]}" | sed 's/; $//')"
+  block_line "CERTIFIABLE: NOT CERTIFIABLE - $(printf '%s; ' "${not_certifiable_reasons[@]}" | sed 's/; $//')"
 fi
 if [ "${#not_ready_reasons[@]}" -eq 0 ]; then
-  echo "READY: YES"
+  block_line "READY: YES"
   exit 0
 fi
-echo "READY: NO - $(printf '%s; ' "${not_ready_reasons[@]}" | sed 's/; $//')"
+block_line "READY: NO - $(printf '%s; ' "${not_ready_reasons[@]}" | sed 's/; $//')"
 [ "$certifiable" = yes ] && exit 1
 exit 3
 }
