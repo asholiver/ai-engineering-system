@@ -24,8 +24,11 @@
 # gate and the external review (run-gate.sh, external-review.sh) get the same controlled
 # environment; only their configured command gets the caller's PATH, HOME, locale, library paths
 # and Perl settings back. This is invoked directly (the skill runs the script, not
-# "bash readiness.sh"); a caller that starts it through another shell, or controls the system
-# directories, defeats it. The removal is a list of named variables, not an empty environment:
+# "bash readiness.sh"); a caller that starts it through another shell defeats it. The fixed
+# directories stop a caller's PATH from substituting tools; they are not protected locations.
+# /opt/homebrew/bin, /usr/local/bin and /home/linuxbrew/.linuxbrew/bin are usually writable by
+# the user, so any process running as that user can replace git, jq or another tool there (and
+# so change any result); only /usr/bin, /bin, /usr/sbin and /sbin are system-owned. The removal is a list of named variables, not an empty environment:
 # other variables a tool reads (PERL_UNICODE for shasum, CLICOLOR_FORCE for ls, TZ, MALLOC_*)
 # still reach readiness's tools and the children. None of them is known to change a result
 # readiness relies on; a complete allow-list environment is a separate, deferred design.
@@ -68,7 +71,10 @@
 # directory (TMPDIR, default /tmp) is resolved to its real path and must lie outside the
 # repository, every worktree of it (main and linked) and the working trees of the superprojects it
 # is a submodule of, compared by device and inode, not by name (exit 2 otherwise). Other
-# worktrees of a superproject are not checked.
+# worktrees of a superproject are not checked. Accepted residual: a TMPDIR inside an unrelated
+# repository's working tree (a nested checkout that is not a submodule) is allowed. Readiness
+# creates and removes only its own roots there and runs no Git command from them; a Git command
+# the gate or the reviewer runs from its TMPDIR or HOME there would find that repository.
 #
 # Tracked files at HEAD: a path that starts with a double quote or holds a carriage return or
 # newline, or a symbolic link whose target is absolute, leaves the repository, has ".." after a
@@ -91,7 +97,11 @@
 # limit while they are checked. Deleted binaries are reported and allowed. The leading-byte check
 # identifies the format; it does not validate the whole file.
 #
-# Trust (local consistency, not cryptographic provenance; signed releases are WORK-004):
+# Trust (local consistency, not cryptographic provenance; signed releases are WORK-004). These
+# checks compare local records with each other (registry, marketplace clone, tag, installed
+# files); none is authenticated, so they show the install is internally consistent, not that it
+# came from the publisher. Base provenance (below) is likewise UNVERIFIED until authenticated
+# evidence exists:
 #   1. Claude Code's plugin registry ($CLAUDE_CONFIG_DIR, default ~/.claude, then
 #      plugins/installed_plugins.json) has exactly one entry for ai-engineering@ai-engineering-system
 #      at the most specific scope (local, then project, for this repository's main worktree,
@@ -258,8 +268,8 @@ unset AI_ENGINEERING_READINESS_RESTARTED CDPATH GLOBIGNORE
 unset AI_ENGINEERING_CLASSIFY_MAX_PATHS AI_ENGINEERING_CLASSIFY_MAX_BYTES
 IFS=$' \t\n'
 
-# Readiness's own tools come only from fixed system directories (Homebrew first, as on most
-# macOS PATHs). The caller's PATH, HOME and locale are kept for the gate's and the external
+# Readiness's own tools come only from fixed directories (Homebrew first, as on most macOS PATHs;
+# the Homebrew and /usr/local directories are usually user-writable, see the header). The caller's PATH, HOME and locale are kept for the gate's and the external
 # reviewer's configured commands only (plugin_child), with the saved library-path and Perl values.
 trusted_tool_path="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/home/linuxbrew/.linuxbrew/bin"
 command_locale_assignment=(-u AI_ENGINEERING_COMMAND_SAVED_LC_ALL)

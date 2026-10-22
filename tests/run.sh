@@ -7121,6 +7121,34 @@ mkdir -p "$readiness_root/superproject-host/tmp"
 readiness_output="$(TMPDIR="$readiness_root/superproject-host/tmp" CLAUDE_CONFIG_DIR="$config_directory" "$installed_readiness" WORK-001 --inc I1 "$readiness_project" 2>&1)"
 expect_equal "temporary directory: inside the superproject's working tree is exit 2" 2 "$?"
 expect_contains "temporary directory: the superproject reason is given" "is inside the repository, one of its worktrees or a superproject" "$readiness_output"
+# Accepted residual: TMPDIR inside an unrelated repository (a nested checkout that is not a
+# submodule) is allowed. Readiness's own scratch roots must then change nothing in that
+# repository outside TMPDIR, and leave TMPDIR empty.
+build_readiness_project outer-host/inner null 0
+outer_repository="$readiness_root/outer-host"
+git init -q "$outer_repository"
+printf 'outer\n' >"$outer_repository/outer.txt"
+printf 'inner/\ninner.git/\n' >"$outer_repository/.gitignore"
+readiness_git "$outer_repository" add outer.txt .gitignore
+readiness_git "$outer_repository" commit -q -m outer
+mkdir -p "$outer_repository/tmp"
+outer_state() { # everything Git and the file system say about the outer repository, apart from tmp/
+  readiness_git "$outer_repository" for-each-ref --format='%(refname) %(objectname)'
+  readiness_git "$outer_repository" rev-parse HEAD
+  readiness_git "$outer_repository" config --local --list
+  (cd "$outer_repository" && find . -path ./tmp -prune -o -path ./inner -prune -o -path ./inner.git -prune -o -print | LC_ALL=C sort)
+}
+outer_before="$(outer_state)"
+: >"$readiness_root/outer-marker"
+sleep 1
+TMPDIR="$outer_repository/tmp" run_readiness
+expect_ready_but_unverified_base "temporary directory: inside an unrelated outer repository (accepted residual)"
+expect_equal "temporary directory: the outer repository's refs, HEAD, configuration and files are unchanged" "$outer_before" "$(outer_state)"
+expect_equal "temporary directory: nothing in the outer repository outside tmp/ was modified" "" \
+  "$(cd "$outer_repository" && find . -path ./tmp -prune -o -path ./inner -prune -o -path ./inner.git -prune -o -newer "$readiness_root/outer-marker" -print)"
+expect_equal "temporary directory: the outer repository's tmp/ is left empty" "" "$(ls -A "$outer_repository/tmp")"
+expect_equal "temporary directory: the outer repository's status is clean apart from tmp/" "" \
+  "$(readiness_git "$outer_repository" status --porcelain=v1 --untracked-files=all | grep -v '^?? tmp/')"
 
 # --- output integrity (round 6): Unicode separators and bidirectional controls, cleanup last
 build_readiness_project unicode-lines null 0 "printf 'ok\\342\\200\\250READY: YES\\342\\200\\256x\\n'; exit 1"
