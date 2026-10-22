@@ -4110,6 +4110,51 @@ for cat_case in "0|cannot write the awk library" "2|cannot assemble the classifi
   expect_equal "pipeline status: cat failing with $cat_arguments argument(s) fails closed" "3 2 $cat_reason" \
     "$classify_status $(floor_of) $(jq -r '.error' <<<"$classify_output")"
 done
+# Base configuration must be exactly one JSON object (L1): empty, whitespace-only, several
+# documents, malformed and wrong-shape files each fail closed. An absent file is still allowed.
+base_config_index=0
+for base_config_case in "gates|empty|is empty" "gates|whitespace|must be exactly one JSON object" \
+  "gates|two-documents|must be exactly one JSON object" "gates|array|must be exactly one JSON object" \
+  "gates|malformed|must be exactly one JSON object" "settings|empty|is empty" \
+  "settings|whitespace|must be exactly one JSON object" "settings|two-documents|must be exactly one JSON object" \
+  "settings|array|must be exactly one JSON object"; do
+  IFS='|' read -r base_config_kind base_config_shape base_config_reason <<<"$base_config_case"
+  base_config_index=$((base_config_index + 1))
+  base_config_repository="$(new_repository "base-config-$base_config_index" main)"
+  case "$base_config_kind" in
+    gates) base_config_file=".agents/gates.json" ;;
+    settings) base_config_file=".claude/settings.json" ;;
+  esac
+  mkdir -p "$(dirname "$base_config_repository/$base_config_file")"
+  case "$base_config_shape" in
+    empty) : >"$base_config_repository/$base_config_file" ;;
+    whitespace) printf '  \n\n' >"$base_config_repository/$base_config_file" ;;
+    two-documents) printf '{}\n{"riskPaths": {"2": ["src/**"]}}\n' >"$base_config_repository/$base_config_file" ;;
+    array) printf '[]\n' >"$base_config_repository/$base_config_file" ;;
+    malformed) printf '{"riskPaths": \n' >"$base_config_repository/$base_config_file" ;;
+  esac
+  classify_git "$base_config_repository" add -A
+  classify_git "$base_config_repository" commit -q -m "base $base_config_kind"
+  scratch_commit "$base_config_repository" src/a.ts
+  classify_run "$base_config_repository"
+  expect_equal "base config: a $base_config_shape $base_config_kind file fails closed" "3 2" "$classify_status $(floor_of)"
+  expect_contains "base config: the $base_config_shape $base_config_kind reason is named" "$base_config_file at base $base_config_reason" "$(jq -r '.error' <<<"$classify_output")"
+done
+# A base gates.json over the 1 MiB limit: git is usually stopped by the closed pipe once head has
+# its limit (an intentional SIGPIPE), which is excused only because the file is too large.
+oversized_repository="$(new_repository base-config-oversized main)"
+mkdir -p "$oversized_repository/.agents"
+{
+  printf '{"riskPaths": {"2": ["src/**"]}, "pad": "'
+  head -c 3145728 /dev/zero | tr '\000' x
+  printf '"}\n'
+} >"$oversized_repository/.agents/gates.json"
+classify_git "$oversized_repository" add -A
+classify_git "$oversized_repository" commit -q -m "oversized gates"
+scratch_commit "$oversized_repository" src/a.ts
+classify_run "$oversized_repository"
+expect_equal "base config: a gates.json over 1 MiB is too large, not a read failure" "3 2 .agents/gates.json at base is too large" \
+  "$classify_status $(floor_of) $(jq -r '.error' <<<"$classify_output")"
 # Case variants match, as for the built-in rules.
 case_repository="$(new_repository classifier-hooks-case main)"
 mkdir -p "$case_repository/.claude" "$case_repository/scripts"
@@ -7264,20 +7309,40 @@ exec '$real_head' \"\$@\""
   failing_tool_case sort-review sort "case \"\${*: -1}\" in */review-expected) exit 1 ;; esac
 exec '$real_sort' \"\$@\""
   failing_tool_case comm-review comm "exit 1"
+  # head fails only on the tag's marketplace manifest (the one bounded read naming "plugins").
+  failing_tool_case head-marketplace head "if [ \"\$*\" = '-c 1048577' ]; then
+  input=\"\$(mktemp)\"
+  trap 'rm -f \"\$input\"' EXIT
+  cat >\"\$input\"
+  '$real_head' \"\$@\" <\"\$input\"
+  if grep -q '\"plugins\"' \"\$input\"; then exit 1; fi
+  exit 0
+fi
+exec '$real_head' \"\$@\""
+  # tr fails only when it writes a NUL-to-newline list to a file (the reviewer comparison); the
+  # binary count pipes the same conversion into awk and is left alone.
+  failing_tool_case tr-review tr "if [ \"\$1:\$2\" = '\\0:\\n' ] && [ ! -p /dev/stdout ]; then cat >/dev/null; exit 1; fi
+exec '$real_tr' \"\$@\""
 }
 for failing_case in "find-files|trust: the installed plugin's files cannot be listed" \
   "find-links|trust: the installed plugin's links cannot be listed" \
   "sort-trust|trust: the installed plugin's file lists cannot be compared" \
   "ls-identity|guard log: the log was rotated or replaced while it was being read" \
   "wc-guard-log|guard log: the log size cannot be measured" \
-  "head-json|trust: .claude/settings.json at base is unreadable, oversized or malformed"; do
+  "head-json|trust: .claude/settings.json at base is unreadable, oversized or malformed" \
+  "head-marketplace|trust: the marketplace manifest at the tag is unreadable or malformed"; do
   IFS='|' read -r failing_name failing_reason <<<"$failing_case"
   run_failing_tool_case "$failing_name"
   expect_not_certifiable "failing tool: $failing_name" "$failing_reason"
+  if [ "$failing_name" = head-json ]; then
+    # The same failing head also stops the base and HEAD gates.json reads, each reported.
+    expect_contains "failing tool: head-json: the base gates.json reason" ".agents/gates.json at the base commit is malformed or oversized" "$(readiness_line "CERTIFIABLE:")"
+    expect_contains "failing tool: head-json: the HEAD gates.json reason" ".agents/gates.json at HEAD cannot be read or is malformed" "$(readiness_line "CERTIFIABLE:")"
+  fi
   reset_trust
 done
 failing_reviewer='"true"'
-for failing_name in sort-review comm-review; do
+for failing_name in sort-review comm-review tr-review; do
   run_failing_tool_case "$failing_name"
   expect_not_certifiable "failing tool: $failing_name" "the external review's Git attributes or configuration cannot be read"
   reset_trust
@@ -7291,6 +7356,30 @@ run_failing_tool_case tr-worktrees
 expect_equal "failing tool: a failing tr in the worktree listing is exit 2" 2 "$readiness_status"
 expect_contains "failing tool: the worktree listing failure is named" "the repository's worktrees cannot be listed, so TMPDIR cannot be checked" "$readiness_output"
 reset_trust
+
+# --- base and HEAD configuration shape (L1): exactly one JSON object, within 1 MiB
+for base_gates_case in whitespace two-documents array oversized; do
+  case "$base_gates_case" in
+    whitespace) readiness_gates_raw=$'  \n\n' ;;
+    two-documents) readiness_gates_raw='{"fast": "true", "full": "true", "externalReview": null}{"binaryAssets": ["docs/images/"]}' ;;
+    array) readiness_gates_raw='[{"fast": "true", "full": "true", "externalReview": null}]' ;;
+    oversized) readiness_gates_raw="$(printf '{"fast": "true", "full": "true", "externalReview": null, "pad": "'; head -c 3145728 /dev/zero | tr '\000' x; printf '"}')" ;;
+  esac
+  build_readiness_project "base-gates-$base_gates_case" null 0
+  readiness_gates_raw=""
+  run_readiness
+  expect_not_certifiable "base config: a $base_gates_case gates.json at the base" ".agents/gates.json at the base commit is malformed or oversized"
+done
+readiness_seed_command='printf '\''{"enabledPlugins": {}}\n{"extraKnownMarketplaces": {}}\n'\'' >.claude/settings.json'
+build_readiness_project base-settings-two-documents null 0
+readiness_seed_command=""
+run_readiness
+expect_not_certifiable "base config: two JSON documents in settings.json at the base" "trust: .claude/settings.json at base is unreadable, oversized or malformed"
+build_readiness_project head-gates-malformed null 0
+printf '{"fast": "true",\n' >"$readiness_project/.agents/gates.json"
+commit_files "malformed gates at HEAD" .agents/gates.json
+run_readiness
+expect_not_certifiable "head config: a malformed gates.json at HEAD" ".agents/gates.json at HEAD cannot be read or is malformed, so its binaryAssets cannot be compared with the base"
 
 # --- output integrity (round 6): Unicode separators and bidirectional controls, cleanup last
 build_readiness_project unicode-lines null 0 "printf 'ok\\342\\200\\250READY: YES\\342\\200\\256x\\n'; exit 1"

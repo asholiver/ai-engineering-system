@@ -365,3 +365,18 @@ Append-only delivery narrative, written by the coordinator. Not sent to speciali
 
   Against the `788480f` classifier, 11 of the new classifier cells fail. One of them is a tier-2 change reported as tier 0 when `head` or `wc` fails.
 - Proposal revised (design only): JSONL records are telemetry; the necessary conditions are kept but are not sufficient. D1 is an owner-signed start approval (ADR-0004/WORK-004, blocked on G1). D2 is a remote identity pinned at the base, with no network check in the certification path (recommended). D3 is the permission-source inventory. V1–V3 were investigated in the documentation only.
+
+## 2026-10-22: PR C final follow-up (L1, test gaps), local
+- Owner decision (2026-10-22), verbatim excerpt: "Approved: one final narrow PR C follow-up on da24ed4." "Do not automatically start another hardening round for Low or informational findings."
+- **L1:** base `.agents/gates.json` and `.claude/settings.json` must hold exactly one JSON object.
+  - The classifier checks this with `require_one_json_object` (`jq -e -s`).
+  - Readiness's `bounded_json_file` does the same. Every caller (registry, known marketplaces, plugin.json, settings.json, marketplace.json, gates.json) expects an object.
+  - Absent files keep their meaning.
+  - Against the `da24ed4` classifier, a whitespace-only or two-document base file classified with exit 0, `error: null`, at floor 1 or 2.
+- **Tests added for the five gaps:**
+  - empty, whitespace, two-document, array and malformed base config (classifier and readiness);
+  - a 3 MiB base gates.json, which reports "too large", not a read failure;
+  - a malformed gates.json at HEAD;
+  - the `head` failure, now asserting the settings, base gates and HEAD gates reasons, plus a marketplace-only `head` failure;
+  - a failing `tr` in the reviewer comparison.
+- **Proposal:** the D3 inventory now lists command-line flags and prompt-tool and embedding hosts. A diagnostic SSH check uses `ssh -F /dev/null`.

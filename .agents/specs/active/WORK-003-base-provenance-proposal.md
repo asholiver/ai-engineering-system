@@ -114,8 +114,10 @@ anchor.
   - `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`, and `HOME` and `XDG_CONFIG_HOME` set to
     an empty directory;
   - `-c protocol.allow=never -c protocol.https.allow=always`, plus `ssh` only if the pin names it;
-  - `-c credential.helper=`, `-c core.sshCommand=ssh` and `-c core.askPass=`, with
-    `GIT_TERMINAL_PROMPT=0`;
+  - `-c credential.helper=`, `-c core.askPass=` and `GIT_TERMINAL_PROMPT=0`;
+  - for an SSH remote, `-c core.sshCommand='ssh -F /dev/null'` and `GIT_SSH_COMMAND` unset, so
+    OpenSSH reads no user or system `ssh_config` (it finds `~/.ssh/config` through the password
+    database whatever `HOME` is, so a `ProxyCommand` there could otherwise run);
   - every other `GIT_*` variable removed, and a bounded deadline.
   - A mismatch is reported only, never used to verify.
 
@@ -126,6 +128,11 @@ certification. It still matters for the diagnostics and for the action floor:
   without a prompt:
   - the managed, user, project and local settings: allow rules, `PermissionRequest` hooks,
     `defaultMode`, `disableBypassPermissionsMode` and sandbox auto-allow;
+  - command-line flags and arguments for the session: `--allowedTools`, `--permission-mode`
+    (including `bypassPermissions`), `--dangerously-skip-permissions`, `--settings` and
+    `--permission-prompt-tool`;
+  - prompt-tool and embedding hosts: a `--permission-prompt-tool` MCP tool, the Agent SDK's
+    `canUseTool` callback, and SDK-supplied managed settings;
   - plugin hooks;
   - installed mods.
   - Each is labelled with its source.

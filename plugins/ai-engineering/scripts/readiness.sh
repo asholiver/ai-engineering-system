@@ -480,12 +480,14 @@ byte_count() { # path: prints the file's size in bytes; fails when wc fails or p
   printf '%s' "$size"
 }
 
-bounded_json_file() { # path: a regular file of at most json_size_limit bytes holding valid JSON
+bounded_json_file() { # path: a regular file of at most json_size_limit bytes holding exactly one JSON object
   local size
   regular_file "$1" || return 1
   size="$(byte_count "$1")" || return 1
   [ "$size" -le "$json_size_limit" ] || return 1
-  jq -e . "$1" >/dev/null 2>&1
+  # Whitespace alone (no document) and several documents are both refused: jq would read them as
+  # no value or as several values.
+  jq -e -s 'length == 1 and (.[0] | type == "object")' "$1" >/dev/null 2>&1
 }
 
 version_at_least() { # version minimum: both MAJOR.MINOR.PATCH

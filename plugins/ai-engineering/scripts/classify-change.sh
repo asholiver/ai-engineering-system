@@ -218,6 +218,12 @@ measure_size() { # file description
   case "$measured_size" in '' | *[!0-9]*) fail_closed "cannot measure $2" ;; esac
 }
 
+# A configuration file must hold exactly one JSON object. jq reads whitespace alone as no input
+# and several documents as several configurations, so either would silently drop or split rules.
+require_one_json_object() { # file description
+  jq -e -s 'length == 1 and (.[0] | type == "object")' "$1" >/dev/null 2>&1 || fail_closed "$2 must be exactly one JSON object"
+}
+
 # The repository comes from the directory argument only: inherited variables that redirect
 # git to another repository, index, object store or configuration are removed before any git
 # command runs (git --version included). grep's option variables go too (BSD grep reads
@@ -286,6 +292,7 @@ if run_git cat-file -e "$base_sha:.agents/gates.json" 2>/dev/null; then
   [ "${read_status[0]}" -eq 0 ] || [ "$measured_size" -gt "$gates_size_limit" ] || fail_closed "cannot read .agents/gates.json at base"
   [ "$measured_size" -le "$gates_size_limit" ] || fail_closed ".agents/gates.json at base is too large"
   [ "$measured_size" -gt 0 ] || fail_closed ".agents/gates.json at base is empty"
+  require_one_json_object "$gates_file" ".agents/gates.json at base"
   config_program="$work_directory/config.jq"
   cat >"$config_program" <<'JQ' || fail_closed "cannot write the configuration program"
 def valid_globs: type == "array" and all(.[]; type == "string" and length > 0 and length <= 512 and (test("[\\x00-\\x1f\\x7f]") | not));
@@ -318,6 +325,7 @@ if run_git cat-file -e "$base_sha:.claude/settings.json" 2>/dev/null; then
   [ "${read_status[0]}" -eq 0 ] || [ "$measured_size" -gt "$gates_size_limit" ] || fail_closed "cannot read .claude/settings.json at base"
   [ "$measured_size" -le "$gates_size_limit" ] || fail_closed ".claude/settings.json at base is too large"
   [ "$measured_size" -gt 0 ] || fail_closed ".claude/settings.json at base is empty"
+  require_one_json_object "$settings_file" ".claude/settings.json at base"
   hook_program="$work_directory/hooks.jq"
   cat >"$hook_program" <<'JQ' || fail_closed "cannot write the hook program"
 def project_relative: sub("^(\\$CLAUDE_PROJECT_DIR|\\$\\{CLAUDE_PROJECT_DIR\\})/"; "") | sub("^(\\./)+"; "");
