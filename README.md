@@ -265,11 +265,20 @@ After setup, nothing else needs installing: open the project in Claude Code and 
 /ai-engineering:plan WORK-001      discuss, decide, then write the work specification and ADRs
 /ai-engineering:approve WORK-001   record your decision: approve the spec, accept or defer a finding, lower a tier, revoke (human only)
 /ai-engineering:deliver WORK-001   authorise and run the approved specification through specialist agents
-/ai-engineering:review WORK-001    full gate, security and QA checks, independent review
+/ai-engineering:review WORK-001 [I1]  readiness for one increment: full gate, security and QA checks, independent review
 /ai-engineering:learn              record a learning, regression or incident
 ```
 
-Planning ends with a work specification. You approve it with `/ai-engineering:approve`, then authorise delivery with `/ai-engineering:deliver`; a conversational "yes" never changes a work item's status. The lifecycle is `proposed`, `approved`, `authorised`, `delivering` (or `blocked`, `paused`), `done`, `archived`. Review reports whether the work is ready for your final acceptance.
+Planning ends with a work specification. You approve it with `/ai-engineering:approve`, then authorise delivery with `/ai-engineering:deliver`; a conversational "yes" never changes a work item's status. The lifecycle is `proposed`, `approved`, `authorised`, `delivering` (or `blocked`, `paused`), `done`, `archived`. Review reports whether an increment is ready for your final acceptance.
+
+Readiness needs these:
+- the version pin in `.claude/settings.json`;
+- `origin/HEAD` (`git remote set-head origin -a`);
+- an increment started with the exact command `/ai-engineering:deliver` uses;
+- a `full` gate that installs its own dependencies;
+- a `binaryAssets` list in `.agents/gates.json` for any image or font assets a change touches.
+
+A run can take up to 50 minutes. In v0.3.0 it never reports `READY: YES`: the increment's base can't yet be verified, so the block says `BASE PROVENANCE: UNVERIFIED` and you judge readiness from the rest of it. See [docs/consuming-project.md](docs/consuming-project.md#readiness-and-the-version-pin).
 
 What runs without prompts once you authorise delivery: fixes inside the approved intent, commits, pushing the work branch, opening or updating the increment pull request (per the spec's delivery policy), gates, review and moving on to the next increment after you merge. Delivery interrupts you only for an intent or scope change, an owner-level trade-off, accepting or downgrading risk, a reserved operation, or an ambiguity. Starting each increment from the updated default branch asks one guard confirmation, and that confirmation pre-authorises nothing else. Every deploy, merge, release, publish, protected push and other reserved operation still asks, whatever the work item's state says. You merge; delivery never does.
 
