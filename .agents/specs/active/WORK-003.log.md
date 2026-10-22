@@ -339,3 +339,29 @@ Append-only delivery narrative, written by the coordinator. Not sent to speciali
 - Verified (code and an executed test): readiness creates only its own `mktemp` roots under TMPDIR, runs every Git command in the repository or in a clone holding its own `.git` (never from the `tmp/` or `home/` roots), and removes the roots; `remove_tree` is limited to those roots and follows no links. The new test runs readiness with TMPDIR inside an unrelated outer repository and checks the outer repository's refs, HEAD, local configuration, file list, modification times outside `tmp/`, status and an empty `tmp/` afterwards. A Git command that the gate or reviewer runs from its TMPDIR or HOME there would find the outer repository; that is documented with the residual.
 - Docs: the fixed tool directories stop PATH substitution only (the Homebrew and `/usr/local` ones are usually user-writable); trust checks are local consistency, not authenticated provenance; the TMPDIR residual.
 - Design only: `.agents/specs/active/WORK-003-base-provenance-proposal.md` (evidence format, approval and execution binding, threat model, failure behaviour, regression tests). Hook input fields were checked against Claude Code's hooks documentation; three behaviours (V1–V3) are still to be verified before any implementation.
+
+## 2026-10-22: S-L1/S-L2 pipeline status fix and proposal revision, local
+- Owner decisions (2026-10-22), verbatim excerpts: "APPROVED: one narrow, local fix for S-L1 and S-L2." "Empty, malformed, incomplete or unreadable results must fail closed, not silently reduce classification or pass readiness checks." "Prefer local, explicit status checks where practical." "NOT APPROVED: implementing or enabling the Guard protocol." "Until verified, no permission mode counts as authenticated human approval."
+- The security reviewer's declined scratch setup (two commits in an empty scratch repository and one stand-in `head`) was not retried. The finding it targeted was confirmed by reading the code, and the regressions use the suite's own fixtures.
+- **Classifier:** `measure_size` replaces every `wc -c | tr` size (a failing or non-numeric `wc` fails closed). The `head` status is checked on the gates.json, settings.json, raw and numstat reads. An empty base gates.json or settings.json is refused. The reserved-byte `tr` status is checked. Every program write (`cat` heredocs), the built-in rules and the rules join are checked. No global `pipefail`.
+- **Readiness:**
+  - the worktree listing checks `git` and `tr`, and an empty listing exits 2;
+  - the settings, marketplace and gates reads check `git` and `head`;
+  - trust checks each `find`, `sed` and `sort`, requires non-empty sorted lists, and compares them with `cmp`;
+  - `file_identity` returns `unreadable` unless `ls` and `awk` give a number;
+  - the guard-log sizes use `byte_count`;
+  - the reviewer-visibility comparison checks each `tr`, `sort`, `comm` and `head`;
+  - an unreadable or malformed gates.json at HEAD is NOT CERTIFIABLE (it was read as an empty binaryAssets list).
+- **Tests:** classifier stand-ins:
+  - `head` on the raw, numstat, gates and settings reads;
+  - a failing and a non-numeric `wc`;
+  - the reserved-byte `tr`;
+  - `cat` writing a program and joining the rules.
+
+  Readiness variant installs:
+  - `find` (listing and links), `sort` (trust and reviewer), `comm`, `ls`, `wc` on the guard log, and `head` on bounded JSON, each NOT CERTIFIABLE;
+  - a failing worktree `tr`, which exits 2;
+  - the reviewer fixture without stand-ins, still READY: NO for base provenance alone.
+
+  Against the `788480f` classifier, 11 of the new classifier cells fail. One of them is a tier-2 change reported as tier 0 when `head` or `wc` fails.
+- Proposal revised (design only): JSONL records are telemetry; the necessary conditions are kept but are not sufficient. D1 is an owner-signed start approval (ADR-0004/WORK-004, blocked on G1). D2 is a remote identity pinned at the base, with no network check in the certification path (recommended). D3 is the permission-source inventory. V1–V3 were investigated in the documentation only.

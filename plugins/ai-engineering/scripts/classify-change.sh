@@ -164,8 +164,8 @@ fi
 if [ "${1:-}" = "--glob-match" ]; then
   [ $# -eq 3 ] || usage_error "--glob-match needs a glob and a path"
   work_directory="$(mktemp -d "${TMPDIR:-/tmp}/classify-change.XXXXXX")" || exit 3
-  write_awk_library "$work_directory/library.awk"
-  printf '%s\n' 'BEGIN { exit !(ENVIRON["PATH_UNDER_TEST"] ~ glob_to_regex(ENVIRON["GLOB_UNDER_TEST"])) }' >"$work_directory/match.awk"
+  write_awk_library "$work_directory/library.awk" || exit 3
+  printf '%s\n' 'BEGIN { exit !(ENVIRON["PATH_UNDER_TEST"] ~ glob_to_regex(ENVIRON["GLOB_UNDER_TEST"])) }' >"$work_directory/match.awk" || exit 3
   GLOB_UNDER_TEST="$2" PATH_UNDER_TEST="$3" LC_ALL=C awk -f "$work_directory/library.awk" -f "$work_directory/match.awk"
   exit $?
 fi
@@ -210,6 +210,14 @@ fail_closed() {
   exit 3
 }
 
+# Sets measured_size to the file's size in bytes. A wc that fails or prints something other than
+# a number fails closed: an empty size would otherwise compare as neither large nor small.
+measure_size() { # file description
+  measured_size="$(wc -c <"$1")" || fail_closed "cannot measure $2"
+  measured_size="${measured_size//[[:space:]]/}"
+  case "$measured_size" in '' | *[!0-9]*) fail_closed "cannot measure $2" ;; esac
+}
+
 # The repository comes from the directory argument only: inherited variables that redirect
 # git to another repository, index, object store or configuration are removed before any git
 # command runs (git --version included). grep's option variables go too (BSD grep reads
@@ -226,7 +234,7 @@ command -v git >/dev/null 2>&1 || fail_closed "git is not available"
 git_version_is_supported "$(git --version 2>/dev/null)" || fail_closed "git is older than 2.40 or its version cannot be parsed"
 
 work_directory="$(mktemp -d "${TMPDIR:-/tmp}/classify-change.XXXXXX")" || fail_closed "cannot create a temporary directory"
-write_awk_library "$work_directory/library.awk"
+write_awk_library "$work_directory/library.awk" || fail_closed "cannot write the awk library"
 
 # ---------------------------------------------------------------- repository and refs
 
@@ -269,10 +277,17 @@ config_rules="$work_directory/config-rules.tsv"
 if run_git cat-file -e "$base_sha:.agents/gates.json" 2>/dev/null; then
   gates_file="$work_directory/gates.json"
   run_git show "$base_sha:.agents/gates.json" 2>/dev/null | head -c $((gates_size_limit + 1)) >"$gates_file"
-  [ "${PIPESTATUS[0]}" -eq 0 ] || [ "$(wc -c <"$gates_file" | tr -d ' ')" -gt "$gates_size_limit" ] || fail_closed "cannot read .agents/gates.json at base"
-  [ "$(wc -c <"$gates_file" | tr -d ' ')" -le "$gates_size_limit" ] || fail_closed ".agents/gates.json at base is too large"
+  read_status=("${PIPESTATUS[@]}")
+  measure_size "$gates_file" ".agents/gates.json at base"
+  # head stops at the limit (git may then be stopped by the closed pipe), so git's status is
+  # excused only for an oversized file; head itself must succeed. An empty file is never valid
+  # JSON, and jq would read it as no configuration.
+  [ "${read_status[1]}" -eq 0 ] || fail_closed "cannot read .agents/gates.json at base"
+  [ "${read_status[0]}" -eq 0 ] || [ "$measured_size" -gt "$gates_size_limit" ] || fail_closed "cannot read .agents/gates.json at base"
+  [ "$measured_size" -le "$gates_size_limit" ] || fail_closed ".agents/gates.json at base is too large"
+  [ "$measured_size" -gt 0 ] || fail_closed ".agents/gates.json at base is empty"
   config_program="$work_directory/config.jq"
-  cat >"$config_program" <<'JQ'
+  cat >"$config_program" <<'JQ' || fail_closed "cannot write the configuration program"
 def valid_globs: type == "array" and all(.[]; type == "string" and length > 0 and length <= 512 and (test("[\\x00-\\x1f\\x7f]") | not));
 def rule($tier; $reason; $glob): "\($tier)\t\($reason)\tglob\t\($glob)";
 (if type == "object" then . else error("gates.json must be a JSON object") end) as $config
@@ -297,10 +312,14 @@ fi
 if run_git cat-file -e "$base_sha:.claude/settings.json" 2>/dev/null; then
   settings_file="$work_directory/settings.json"
   run_git show "$base_sha:.claude/settings.json" 2>/dev/null | head -c $((gates_size_limit + 1)) >"$settings_file"
-  [ "${PIPESTATUS[0]}" -eq 0 ] || [ "$(wc -c <"$settings_file" | tr -d ' ')" -gt "$gates_size_limit" ] || fail_closed "cannot read .claude/settings.json at base"
-  [ "$(wc -c <"$settings_file" | tr -d ' ')" -le "$gates_size_limit" ] || fail_closed ".claude/settings.json at base is too large"
+  read_status=("${PIPESTATUS[@]}")
+  measure_size "$settings_file" ".claude/settings.json at base"
+  [ "${read_status[1]}" -eq 0 ] || fail_closed "cannot read .claude/settings.json at base"
+  [ "${read_status[0]}" -eq 0 ] || [ "$measured_size" -gt "$gates_size_limit" ] || fail_closed "cannot read .claude/settings.json at base"
+  [ "$measured_size" -le "$gates_size_limit" ] || fail_closed ".claude/settings.json at base is too large"
+  [ "$measured_size" -gt 0 ] || fail_closed ".claude/settings.json at base is empty"
   hook_program="$work_directory/hooks.jq"
-  cat >"$hook_program" <<'JQ'
+  cat >"$hook_program" <<'JQ' || fail_closed "cannot write the hook program"
 def project_relative: sub("^(\\$CLAUDE_PROJECT_DIR|\\$\\{CLAUDE_PROJECT_DIR\\})/"; "") | sub("^(\\./)+"; "");
 (if type == "object" then . else error("settings must be a JSON object") end)
 | (if has("hooks") then .hooks else {} end) as $hooks
@@ -373,14 +392,18 @@ add_rules() { # tier reason kind glob...
   # file there (docs/conf.py, docs/.vitepress/config.ts) falls to the tier 1 default.
   # The directory must be exactly "docs/" (tier 0 never folds case); the extension is folded.
   add_rules 0 tier0:docs docs 'docs/**/*.md' 'docs/**/*.mdx' 'docs/**/*.markdown' 'docs/**/*.rst' 'docs/**/*.adoc' 'docs/**/*.txt' 'docs/**/*.png' 'docs/**/*.jpg' 'docs/**/*.jpeg' 'docs/**/*.gif' 'docs/**/*.svg' 'docs/**/*.webp' 'docs/**/*.ico' 'docs/**/*.pdf' 'docs/**/*.drawio' 'docs/**/*.mmd' 'docs/**/*.puml'
-} >"$default_rules"
-cat "$default_rules" "$config_rules" >"$work_directory/rules.tsv"
+} >"$default_rules" || fail_closed "cannot write the built-in rules"
+cat "$default_rules" "$config_rules" >"$work_directory/rules.tsv" || fail_closed "cannot assemble the classification rules"
 
 # ---------------------------------------------------------------- changed paths (raw, NUL separated)
 raw_file="$work_directory/raw.bin"
 run_git diff --raw -z "${diff_options[@]}" "$base_sha" "$head_sha" -- 2>"$work_directory/git-error.txt" | head -c $((raw_output_limit + 1)) >"$raw_file"
-raw_git_status="${PIPESTATUS[0]}"
-raw_size="$(wc -c <"$raw_file" | tr -d ' ')"
+raw_read_status=("${PIPESTATUS[@]}")
+raw_git_status="${raw_read_status[0]}"
+# A failed head leaves an empty or short file, which would read as fewer (or no) changes.
+[ "${raw_read_status[1]}" -eq 0 ] || fail_closed "cannot read the git diff output"
+measure_size "$raw_file" "the git diff output"
+raw_size="$measured_size"
 path_cap_exceeded=0
 byte_cap_exceeded=0
 if [ "$raw_size" -gt "$raw_output_limit" ]; then
@@ -402,12 +425,13 @@ scanner_malformed_status=11
 entries_file="$work_directory/entries.tsv"
 : >"$entries_file"
 if [ "$path_cap_exceeded" -eq 0 ] && [ "$raw_size" -gt 0 ]; then
-  if [ "$(LC_ALL=C tr -dc '\001\002\003' <"$raw_file" | wc -c | tr -d ' ')" -ne 0 ]; then
-    fail_closed "a changed path contains a reserved control byte"
-  fi
+  LC_ALL=C tr -dc '\001\002\003' <"$raw_file" >"$work_directory/reserved.bin" ||
+    fail_closed "cannot check the changed paths for reserved control bytes"
+  measure_size "$work_directory/reserved.bin" "the reserved control bytes"
+  [ "$measured_size" -eq 0 ] || fail_closed "a changed path contains a reserved control byte"
   ends_with_nul "$raw_file" || fail_closed "unexpected git diff output"
   raw_program="$work_directory/raw.awk"
-  cat >"$raw_program" <<'AWK_RAW'
+  cat >"$raw_program" <<'AWK_RAW' || fail_closed "cannot write the changed path scanner"
 function flags_for(mode) {
   if (mode == "120000") return "symlink"
   if (mode == "160000") return "submodule"
@@ -481,12 +505,14 @@ if [ "$path_cap_exceeded" -eq 0 ] && [ -s "$entries_file" ]; then
   # ---------------------------------------------------------------- binary files (numstat "-  -")
   numstat_file="$work_directory/numstat.bin"
   run_git diff --numstat -z "${diff_options[@]}" "$base_sha" "$head_sha" -- 2>"$work_directory/git-error.txt" | head -c $((raw_output_limit + 1)) >"$numstat_file"
-  numstat_git_status="${PIPESTATUS[0]}"
-  [ "$(wc -c <"$numstat_file" | tr -d ' ')" -le "$raw_output_limit" ] && [ "$numstat_git_status" -eq 0 ] ||
+  numstat_read_status=("${PIPESTATUS[@]}")
+  [ "${numstat_read_status[1]}" -eq 0 ] || fail_closed "cannot read the git diff --numstat output"
+  measure_size "$numstat_file" "the git diff --numstat output"
+  [ "$measured_size" -le "$raw_output_limit" ] && [ "${numstat_read_status[0]}" -eq 0 ] ||
     fail_closed "git diff --numstat failed: $(head -n 1 "$work_directory/git-error.txt" | cut -c 1-200)"
   ends_with_nul "$numstat_file" || fail_closed "unexpected git diff --numstat output"
   numstat_program="$work_directory/numstat.awk"
-  cat >"$numstat_program" <<'AWK_NUMSTAT'
+  cat >"$numstat_program" <<'AWK_NUMSTAT' || fail_closed "cannot write the numstat scanner"
 BEGIN { RS = "\001"; pending = 0 }
 {
   if (pending > 0) {
@@ -516,7 +542,7 @@ AWK_NUMSTAT
 
   # ---------------------------------------------------------------- destructive SQL in added lines
   sql_program="$work_directory/sql.awk"
-  cat >"$sql_program" <<'AWK_SQL'
+  cat >"$sql_program" <<'AWK_SQL' || fail_closed "cannot write the destructive SQL scanner"
 BEGIN {
   bytes_read = 0; in_header = 1; current_path = ""
   word_end = "([^a-z0-9_]|$)"
@@ -568,7 +594,7 @@ AWK_SQL
   # match another head path or directory prefix spelled differently. Memory is bounded by the
   # changed paths, not by the tree.
   tree_program="$work_directory/tree.awk"
-  cat >"$tree_program" <<'AWK_TREE'
+  cat >"$tree_program" <<'AWK_TREE' || fail_closed "cannot write the tree scanner"
 function note_wanted(path,    count, parts, position, prefix) {
   count = split(path, parts, "/")
   prefix = ""
@@ -631,7 +657,7 @@ classified_file="$work_directory/classified.tsv"
 : >"$classified_file"
 if [ -s "$entries_file" ]; then
   classify_program="$work_directory/classify.awk"
-  cat >"$classify_program" <<'AWK_CLASSIFY'
+  cat >"$classify_program" <<'AWK_CLASSIFY' || fail_closed "cannot write the classification program"
 function is_upper(character) { return index("ABCDEFGHIJKLMNOPQRSTUVWXYZ", character) > 0 }
 function is_lower(character) { return index("abcdefghijklmnopqrstuvwxyz", character) > 0 }
 function is_digit(character) { return index("0123456789", character) > 0 }

@@ -4040,6 +4040,76 @@ classify_git "$hook_repository" add -A
 classify_git "$hook_repository" commit -q -m scratch
 classify_run "$hook_repository"
 expect_equal "classify hooks: a branch-only hook does not mark its target" "1" "$(tier_of src/c.ts both)"
+
+# Failing pipeline stages and size measurements (S-L1): a head that reads its input and exits 1
+# without output, a wc that fails or prints no number, a failing reserved-byte tr and a cat that
+# cannot write a program each fail closed instead of reading as fewer changes or no configuration.
+classifier_real_head="$(command -v head)"
+# The head stand-in fails only when its input starts with the given byte class (":" the raw
+# listing, a digit or "-" numstat, "{" a JSON configuration file); anything else is passed on.
+for head_case in "raw|:|configured|.github/workflows/ci.yml|cannot read the git diff output" \
+  "numstat|[0-9-]|configured|.github/workflows/ci.yml|cannot read the git diff --numstat output" \
+  "gates|{|configured|src/payments/charge.ts|cannot read .agents/gates.json at base" \
+  "settings|{|hook|scripts/format.sh|cannot read .claude/settings.json at base"; do
+  IFS='|' read -r head_name head_prefix head_fixture head_path head_reason <<<"$head_case"
+  case "$head_fixture" in configured) head_repository="$configured_repository" ;; *) head_repository="$hook_repository" ;; esac
+  scratch_commit "$head_repository" "$head_path"
+  classify_run "$head_repository"
+  expect_equal "pipeline status: $head_name fixture is tier 2 with a working head" "0 2 null" "$classify_status $(floor_of) $(jq -r '.error' <<<"$classify_output")"
+  mkdir -p "$classifier_stand_ins/head-$head_name"
+  # shellcheck disable=SC2016 # the expansions belong to the stand-in script being written
+  printf '#!/bin/bash
+if [ "${1-}" = -c ]; then
+  input="$(mktemp)"
+  trap '"'"'rm -f "$input"'"'"' EXIT
+  cat >"$input"
+  case "$(%s -c 1 "$input")" in %s) exit 1 ;; esac
+  %s "$@" <"$input"
+  exit
+fi
+exec %s "$@"
+' "'$classifier_real_head'" "$head_prefix" "'$classifier_real_head'" "'$classifier_real_head'" >"$classifier_stand_ins/head-$head_name/head"
+  chmod +x "$classifier_stand_ins/head-$head_name/head"
+  PATH="$classifier_stand_ins/head-$head_name:$PATH" classify_run "$head_repository"
+  expect_equal "pipeline status: a failing head on the $head_name read fails closed" "3 2 $head_reason" \
+    "$classify_status $(floor_of) $(jq -r '.error' <<<"$classify_output")"
+done
+scratch_commit "$grep_repository" docs/one.md src/two.ts
+for wc_mode in failing non-numeric; do
+  mkdir -p "$classifier_stand_ins/wc-$wc_mode"
+  case "$wc_mode" in
+    failing) printf '#!/bin/bash\ncat >/dev/null\nexit 1\n' >"$classifier_stand_ins/wc-$wc_mode/wc" ;;
+    non-numeric) printf '#!/bin/bash\ncat >/dev/null\necho many\n' >"$classifier_stand_ins/wc-$wc_mode/wc" ;;
+  esac
+  chmod +x "$classifier_stand_ins/wc-$wc_mode/wc"
+  PATH="$classifier_stand_ins/wc-$wc_mode:$PATH" classify_run "$grep_repository"
+  expect_equal "size measure: a $wc_mode wc on the diff output fails closed" "3 2 cannot measure the git diff output" \
+    "$classify_status $(floor_of) $(jq -r '.error' <<<"$classify_output")"
+  scratch_commit "$configured_repository" src/payments/charge.ts
+  PATH="$classifier_stand_ins/wc-$wc_mode:$PATH" classify_run "$configured_repository"
+  expect_equal "size measure: a $wc_mode wc on gates.json fails closed" "3 2 cannot measure .agents/gates.json at base" \
+    "$classify_status $(floor_of) $(jq -r '.error' <<<"$classify_output")"
+done
+classify_run "$grep_repository"
+expect_equal "pipeline status: the fixture classifies normally without stand-ins" "0 1 null" "$classify_status $(floor_of) $(jq -r '.error' <<<"$classify_output")"
+mkdir -p "$classifier_stand_ins/tr-reserved"
+# shellcheck disable=SC2016 # the expansions belong to the stand-in script being written
+printf '#!/bin/bash\nif [ "${1-}" = -dc ]; then cat >/dev/null; exit 1; fi\nexec %s "$@"\n' "'$(command -v tr)'" >"$classifier_stand_ins/tr-reserved/tr"
+chmod +x "$classifier_stand_ins/tr-reserved/tr"
+PATH="$classifier_stand_ins/tr-reserved:$PATH" classify_run "$grep_repository"
+expect_equal "pipeline status: a failing reserved-byte tr fails closed" "3 2 cannot check the changed paths for reserved control bytes" \
+  "$classify_status $(floor_of) $(jq -r '.error' <<<"$classify_output")"
+# cat writes every awk and jq program (no arguments) and joins the rules (two arguments).
+for cat_case in "0|cannot write the awk library" "2|cannot assemble the classification rules"; do
+  IFS='|' read -r cat_arguments cat_reason <<<"$cat_case"
+  mkdir -p "$classifier_stand_ins/cat-$cat_arguments"
+  # shellcheck disable=SC2016 # the expansions belong to the stand-in script being written
+  printf '#!/bin/bash\nif [ $# -eq %s ]; then exit 1; fi\nexec %s "$@"\n' "$cat_arguments" "'$(command -v cat)'" >"$classifier_stand_ins/cat-$cat_arguments/cat"
+  chmod +x "$classifier_stand_ins/cat-$cat_arguments/cat"
+  PATH="$classifier_stand_ins/cat-$cat_arguments:$PATH" classify_run "$grep_repository"
+  expect_equal "pipeline status: cat failing with $cat_arguments argument(s) fails closed" "3 2 $cat_reason" \
+    "$classify_status $(floor_of) $(jq -r '.error' <<<"$classify_output")"
+done
 # Case variants match, as for the built-in rules.
 case_repository="$(new_repository classifier-hooks-case main)"
 mkdir -p "$case_repository/.claude" "$case_repository/scripts"
@@ -7149,6 +7219,78 @@ expect_equal "temporary directory: nothing in the outer repository outside tmp/ 
 expect_equal "temporary directory: the outer repository's tmp/ is left empty" "" "$(ls -A "$outer_repository/tmp")"
 expect_equal "temporary directory: the outer repository's status is clean apart from tmp/" "" \
   "$(readiness_git "$outer_repository" status --porcelain=v1 --untracked-files=all | grep -v '^?? tmp/')"
+
+# --- failing verification commands (S-L2): each is NOT CERTIFIABLE (or exit 2 before any check),
+# never a check that passes because a failed tool left both sides empty or a listing short
+real_find="$(command -v find)"
+real_sort="$(command -v sort)"
+real_tr="$(command -v tr)"
+real_ls="$(command -v ls)"
+real_wc="$(command -v wc)"
+real_head="$(command -v head)"
+failing_tool_case() { # name tool script-body: writes the stand-in tool into its own directory
+  mkdir -p "$readiness_root/failing-$1"
+  printf '#!/bin/bash\n%s\n' "$3" >"$readiness_root/failing-$1/$2"
+  chmod +x "$readiness_root/failing-$1/$2"
+}
+run_failing_tool_case() { # name
+  build_readiness_project "failing-$1" "${failing_reviewer:-null}" 0
+  variant_install "failing-$1" "$readiness_root/failing-$1"
+  run_readiness "$variant_readiness"
+}
+# shellcheck disable=SC2016 # the stand-in bodies expand when the stand-ins run
+{
+  # The install listing is complete but find reports an error (an unreadable directory).
+  failing_tool_case find-files find "if [ \"\$1:\$2:\$3\" = .:-path:./.in_use ] && [ \$# -gt 8 ]; then '$real_find' \"\$@\"; exit 1; fi
+exec '$real_find' \"\$@\""
+  # The symbolic-link listing fails with no output.
+  failing_tool_case find-links find "if [ \"\$1:\$2:\$3\" = .:-path:./.in_use ] && [ \$# -eq 8 ]; then exit 1; fi
+exec '$real_find' \"\$@\""
+  failing_tool_case sort-trust sort "case \"\${*: -1}\" in */expected-paths | */actual-paths) exit 1 ;; esac
+exec '$real_sort' \"\$@\""
+  failing_tool_case tr-worktrees tr "if [ \"\$1:\$2\" = '\\0:\\001' ]; then cat >/dev/null; exit 1; fi
+exec '$real_tr' \"\$@\""
+  failing_tool_case ls-identity ls "if [ \"\$1\" = -di ]; then case \"\$2\" in */guard-log.jsonl) exit 1 ;; esac; fi
+exec '$real_ls' \"\$@\""
+  # wc fails only on the guard log (its lines start with {\"time\":).
+  failing_tool_case wc-guard-log wc "input=\"\$(mktemp)\"
+trap 'rm -f \"\$input\"' EXIT
+cat >\"\$input\"
+[ \"\$('$real_head' -c 8 \"\$input\")\" != '{\"time\":' ] || exit 1
+'$real_wc' \"\$@\" <\"\$input\""
+  # head copies the bounded JSON read in full and then reports failure.
+  failing_tool_case head-json head "if [ \"\$*\" = '-c 1048577' ]; then '$real_head' \"\$@\"; exit 1; fi
+exec '$real_head' \"\$@\""
+  failing_tool_case sort-review sort "case \"\${*: -1}\" in */review-expected) exit 1 ;; esac
+exec '$real_sort' \"\$@\""
+  failing_tool_case comm-review comm "exit 1"
+}
+for failing_case in "find-files|trust: the installed plugin's files cannot be listed" \
+  "find-links|trust: the installed plugin's links cannot be listed" \
+  "sort-trust|trust: the installed plugin's file lists cannot be compared" \
+  "ls-identity|guard log: the log was rotated or replaced while it was being read" \
+  "wc-guard-log|guard log: the log size cannot be measured" \
+  "head-json|trust: .claude/settings.json at base is unreadable, oversized or malformed"; do
+  IFS='|' read -r failing_name failing_reason <<<"$failing_case"
+  run_failing_tool_case "$failing_name"
+  expect_not_certifiable "failing tool: $failing_name" "$failing_reason"
+  reset_trust
+done
+failing_reviewer='"true"'
+for failing_name in sort-review comm-review; do
+  run_failing_tool_case "$failing_name"
+  expect_not_certifiable "failing tool: $failing_name" "the external review's Git attributes or configuration cannot be read"
+  reset_trust
+done
+# The same reviewer fixture without stand-ins: normal behaviour is unchanged.
+build_readiness_project failing-none '"true"' 0
+run_readiness
+expect_ready_but_unverified_base "failing tool: the reviewer fixture passes without stand-ins"
+failing_reviewer=""
+run_failing_tool_case tr-worktrees
+expect_equal "failing tool: a failing tr in the worktree listing is exit 2" 2 "$readiness_status"
+expect_contains "failing tool: the worktree listing failure is named" "the repository's worktrees cannot be listed, so TMPDIR cannot be checked" "$readiness_output"
+reset_trust
 
 # --- output integrity (round 6): Unicode separators and bidirectional controls, cleanup last
 build_readiness_project unicode-lines null 0 "printf 'ok\\342\\200\\250READY: YES\\342\\200\\256x\\n'; exit 1"

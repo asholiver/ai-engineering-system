@@ -472,9 +472,19 @@ regular_file() { # path: an existing, readable regular file that is not a symbol
   [ -f "$1" ] && [ ! -L "$1" ] && [ -r "$1" ]
 }
 
+byte_count() { # path: prints the file's size in bytes; fails when wc fails or prints no number
+  local size
+  size="$(wc -c <"$1" 2>/dev/null)" || return 1
+  size="${size//[[:space:]]/}"
+  [[ $size =~ ^[0-9]+$ ]] || return 1
+  printf '%s' "$size"
+}
+
 bounded_json_file() { # path: a regular file of at most json_size_limit bytes holding valid JSON
+  local size
   regular_file "$1" || return 1
-  [ "$(wc -c <"$1" | tr -d ' ')" -le "$json_size_limit" ] || return 1
+  size="$(byte_count "$1")" || return 1
+  [ "$size" -le "$json_size_limit" ] || return 1
   jq -e . "$1" >/dev/null 2>&1
 }
 
@@ -559,7 +569,10 @@ case "$common_directory_path" in "" | /*) ;; *) common_directory_path="$reposito
 [ -z "$common_directory_path" ] || main_worktree_real="$(cd "$common_directory_path/.." 2>/dev/null && pwd -P)" || main_worktree_real=""
 protected_directories=("$repository_real")
 [ -z "$main_worktree_real" ] || protected_directories+=("$main_worktree_real")
-worktree_listing="$(git worktree list --porcelain -z 2>/dev/null | tr '\0' '\001'; exit "${PIPESTATUS[0]}")" || {
+# Both stages are checked (a failed tr would drop the sibling worktrees), and Git always lists
+# at least the main worktree, so an empty listing is a failure too.
+worktree_listing="$(git worktree list --porcelain -z 2>/dev/null | tr '\0' '\001'; [ "${PIPESTATUS[0]}:${PIPESTATUS[1]}" = 0:0 ])" \
+  && [ -n "$worktree_listing" ] || {
   echo "readiness.sh: the repository's worktrees cannot be listed, so TMPDIR cannot be checked" >&2
   exit 2
 }
@@ -827,6 +840,8 @@ trust_summary=""
 check_trust() {
   local config_directory registry known common_directory main_root entries candidates scope chosen=""
   local install_path install_real version commit pin_json known_json clone tag_commit plugin_path
+  local installed_links
+  local -a read_status
   config_directory="${CLAUDE_CONFIG_DIR:-${HOME:-}/.claude}"
   registry="$config_directory/plugins/installed_plugins.json"
   known="$config_directory/plugins/known_marketplaces.json"
@@ -885,7 +900,11 @@ check_trust() {
   [ -n "$base_sha" ] || { not_certifiable "trust: no base commit to read the project pin from"; return; }
   git cat-file -e "$base_sha:.claude/settings.json" 2>/dev/null || { not_certifiable "trust: no .claude/settings.json at the base commit, so no pinned version"; return; }
   git show "$base_sha:.claude/settings.json" 2>/dev/null | head -c $((json_size_limit + 1)) >"$temporary_directory/settings.json"
-  bounded_json_file "$temporary_directory/settings.json" || { not_certifiable "trust: .claude/settings.json at base is unreadable, oversized or malformed"; return; }
+  read_status=("${PIPESTATUS[@]}")
+  if [ "${read_status[0]}:${read_status[1]}" != 0:0 ] || ! bounded_json_file "$temporary_directory/settings.json"; then
+    not_certifiable "trust: .claude/settings.json at base is unreadable, oversized or malformed"
+    return
+  fi
   pin_json="$(jq -c --arg m "$marketplace_name" '.extraKnownMarketplaces[$m].source // null' "$temporary_directory/settings.json" 2>/dev/null)" || pin_json="null"
   jq -e --arg ref "v$version" 'type == "object" and (.source | type == "string") and (.repo | type == "string") and .ref == $ref' >/dev/null 2>&1 <<<"$pin_json" \
     || { not_certifiable "trust: the base-commit pin does not name ref v$version for $marketplace_name"; return; }
@@ -897,7 +916,11 @@ check_trust() {
   [ -n "$tag_commit" ] && [ "$tag_commit" = "$commit" ] || { not_certifiable "trust: tag v$version in the marketplace clone does not resolve to the recorded commit"; return; }
 
   git -C "$clone" show "$commit:.claude-plugin/marketplace.json" 2>/dev/null | head -c $((json_size_limit + 1)) >"$temporary_directory/marketplace.json"
-  bounded_json_file "$temporary_directory/marketplace.json" || { not_certifiable "trust: the marketplace manifest at the tag is unreadable or malformed"; return; }
+  read_status=("${PIPESTATUS[@]}")
+  if [ "${read_status[0]}:${read_status[1]}" != 0:0 ] || ! bounded_json_file "$temporary_directory/marketplace.json"; then
+    not_certifiable "trust: the marketplace manifest at the tag is unreadable or malformed"
+    return
+  fi
   plugin_path="$(jq -r --arg p "$plugin_name" '[.plugins[]? | select(.name == $p)] | if length == 1 and (.[0].source | type == "string") then .[0].source else "" end' "$temporary_directory/marketplace.json")"
   plugin_path="${plugin_path#./}"
   plugin_path="${plugin_path%/}"
@@ -924,12 +947,27 @@ check_trust() {
     [ "$file_mode" = "$mode" ] || { not_certifiable "trust: installed file mode differs from the tag: $relative"; return; }
     printf '%s\n' "$relative" >>"$expected"
   done <"$listing"
-  (cd "$install_real" && find . -path ./.in_use -prune -o \( -type f -o -type l -o \! -type d \) -print) | sed 's|^\./||' >"$actual"
-  if [ -n "$(cd "$install_real" && find . -path ./.in_use -prune -o -type l -print)" ]; then
+  # Every listing, filter and sort is checked: a failed find (an unreadable directory) or sort
+  # would otherwise shorten both sides alike and let extra files or links pass.
+  if ! (cd "$install_real" && find . -path ./.in_use -prune -o \( -type f -o -type l -o \! -type d \) -print) >"$temporary_directory/installed-files" \
+    || ! sed 's|^\./||' "$temporary_directory/installed-files" >"$actual"; then
+    not_certifiable "trust: the installed plugin's files cannot be listed"
+    return
+  fi
+  if ! installed_links="$(cd "$install_real" && find . -path ./.in_use -prune -o -type l -print)"; then
+    not_certifiable "trust: the installed plugin's links cannot be listed"
+    return
+  fi
+  if [ -n "$installed_links" ]; then
     not_certifiable "trust: the installed plugin contains a symbolic link"
     return
   fi
-  [ "$(LC_ALL=C sort "$expected")" = "$(LC_ALL=C sort "$actual")" ] || { not_certifiable "trust: the installed plugin has files that are not in the tag"; return; }
+  if ! LC_ALL=C sort "$expected" >"$expected.sorted" || ! LC_ALL=C sort "$actual" >"$actual.sorted" \
+    || [ ! -s "$expected.sorted" ] || [ ! -s "$actual.sorted" ]; then
+    not_certifiable "trust: the installed plugin's file lists cannot be compared"
+    return
+  fi
+  cmp -s "$expected.sorted" "$actual.sorted" || { not_certifiable "trust: the installed plugin has files that are not in the tag"; return; }
   trusted=yes
   trust_summary="$plugin_name $version at ${commit:0:12} (local consistency check)"
 }
@@ -961,10 +999,14 @@ if [ -n "$state_json" ]; then
   fi
 fi
 
-file_identity() { # path: the file's inode number, or "absent"
+file_identity() { # path: the file's inode number, "absent" or "unreadable"
+  local identity
   if [ -e "$1" ] || [ -L "$1" ]; then
     # shellcheck disable=SC2012 # only the inode number of one fixed path is read (portable, unlike stat)
-    ls -di "$1" 2>/dev/null | awk '{print $1}'
+    identity="$(ls -di "$1" 2>/dev/null | awk '{print $1}'; [ "${PIPESTATUS[0]}:${PIPESTATUS[1]}" = 0:0 ])" || identity=""
+    # Anything but a number is "unreadable", which never matches: two failed reads must not
+    # compare as the same file.
+    if [[ $identity =~ ^[0-9]+$ ]]; then printf '%s\n' "$identity"; else echo unreadable; fi
   else
     echo absent
   fi
@@ -998,9 +1040,14 @@ evaluate_guard_log() {
     not_certifiable "guard log: guard-log.jsonl.1 is unreadable or not a regular file"
     return
   fi
-  current_size="$(wc -c <"$current" | tr -d ' ')"
+  current_size="$(byte_count "$current")" || current_size=""
   previous_size=0
-  regular_file "$previous" && previous_size="$(wc -c <"$previous" | tr -d ' ')"
+  if regular_file "$previous"; then previous_size="$(byte_count "$previous")" || previous_size=""; fi
+  if [ -z "$current_size" ] || [ -z "$previous_size" ]; then
+    action_certifiable=no
+    not_certifiable "guard log: the log size cannot be measured"
+    return
+  fi
   if [ "$current_size" -gt $((guard_log_cap * 2 - guard_log_line_margin)) ] || [ "$previous_size" -gt $((guard_log_cap * 2)) ]; then
     action_certifiable=no
     not_certifiable "guard log: the log is near the size at which the guard drops lines"
@@ -1169,11 +1216,14 @@ base_gates_state=missing
 read_gates_at() { # commit output-file: missing | valid | malformed
   if ! controlled_git cat-file -e "$1:.agents/gates.json" 2>/dev/null; then
     echo missing
-  elif controlled_git show "$1:.agents/gates.json" 2>/dev/null | head -c $((json_size_limit + 1)) >"$2" \
-    && bounded_json_file "$2" && jq -e 'type == "object"' "$2" >/dev/null 2>&1; then
-    echo valid
   else
-    echo malformed
+    # git and head are both checked: a failed head leaves a short file that could still parse.
+    controlled_git show "$1:.agents/gates.json" 2>/dev/null | head -c $((json_size_limit + 1)) >"$2"
+    if [ "${PIPESTATUS[0]}:${PIPESTATUS[1]}" = 0:0 ] && bounded_json_file "$2" && jq -e 'type == "object"' "$2" >/dev/null 2>&1; then
+      echo valid
+    else
+      echo malformed
+    fi
   fi
 }
 if [ -n "$base_sha" ]; then
@@ -1301,7 +1351,11 @@ check_changed_binaries() {
   [ -z "$base_gates_json" ] || base_allowlist="$(jq -c '.binaryAssets // []' <<<"$base_gates_json")"
   case "$(read_gates_at "$head_sha" "$temporary_directory/head-gates.json")" in
     valid) head_allowlist="$(jq -c '.binaryAssets // []' "$temporary_directory/head-gates.json")" ;;
-    *) head_allowlist="[]" ;;
+    missing) head_allowlist="[]" ;;
+    *)
+      not_certifiable ".agents/gates.json at HEAD cannot be read or is malformed, so its binaryAssets cannot be compared with the base"
+      return
+      ;;
   esac
   if [ "$base_allowlist" != "$head_allowlist" ]; then
     not_certifiable "this branch changes binaryAssets in .agents/gates.json; the allowlist can change only in a separate owner-reviewed change, never on the branch it would admit"
@@ -1530,9 +1584,15 @@ review_diff_problem() { # clone
   # Every changed path must appear in the reviewer's own default diff (an ignore setting, for
   # example, can hide a submodule bump). Paths hold no newline (checked at HEAD and below).
   child_environment git -C "$clone" diff --name-only -z --no-renames "$base_sha" "$head_sha" -- >"$temporary_directory/review-visible" 2>/dev/null || return 1
-  tr '\0' '\n' <"$changed" | sort -u >"$temporary_directory/review-expected-sorted"
-  tr '\0' '\n' <"$temporary_directory/review-visible" | sort -u >"$temporary_directory/review-visible-sorted"
-  hidden_path="$(comm -23 "$temporary_directory/review-expected-sorted" "$temporary_directory/review-visible-sorted" | head -n 1)"
+  # Each step is checked: a failed tr, sort or comm would empty a list and hide every path.
+  tr '\0' '\n' <"$changed" >"$temporary_directory/review-expected" || return 1
+  tr '\0' '\n' <"$temporary_directory/review-visible" >"$temporary_directory/review-visible-lines" || return 1
+  sort -u "$temporary_directory/review-expected" >"$temporary_directory/review-expected-sorted" || return 1
+  sort -u "$temporary_directory/review-visible-lines" >"$temporary_directory/review-visible-sorted" || return 1
+  if [ -s "$changed" ] && [ ! -s "$temporary_directory/review-expected-sorted" ]; then return 1; fi
+  if [ -s "$temporary_directory/review-visible" ] && [ ! -s "$temporary_directory/review-visible-sorted" ]; then return 1; fi
+  comm -23 "$temporary_directory/review-expected-sorted" "$temporary_directory/review-visible-sorted" >"$temporary_directory/review-hidden" || return 1
+  hidden_path="$(head -n 1 "$temporary_directory/review-hidden")" || return 1
   if [ -n "$hidden_path" ]; then
     printf "changed path %s does not appear in the reviewer's own diff (for example a submodule ignore setting)" "$hidden_path"
     return 0
