@@ -1,4 +1,4 @@
-# Architecture (v0.2)
+# Architecture
 
 The system is a Claude Code plugin, `ai-engineering`, published from this repository's marketplace. It prefers native Claude Code mechanisms over custom orchestration. Decision records: [ADR-0001](decisions/ADR-0001-claude-native-architecture.md) and [ADR-0002](decisions/ADR-0002-gate-execution-trust-boundary.md).
 
@@ -126,7 +126,7 @@ Current guarantee: reviewers have no file-editing tools and are instructed not t
 
   **Base provenance (trust boundary).** The anchor is an `ask` event: it records that the exact start command was asked. It does not show that the owner approved it, that it ran, or that the base is the remote's commit. An agent can plant `origin/<default>` and create the branch with commands the guard does not ask about, even after the owner rejects the start prompt. The ref and the reflog are local records, and remote authenticity is not verified (no `ls-remote`).
   - Owner-approved base provenance is therefore unverified for every increment. The block says `BASE PROVENANCE: UNVERIFIED`, and READY is NO for that reason alone.
-  - No workflow reaches `READY: YES` until a separately approved guard change records approval, execution and the remote's commit (proposed in WORK-003). Every other check still runs and is reported, so a run that passes everything else ends `READY: NO - base provenance is unverified (…)`, exit 1.
+  - No workflow reaches `READY: YES` until a separately approved base-provenance design is implemented. The [proposal](../.agents/specs/active/WORK-003-base-provenance-proposal.md) under design review depends on WORK-004's signed approvals and G1; none is approved or implemented. Every other check still runs and is reported, so a run that passes everything else ends `READY: NO - base provenance is unverified (…)`, exit 1.
 - **Order:** trust, the classifier and the action floor first, then the external review, then the full gate last, then revalidation. When readiness is already `NOT CERTIFIABLE`, neither the external review nor the gate runs (`NOT RUN (not certifiable)`). After the gate readiness checks again, and treats any change as `NOT CERTIFIABLE`:
   - the spec and state;
   - HEAD, the checked-out branch and `origin/<default>`;
@@ -243,7 +243,7 @@ The guard asks on branch switches and merges, and WORK-002 changes no guard. Del
 - Projects register the marketplace at a release tag (`ref: "vX.Y.Z"`) with `autoUpdate: false` (`/setup` writes both). New installs therefore resolve to the tagged release, and nothing updates in the background.
 - Limits: marketplace sources accept a branch or tag `ref` but not a commit SHA, and tags can be moved. A user who already registered the marketplace under the same name keeps their existing registration, because project settings only register unknown marketplaces. Updates are explicit: bump the version, tag the release, and update the project's `ref`.
 
-## Deliberately not used in v0.2
+## Deliberately not used
 
 - Agent Teams (experimental; no resume, one team per session).
 - Executable Claude workflows (no demonstrated need yet; first candidates are parallel implementation and multi-angle review fan-out).

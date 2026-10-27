@@ -129,7 +129,7 @@ Infrastructure apply/destroy, cloud and Kubernetes deletions, SQL `DROP`/`TRUNCA
 
 ### Independent review
 
-The system stays provider-neutral: a project configures any command as `externalReview` in `.agents/gates.json` ([contract](docs/external-review.md)). When none is configured, review reports `EXTERNAL REVIEW: NOT CONFIGURED` and the work isn't marked ready for final acceptance. That doesn't block implementation, local testing, commits or draft pull requests.
+The system stays provider-neutral: a project configures any command as `externalReview` in `.agents/gates.json` ([contract](docs/external-review.md)). When none is configured, review reports `EXTERNAL REVIEW: NOT CONFIGURED` and the work isn't marked ready for final acceptance (in v0.3.0 nothing is marked ready; see the [known limitations](versions/CHANGELOG.md#030)). That doesn't block implementation, local testing, commits or draft pull requests.
 
 ## Engineering standards
 
@@ -212,8 +212,8 @@ Each agent's `model` field is the single source of routing configuration. Model 
 
 ### Prerequisites
 
-- [Claude Code](https://code.claude.com/docs) (v0.2 was developed and tested with v2.1.289)
-- `git`, `bash` and [`jq`](https://jqlang.org/) on the `PATH`; the hooks are bash scripts
+- [Claude Code](https://code.claude.com/docs) (v0.3.0 was developed with v2.1.311; v0.2 with v2.1.289)
+- `git`, `bash` and [`jq`](https://jqlang.org/) on the `PATH`; the hooks are bash scripts. Readiness also needs Git 2.40 or later, with `git` and `jq` in a standard system or Homebrew directory ([readiness requirements](docs/consuming-project.md#readiness-and-the-version-pin))
 - The project you apply it to should be a git repository
 
 ### Install
@@ -224,11 +224,11 @@ Installation has two steps, done once rather than every session.
 2. **Install the plugin.** This fetches the `ai-engineering` plugin from that marketplace and enables it.
 
 ```text
-claude plugin marketplace add asholiver/ai-engineering-system@v0.2.0
+claude plugin marketplace add asholiver/ai-engineering-system@v0.3.0
 claude plugin install ai-engineering@ai-engineering-system
 ```
 
-The example pins `v0.2.0`. Releases are tagged `v<version>` and listed in the [changelog](versions/CHANGELOG.md), so substitute the release you want.
+The example pins `v0.3.0`. Releases are tagged `v<version>` and listed in the [changelog](versions/CHANGELOG.md), so substitute the release you want.
 
 The marketplace registration applies to every project on your machine. The plugin's install scope decides where it is enabled:
 
@@ -269,7 +269,7 @@ After setup, nothing else needs installing: open the project in Claude Code and 
 /ai-engineering:learn              record a learning, regression or incident
 ```
 
-Planning ends with a work specification. You approve it with `/ai-engineering:approve`, then authorise delivery with `/ai-engineering:deliver`; a conversational "yes" never changes a work item's status. The lifecycle is `proposed`, `approved`, `authorised`, `delivering` (or `blocked`, `paused`), `done`, `archived`. Review reports whether an increment is ready for your final acceptance.
+Planning ends with a work specification. You approve it with `/ai-engineering:approve`, then authorise delivery with `/ai-engineering:deliver`; a conversational "yes" never changes a work item's status. The lifecycle is `proposed`, `approved`, `authorised`, `delivering` (or `blocked`, `paused`), `done`, `archived`. Review reports what was checked for an increment; in v0.3.0 it never reports `READY: YES` (see below).
 
 Readiness needs these:
 - the version pin in `.claude/settings.json`;
@@ -278,7 +278,7 @@ Readiness needs these:
 - a `full` gate that installs its own dependencies;
 - a `binaryAssets` list in `.agents/gates.json` for any image or font assets a change touches.
 
-A run can take up to 50 minutes. In v0.3.0 it never reports `READY: YES`: the increment's base can't yet be verified, so the block says `BASE PROVENANCE: UNVERIFIED` and you judge readiness from the rest of it. See [docs/consuming-project.md](docs/consuming-project.md#readiness-and-the-version-pin).
+A run can take up to 50 minutes. In v0.3.0 it never reports `READY: YES`: the increment's base can't yet be verified, so the block says `BASE PROVENANCE: UNVERIFIED` and you judge readiness from the rest of it. Readiness is evaluated only in the repository where the increment was started and delivered; from a fresh clone or CI checkout it is `NOT CERTIFIABLE`. Installing the plugin does not give you a passing certification gate. See [Installing versus certifying](docs/consuming-project.md#installing-versus-certifying) and the [readiness requirements](docs/consuming-project.md#readiness-and-the-version-pin).
 
 What runs without prompts once you authorise delivery: fixes inside the approved intent, commits, pushing the work branch, opening or updating the increment pull request (per the spec's delivery policy), gates, review and moving on to the next increment after you merge. Delivery interrupts you only for an intent or scope change, an owner-level trade-off, accepting or downgrading risk, a reserved operation, or an ambiguity. Starting each increment from the updated default branch asks one guard confirmation, and that confirmation pre-authorises nothing else. Every deploy, merge, release, publish, protected push and other reserved operation still asks, whatever the work item's state says. You merge; delivery never does.
 
@@ -311,6 +311,8 @@ Work on the system itself is governed by an installed, released version, not by 
 **v0.1** established the reference architecture: principles, responsibilities, guardrails, workflows, knowledge model and model-routing approach.
 
 **v0.2** implements the Claude Code integration as a plugin, released as `v0.2.0`. Each release is tagged `v<version>`; the [changelog](versions/CHANGELOG.md) records what it contains, and known limitations and open items are listed in the [architecture document](docs/architecture.md).
+
+**v0.3** adds the structured action guard, the work-item lifecycle with interim owner commands, and deterministic readiness with risk tiers, released as `v0.3.0`. Readiness is fail-closed and never reports `READY: YES` in this release; see the [known limitations](versions/CHANGELOG.md#030).
 
 ## Repository structure
 
