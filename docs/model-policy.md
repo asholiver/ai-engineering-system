@@ -13,7 +13,7 @@ The `model` (and optional `effort`) field in each agent's frontmatter under `plu
 Model choice depends on task complexity, ambiguity, risk and expected cost per successful task, not agent seniority.
 
 ## Retries and escalation
-- Implementation agents get at most 2 fix rounds when the fast gate fails: sent back by `/ai-engineering:deliver`, or, with `AI_ENGINEERING_HOOK_GATES=1`, enforced by `gate-fast.sh`, which then has the agent report `GATE FAILED`.
+- Implementation agents get at most 2 fix rounds when the fast gate fails: sent back by `/ai-engineering:deliver`.
 - `/ai-engineering:deliver` may retry once on the reasoning tier (`model: "opus"` on the call), then escalates to the human.
 - A stalled or failed specialist is re-dispatched once with a fresh brief and the recovery is recorded in work-item state; a second failure escalates. Provider errors are left to the harness's own retries. External waits are bounded (timeout, backoff); see [architecture](architecture.md#work-items-state-and-authority).
 

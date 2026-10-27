@@ -1,6 +1,8 @@
 # ADR-0002: Gate execution trust boundary
 ## Status
 Accepted. Amends the automatic fast gate in [ADR-0001](ADR-0001-claude-native-architecture.md).
+
+v0.3.0 removes the `gate-fast.sh` opt-in (`AI_ENGINEERING_HOOK_GATES`) and the working-tree gate fallback ([ADR-0005](ADR-0005-risk-tiered-assurance-and-gate-trust.md)). The decision below is kept as history.
 ## Context
 An independent security review of v0.2 reported that quality gates run project-defined commands with `bash -c` and can therefore execute arbitrary code from an untrusted change. Verification confirmed two issues and showed the reported framing was too narrow: a trusted command such as `npm test` executes whatever the checkout contains (package scripts, tests, test configuration), so protecting the gate configuration does not protect the host.
 
