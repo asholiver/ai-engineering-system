@@ -2875,6 +2875,39 @@ else
   if [ -e "$uncommitted_marker" ]; then fail "fallback removed: a gates file outside Git ran"; else pass; fi
 fi
 
+# Right after setup: a repository with no commit at all (unborn HEAD).
+unborn_repository="$work_directory/unborn-gates"
+mkdir -p "$unborn_repository/.agents"
+git -C "$unborn_repository" init -q -b main
+printf '%s\n' "$uncommitted_gates" >"$unborn_repository/.agents/gates.json"
+if ! git -C "$unborn_repository" rev-parse --git-dir >/dev/null 2>&1; then
+  fail "fallback removed: the unborn-HEAD fixture is not a repository"
+elif git -C "$unborn_repository" rev-parse --verify --quiet HEAD >/dev/null; then
+  fail "fallback removed: the unborn-HEAD fixture has a commit"
+else
+  output="$("$scripts/run-gate.sh" fast "$unborn_repository")"; exit_code=$?
+  expect_equal "fallback removed: an unborn HEAD is not configured" 3 "$exit_code"
+  expect_contains "fallback removed: an unborn HEAD asks for a commit" "NOTE: .agents/gates.json is not committed at HEAD" "$output"
+  if [ -e "$uncommitted_marker" ]; then fail "fallback removed: a gates file with an unborn HEAD ran"; else pass; fi
+fi
+
+# A linked worktree whose branch has no committed gates file.
+linked_worktree="$work_directory/uncommitted-gates-worktree"
+if ! git -C "$uncommitted_repository" worktree add -q "$linked_worktree" -b uncommitted-gates-branch; then
+  fail "fallback removed: the linked worktree fixture could not be created"
+elif [ "$(cd "$linked_worktree" && cd "$(git rev-parse --git-dir)" && pwd -P)" = "$(cd "$linked_worktree" && cd "$(git rev-parse --git-common-dir)" && pwd -P)" ]; then
+  fail "fallback removed: the fixture is not a linked worktree"
+elif git -C "$linked_worktree" cat-file -e HEAD:.agents/gates.json 2>/dev/null; then
+  fail "fallback removed: the linked worktree fixture has a committed gates file"
+else
+  mkdir -p "$linked_worktree/.agents"
+  printf '%s\n' "$uncommitted_gates" >"$linked_worktree/.agents/gates.json"
+  output="$("$scripts/run-gate.sh" fast "$linked_worktree")"; exit_code=$?
+  expect_equal "fallback removed: a linked worktree's uncommitted gates file is not configured" 3 "$exit_code"
+  expect_contains "fallback removed: linked worktree verdict" "GATE fast: NOT CONFIGURED" "$output"
+  if [ -e "$uncommitted_marker" ]; then fail "fallback removed: a linked worktree's uncommitted gates file ran"; else pass; fi
+fi
+
 jq '.fast = "true"' "$gate_repository/.agents/gates.json" >"$work_directory/tampered.json"
 cp "$work_directory/tampered.json" "$gate_repository/.agents/gates.json"
 output="$("$scripts/run-gate.sh" fast "$gate_repository")"; exit_code=$?
@@ -3007,8 +3040,13 @@ expect_equal "removals: hooks.json keeps SessionStart and PreToolUse, in order" 
 expect_equal "removals: the remaining hook commands are unchanged" \
   'startup|resume|clear|compact "${CLAUDE_PLUGIN_ROOT}/scripts/inject-standards.sh",Bash "${CLAUDE_PLUGIN_ROOT}/scripts/guard-bash.sh",Write|Edit|NotebookEdit "${CLAUDE_PLUGIN_ROOT}/scripts/guard-writes.sh"' \
   "$(jq -r '[.hooks[][] | "\(.matcher) \(.hooks | map(.command) | join(" "))"] | join(",")' "$hooks_file")"
-leftover_references="$(grep -rlE 'AI_ENGINEERING_HOOK_GATES|gate-fast|GATE FAILED' "$repository_directory/plugins" "$repository_directory/scripts" \
-  "$repository_directory/README.md" "$repository_directory/CONTRIBUTING.md" "$repository_directory"/docs/*.md 2>/dev/null)"
+reference_paths=("$repository_directory/plugins" "$repository_directory/scripts" "$repository_directory/README.md" \
+  "$repository_directory/CONTRIBUTING.md" "$repository_directory"/docs/*.md) # an unmatched glob stays literal and fails below
+for reference_path in "${reference_paths[@]}"; do
+  if [ -e "$reference_path" ]; then pass; else fail "removals: search path $reference_path is missing"; fi
+done
+leftover_references="$(grep -rlE 'AI_ENGINEERING_HOOK_GATES|gate-fast|GATE FAILED' "${reference_paths[@]}")"; grep_status=$?
+expect_equal "removals: the reference search ran and found nothing (grep status 1)" 1 "$grep_status"
 expect_equal "removals: no hook-gate references outside the ADR history" "" "$leftover_references"
 
 # run-gate finds the repository root of a linked worktree from a subdirectory (the case the

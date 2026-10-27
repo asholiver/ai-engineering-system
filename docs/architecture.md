@@ -112,7 +112,7 @@ Current guarantee: reviewers have no file-editing tools and are instructed not t
 { "fast": "...", "full": "...", "externalReview": null }
 ```
 
-`scripts/run-gate.sh <name> [directory] [config-ref]` runs a gate in the repository root and prints `GATE <name>: PASSED | FAILED | NOT CONFIGURED | REFUSED`. Unconfigured gates are never reported as passed. Without a config ref the command is read at `HEAD`, falling back to the uncommitted file with a `NOTE` when none is committed (implementation checks). Readiness (below) passes the increment's recorded base commit, and only that commit is read (certification).
+`scripts/run-gate.sh <name> [directory] [config-ref]` runs a gate in the repository root and prints `GATE <name>: PASSED | FAILED | NOT CONFIGURED | REFUSED`. Unconfigured gates are never reported as passed. Without a config ref only the file committed at `HEAD` is read (implementation checks); if none is committed the gate is `NOT CONFIGURED`, and a `NOTE` asks for any uncommitted file to be committed. Readiness (below) passes the increment's recorded base commit, and only that commit is read (certification).
 
 ### Readiness (WORK-003 C2)
 
