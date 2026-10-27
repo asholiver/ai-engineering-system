@@ -323,7 +323,7 @@ Deterministic cases in `tests/run.sh`:
 - **Readiness matrix:** each tier's requirements, plus the bootstrap case.
 - **Historical evidence** doesn't satisfy a new increment.
 - **Metrics report** on a fixture state, gate ledger and guard log produces the expected numbers.
-- **Removals:** no `SubagentStop` hook; `gate-fast.sh` absent; `AI_ENGINEERING_HOOK_GATES` absent from the repository.
+- **Removals:** no `SubagentStop` hook; `gate-fast.sh` absent; `AI_ENGINEERING_HOOK_GATES` absent from `plugins/`, `scripts/`, `README.md`, `CONTRIBUTING.md` and `docs/*.md` (amended 2026-10-27; ADR, CHANGELOG, spec and log history is kept).
 - **`check.sh`:** a fixture README referencing an unknown version fails the consistency check.
 
 End-to-end scenario in a scratch project (self-development protocol, evidence in `WORK-003.log.md`):

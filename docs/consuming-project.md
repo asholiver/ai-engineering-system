@@ -53,6 +53,12 @@ v0.2 specs have no state file. Run `/ai-engineering:setup` and use its import st
 ## Parallel worktrees
 `/setup` writes `"worktree": {"baseRef": "head"}` by default and tells you the effect: your own `claude --worktree` sessions then branch from the current HEAD instead of the remote default branch. To opt out, delete the `worktree` key from `.claude/settings.json`. `/ai-engineering:deliver` runs tasks sequentially in one checkout by default; parallel worktrees are opt-in per delivery and need this setting, because Claude Code's default worktree base would not contain the work branch.
 
+## Installing versus certifying
+Installing the plugin and running `/ai-engineering:setup` gives a project the standards, specialist agents, lifecycle commands and command guards. Using readiness as a certification gate is a separate matter, and in v0.3.0 it is not available:
+- Readiness never reports `READY: YES` (see below). Treat the `READINESS` block as a structured report: `NOT CERTIFIABLE` reasons and failed checks are real problems to fix, but a run without them still ends `READY: NO`.
+- Readiness is evaluated in the repository where the increment was started and delivered. It needs that repository's increment-branch reflog and local guard log, so run from a fresh clone or a CI checkout it is `NOT CERTIFIABLE`. Don't make it a CI merge check. (Readiness itself runs the gate and the external review in temporary fresh clones of `HEAD`; that is a different thing.)
+- Your own CI checks, your review and your merge remain the controls that decide whether a change ships.
+
 ## Readiness and the version pin
 Readiness (`/ai-engineering:review`, and the end of each delivered increment) is certifiable only when all of these hold:
 - the session runs the plugin install that Claude Code records for the project;
@@ -63,7 +69,7 @@ Without a pin, from a `--plugin-dir` checkout, or with any mismatch, readiness r
 
 It also reads the guard log under the Git directory, so each increment must start with the exact command `/ai-engineering:deliver` uses: `git switch -c <work-branch> <commit>`, naming the full `origin/<default>` commit. The base is recorded when the increment starts and never changes. An increment that became active before v0.3.0 has no recorded base and is `NOT CERTIFIABLE`; start a new increment.
 
-**`READY: YES` is not reachable in v0.3.0.** The guard log records only that the start command was asked, not that you approved it or that it ran, and readiness doesn't contact the remote. So readiness can't verify where the base came from: the block says `BASE PROVENANCE: UNVERIFIED`, and READY is NO for that reason. Every other check still runs and is reported. A separate guard change, not yet approved, would close this.
+**`READY: YES` is not reachable in v0.3.0.** The guard log records only that the start command was asked, not that you approved it or that it ran, and readiness doesn't contact the remote. So readiness can't verify where the base came from: the block says `BASE PROVENANCE: UNVERIFIED`, and READY is NO for that reason. Every other check still runs and is reported. Closing this needs a separately approved base-provenance design. One [proposal](../.agents/specs/active/WORK-003-base-provenance-proposal.md), an owner-signed increment-start approval that depends on WORK-004's signed approvals and G1, is under design review; none is approved or implemented.
 
 Practical requirements and limits:
 - **Tools.** Readiness finds `jq` and `git` only in `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`, `/bin`, `/usr/sbin`, `/sbin` or `/home/linuxbrew/.linuxbrew/bin`, never through your `PATH`, and needs Git 2.40 or later. Otherwise it exits 2 with no block. Your gate and reviewer commands still run with your `PATH`.

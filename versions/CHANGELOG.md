@@ -1,7 +1,14 @@
 # Changelog
 
 ## 0.3.0
-Unreleased; shared by WORK-001, WORK-002 and WORK-003.
+Shared by WORK-001, WORK-002 and WORK-003 (pull requests #2 to #14, merged after `v0.2.0`).
+
+**Known limitations. Read these before upgrading.**
+- **Readiness never certifies in v0.3.0.** Every run that prints a `READINESS` block reports `BASE PROVENANCE: UNVERIFIED` and ends `READY: NO`, at every tier. Closing this needs a separately approved base-provenance design: one proposal, an owner-signed increment-start approval that depends on WORK-004's signed approvals and G1, is under design review, and none is approved or implemented. Treat the `READINESS` block as a report of what was checked, not as a pass.
+- **Readiness is evaluated only in the repository where the increment was started and delivered.** It needs that repository's increment-branch reflog and local guard log, so run from a fresh clone or a CI checkout it is `NOT CERTIFIABLE`.
+- **No external reviewer is configured by default.** At tiers 1 and 2 `NOT CONFIGURED` is `READY: NO`. Internal security and QA reviews never count as external review.
+- The owner commands (`/ai-engineering:approve`, `/ai-engineering:deliver`) are workflow records, not security authority.
+- Installing the plugin gives a project the standards, agents, lifecycle commands and guards. It does not give it a passing certification gate; see [Installing versus certifying](../docs/consuming-project.md#installing-versus-certifying).
 
 Guard v2: structured action classification (WORK-001, ADR-0003).
 - The Bash guard parses commands and classifies executed actions instead of matching text, so keywords in heredocs, string arguments, search patterns and read-only HTTP GETs no longer ask. Shell `-c`/`eval`/`ssh` text and SQL-client input are still classified.
@@ -33,7 +40,7 @@ Readiness (WORK-003 C2, ADR-0005).
   - It runs the full gate itself in a fresh local clone at HEAD, with configuration from the increment's recorded base, and runs the external review.
 - **Behaviour change:** an increment starts with `git switch -c <work-branch> <commit>`, naming the full `origin/<default>` commit, so its start record names the base.
   - The guard log records only that the command was asked, not that it was approved or ran, and the base is not authenticated against the remote.
-  - **Behaviour change:** readiness therefore reports `BASE PROVENANCE: UNVERIFIED` and never `READY: YES` in v0.3.0. A run that passes everything else ends `READY: NO` for that reason alone (exit 1). A separate guard change, not yet approved, would close this.
+  - **Behaviour change:** readiness therefore reports `BASE PROVENANCE: UNVERIFIED` and never `READY: YES` in v0.3.0. A run that passes everything else ends `READY: NO` for that reason alone (exit 1). Closing it needs a separately approved base-provenance design; none is approved or implemented.
   - `workstate.sh increment-set --status active` (planned to active) requires that full commit as `--base-sha`, checks it against `origin/<default>` at that moment, and never records a base later or changes it.
   - A default-branch ref that moves afterwards is `NOT CERTIFIABLE`; a newer ref is never accepted automatically.
 - **Behaviour change:** the external review and the gate each run in their own fresh clone of HEAD, review first. Every inherited `GIT_*` variable is removed.
@@ -62,8 +69,18 @@ Readiness (WORK-003 C2, ADR-0005).
 - The change classifier makes files named by hook commands in the base `.claude/settings.json` tier 2.
 - `workstate.sh` schema validation now fails closed if the validator itself cannot run, and a state rule that cannot be evaluated stops the command instead of reading as false. Worktree branch names that look like refs (`HEAD`, `origin/…`, `refs/…`) are refused.
 
+Removals (WORK-003 item 16, ADR-0005).
+- **Behaviour change:** the opt-in hook-run fast gate is removed: the `SubagentStop` hook, `scripts/gate-fast.sh` and `AI_ENGINEERING_HOOK_GATES`. Setting the variable has no effect. `/ai-engineering:deliver` still runs the fast gate through the Bash tool after each task, with at most 2 fix rounds. Leftover `gate-attempts/` counters in the plugin data directory are no longer used.
+- **Behaviour change:** gate configuration is read only from `.agents/gates.json` as committed. An uncommitted-only file, including one in `CLAUDE_PROJECT_DIR` or outside Git, gives `GATE <name>: NOT CONFIGURED` (exit 3) with a `NOTE` until it is committed, and is never run. Commit the file `/ai-engineering:setup` creates before relying on gates.
+
 Security reviewer execution limits.
 - `security-reviewer` follows default execution limits: one simple command per Bash call, bounded inputs (no stress or oversized runs), probes only in an isolated scratch directory, no deletes, no running base or known-vulnerable versions without explicit authorisation, and no retrying a declined command in another form. `/ai-engineering:review` briefs the reviewer with them; exceptions need the owner's authorisation. These are procedural instructions, not a sandbox; the guard and hooks are unchanged.
+
+Upgrading from 0.2.0.
+- Change the marketplace `ref` in `.claude/settings.json` to `v0.3.0` and commit it to the default branch before starting an increment (readiness reads the pin at the increment's base). Then update the plugin and check the session banner ([Updating](../docs/consuming-project.md#updating)).
+- Import v0.2 work items with `/ai-engineering:setup`. v0.2 delivery authority is never imported.
+- Increments that became active before upgrading have no recorded base and are `NOT CERTIFIABLE`; start a new increment.
+- Commit `.agents/gates.json`. Delivery needs `gh auth login`. Readiness needs Git 2.40 or later and `jq`, both in a standard system or Homebrew directory, `origin/HEAD` and a `full` gate that installs its own dependencies ([readiness requirements](../docs/consuming-project.md#readiness-and-the-version-pin)).
 
 ## 0.2.0
 Claude Code native architecture (ADR-0001).
