@@ -7,39 +7,30 @@ repository_root() {
   git -C "$directory" rev-parse --show-toplevel 2>/dev/null || (cd "$directory" 2>/dev/null && pwd -P)
 }
 
-# Loads .agents/gates.json for the repository containing a directory into gates_json and
-# describes where it came from in gates_source; gates_note carries any warning.
+# Loads .agents/gates.json for the repository containing a directory into gates_json;
+# gates_note carries any warning.
 #
-# The committed version at the given ref (default HEAD) is preferred, so an agent cannot
+# Only the committed version at the given ref (default HEAD) is read, so an agent cannot
 # change the commands that check its own work by editing the file in the working tree.
-# When allow_working_tree is "yes" and nothing is committed (for example right after
-# setup, or outside git), the working-tree file is used and flagged as uncommitted.
+# When nothing is committed (for example right after setup, or outside git), no gates are
+# loaded; an uncommitted working-tree file is never read and only produces a hint.
 load_gates() {
-  local directory="${1:-$PWD}" ref="${2:-HEAD}" allow_working_tree="${3:-yes}"
-  local root candidate
-  gates_json="" gates_source="" gates_note=""
+  local directory="${1:-$PWD}" ref="${2:-HEAD}"
+  local root
+  gates_json="" gates_note=""
   root="$(repository_root "$directory")"
 
   if [ -n "$root" ] && gates_json="$(git -C "$root" show "$ref:.agents/gates.json" 2>/dev/null)"; then
-    gates_source="committed at $ref"
     if [ -f "$root/.agents/gates.json" ] && ! git -C "$root" diff --quiet "$ref" -- .agents/gates.json 2>/dev/null; then
       gates_note="uncommitted changes to .agents/gates.json were ignored"
     fi
     return 0
   fi
   gates_json=""
-  [ "$allow_working_tree" = "yes" ] || return 0
-
-  for candidate in "$root" "${CLAUDE_PROJECT_DIR:-}"; do
-    if [ -n "$candidate" ] && [ -f "$candidate/.agents/gates.json" ]; then
-      gates_json="$(cat "$candidate/.agents/gates.json")"
-      # shellcheck disable=SC2034 # an output of this function, read by the scripts that source lib.sh
-      gates_source="uncommitted working-tree file"
-      # shellcheck disable=SC2034 # an output, read by run-gate.sh
-      gates_note="using uncommitted .agents/gates.json; commit it so agents cannot alter their own gates"
-      return 0
-    fi
-  done
+  if [ -n "$root" ] && [ -f "$root/.agents/gates.json" ]; then
+    # shellcheck disable=SC2034 # an output, read by run-gate.sh
+    gates_note=".agents/gates.json is not committed at $ref and was not used; commit it to configure gates"
+  fi
 }
 
 # Prints the command configured under a key in the loaded gates_json, or nothing when unset/null.
@@ -50,10 +41,10 @@ read_gate_command() {
 
 # Succeeds when the approval guard classifies a command as a high-impact operation.
 # Configured commands are not individually checked by Claude Code's permission rules:
-# the opt-in hook-run fast gate runs outside them, and gates or external review invoked
-# through the Bash tool are checked only as the outer script call. Either way they run
-# with the user's privileges and credentials and are not an isolation boundary, so they
-# must never perform operations that would otherwise need human approval.
+# gates or external review invoked through the Bash tool are checked only as the outer
+# script call. They run with the user's privileges and credentials and are not an
+# isolation boundary, so they must never perform operations that would otherwise need
+# human approval.
 #
 # classify_command_impact <command> [directory] is the single classification interface.
 # It sets impact_decision (none | ask | deny | unknown) and impact_classes (comma separated,

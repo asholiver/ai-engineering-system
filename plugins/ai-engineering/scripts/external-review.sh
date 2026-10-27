@@ -19,9 +19,9 @@ require_jq || exit 4
 
 base_ref="$1"
 repository_directory="$(repository_root "$PWD")"
-load_gates "$PWD" HEAD no
+load_gates "$PWD" HEAD
 head_review_command="$(read_gate_command externalReview)"
-load_gates "$PWD" "$base_ref" no
+load_gates "$PWD" "$base_ref"
 review_command="$(read_gate_command externalReview)"
 
 if [ -z "$review_command" ]; then

@@ -117,7 +117,7 @@ Important checks are enforced by plugin hooks rather than left to instructions:
 
 Each implementation agent's work is checked by the project's fast quality gate when it finishes, with a bounded number of fix rounds before escalation. The delivery workflow runs the gate through Claude Code's Bash tool, so your permission rules and sandbox still apply, and a script reports the verdict.
 
-Implementation checks read gate commands from the committed project configuration, falling back to the uncommitted file, with a warning, only while none is committed. During review, the full gate and the external reviewer come from the base branch, so a change can't define the checks that certify it.
+Implementation checks read gate commands only from the committed project configuration; an uncommitted file is reported, never run. During review, the full gate and the external reviewer come from the base branch, so a change can't define the checks that certify it.
 
 **The plugin is not an isolation boundary.** Running a gate, test or build executes the project's code with your privileges, so a harmless-looking `npm test` runs whatever an untrusted change contains. Run untrusted code only in an isolated environment with scoped or no credentials and appropriate network controls. [The architecture document](docs/architecture.md#trust-boundary-for-project-code) sets out the trust boundary.
 
@@ -255,7 +255,7 @@ It never overwrites existing files without showing you the change first, and it 
 - `.claude/settings.json` entries that enable the plugin for everyone who clones the project once they trust the folder, and register the marketplace pinned to the installed plugin's release tag, with auto-update off, on machines that don't already have a marketplace named `ai-engineering-system`. A machine that already has one keeps its existing registration, which may point at a different release; check with `/plugin`;
 - the `worktree.baseRef: "head"` setting (with the documented opt-out, see [consuming-project.md](docs/consuming-project.md#parallel-worktrees)).
 
-Review and commit what it creates. Until `.agents/gates.json` is committed, implementation checks use the uncommitted file with a warning, and review reads the full gate and the external review command only from the base branch.
+Review and commit what it creates. Until `.agents/gates.json` is committed, gates are `NOT CONFIGURED`, and review reads the full gate and the external review command only from the base branch.
 
 After setup, nothing else needs installing: open the project in Claude Code and use the `/ai-engineering:*` commands below.
 

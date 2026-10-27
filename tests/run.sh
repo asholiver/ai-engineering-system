@@ -8,7 +8,6 @@ work_directory="$(mktemp -d "${TMPDIR:-/tmp}/ai-engineering-tests.XXXXXX")"
 trap 'rm -rf "$work_directory"' EXIT
 export CLAUDE_PLUGIN_DATA="$work_directory/plugin-data"
 export CLAUDE_PROJECT_DIR="$work_directory/no-project"
-unset AI_ENGINEERING_HOOK_GATES
 # Hermetic Git: no inherited variable redirects or reshapes Git, and the user-level
 # configuration is a fixture (HOME and XDG_CONFIG_HOME), so a developer's own settings cannot
 # change results. GIT_CONFIG_GLOBAL and GIT_CONFIG_NOSYSTEM are not used: the guard under test
@@ -2835,10 +2834,46 @@ cat >"$gate_repository/.agents/gates.json" <<'JSON'
 JSON
 
 output="$("$scripts/run-gate.sh" fast "$gate_repository")"; exit_code=$?
+expect_equal "run-gate: an uncommitted-only gates file is not configured" 3 "$exit_code"
+expect_contains "run-gate: uncommitted-only verdict" "GATE fast: NOT CONFIGURED" "$output"
+expect_contains "run-gate: uncommitted-only gates file asks for a commit" "NOTE: .agents/gates.json is not committed at HEAD and was not used" "$output"
+commit_all "$gate_repository" gates
+
+output="$("$scripts/run-gate.sh" fast "$gate_repository")"; exit_code=$?
 expect_equal "run-gate: failing gate exit code" 1 "$exit_code"
 expect_contains "run-gate: failing verdict" "GATE fast: FAILED (exit 1)" "$output"
-expect_contains "run-gate: uncommitted gates are flagged" "using uncommitted .agents/gates.json" "$output"
-commit_all "$gate_repository" gates
+
+# The working-tree fallback is removed (WORK-003 item 16): an uncommitted gates file is never
+# run, whether it is in the repository, in CLAUDE_PROJECT_DIR or in a directory outside Git.
+uncommitted_marker="$work_directory/uncommitted-gate-ran"
+uncommitted_gates="{ \"fast\": \"touch '$uncommitted_marker'\" }"
+uncommitted_repository="$(new_repository uncommitted-gates main)"
+mkdir -p "$uncommitted_repository/.agents"
+printf '%s\n' "$uncommitted_gates" >"$uncommitted_repository/.agents/gates.json"
+output="$("$scripts/run-gate.sh" fast "$uncommitted_repository")"; exit_code=$?
+expect_equal "fallback removed: an uncommitted repository gates file is not configured" 3 "$exit_code"
+if [ -e "$uncommitted_marker" ]; then fail "fallback removed: an uncommitted repository gates file ran"; else pass; fi
+
+project_directory="$work_directory/project-directory-gates"
+mkdir -p "$project_directory/.agents"
+printf '%s\n' "$uncommitted_gates" >"$project_directory/.agents/gates.json"
+no_gates_repository="$(new_repository no-gates main)"
+output="$(CLAUDE_PROJECT_DIR="$project_directory" "$scripts/run-gate.sh" fast "$no_gates_repository")"; exit_code=$?
+expect_equal "fallback removed: CLAUDE_PROJECT_DIR gates are not configured" 3 "$exit_code"
+expect_contains "fallback removed: CLAUDE_PROJECT_DIR verdict" "GATE fast: NOT CONFIGURED" "$output"
+if [ -e "$uncommitted_marker" ]; then fail "fallback removed: a CLAUDE_PROJECT_DIR gates file ran"; else pass; fi
+
+outside_directory="$work_directory/outside-git"
+mkdir -p "$outside_directory/.agents"
+printf '%s\n' "$uncommitted_gates" >"$outside_directory/.agents/gates.json"
+if git -C "$outside_directory" rev-parse --git-dir >/dev/null 2>&1; then
+  fail "fallback removed: the outside-Git fixture is inside a Git repository"
+else
+  output="$("$scripts/run-gate.sh" fast "$outside_directory")"; exit_code=$?
+  expect_equal "fallback removed: gates outside Git are not configured" 3 "$exit_code"
+  expect_contains "fallback removed: gates outside Git ask for a commit" "NOTE: .agents/gates.json is not committed" "$output"
+  if [ -e "$uncommitted_marker" ]; then fail "fallback removed: a gates file outside Git ran"; else pass; fi
+fi
 
 jq '.fast = "true"' "$gate_repository/.agents/gates.json" >"$work_directory/tampered.json"
 cp "$work_directory/tampered.json" "$gate_repository/.agents/gates.json"
@@ -2862,6 +2897,7 @@ rm "$gate_repository/pass-marker"
 risky_repository="$(new_repository risky-repo feature)"
 mkdir -p "$risky_repository/.agents"
 printf '%s\n' '{ "fast": "npm test && terraform apply -auto-approve" }' >"$risky_repository/.agents/gates.json"
+commit_all "$risky_repository" "risky gate"
 output="$("$scripts/run-gate.sh" fast "$risky_repository")"; exit_code=$?
 expect_equal "run-gate: high-impact gate command is refused" 5 "$exit_code"
 expect_contains "run-gate: refusal verdict" "GATE fast: REFUSED" "$output"
@@ -2910,6 +2946,7 @@ for gate_case in \
   "deny|touch $gate_marker; git push --force origin feature"; do
   expected_decision="${gate_case%%|*}"
   jq -n --arg command "${gate_case#*|}" '{fast: $command}' >"$risky_repository/.agents/gates.json"
+  commit_all "$risky_repository" "$expected_decision gate"
   rm -f "$gate_marker"
   output="$("$scripts/run-gate.sh" fast "$risky_repository")"; exit_code=$?
   expect_equal "run-gate: $expected_decision-class gate is refused" 5 "$exit_code"
@@ -2917,11 +2954,11 @@ for gate_case in \
   if [ -e "$gate_marker" ]; then fail "run-gate: refused $expected_decision gate still executed part of its command"; else pass; fi
 done
 jq -n --arg command "touch $gate_marker" '{fast: $command}' >"$risky_repository/.agents/gates.json"
+commit_all "$risky_repository" "safe gate"
 output="$("$scripts/run-gate.sh" fast "$risky_repository")"; exit_code=$?
 expect_equal "run-gate: safe gate still runs" 0 "$exit_code"
 if [ -e "$gate_marker" ]; then pass; else fail "run-gate: safe gate did not run"; fi
 rm -f "$gate_marker"
-printf '%s\n' '{ "fast": "npm test && terraform apply -auto-approve" }' >"$risky_repository/.agents/gates.json"
 
 # Regression (F2): with a trusted config ref, a committed change cannot define the gate
 # that certifies it, and any change to that gate is surfaced in the verdict line.
@@ -2961,69 +2998,28 @@ expect_equal "run-gate: uncommitted gate never stands in for the config ref" 3 "
 output="$("$scripts/run-gate.sh" full "$certify_repository" no-such-ref)"; exit_code=$?
 expect_equal "run-gate: unknown config ref is an error" 4 "$exit_code"
 
-# ---------------------------------------------------------------- gate-fast (SubagentStop)
-stop_input() { jq -n --arg id "$1" --arg cwd "$2" '{hook_event_name: "SubagentStop", agent_id: $id, agent_type: "ai-engineering:backend", cwd: $cwd}'; }
-run_stop_hook() { stop_input "$1" "$2" | AI_ENGINEERING_HOOK_GATES=1 "$scripts/gate-fast.sh" 2>"$work_directory/stderr"; }
+# ---------------------------------------------------------------- removed hook gate (WORK-003 item 16)
+if [ -e "$scripts/gate-fast.sh" ]; then fail "removals: gate-fast.sh still exists"; else pass; fi
+hooks_file="$repository_directory/plugins/ai-engineering/hooks/hooks.json"
+expect_equal "removals: hooks.json has no SubagentStop hook" false "$(jq '.hooks | has("SubagentStop")' "$hooks_file")"
+expect_equal "removals: hooks.json keeps SessionStart and PreToolUse, in order" "SessionStart,PreToolUse" "$(jq -r '.hooks | keys_unsorted | join(",")' "$hooks_file")"
+# shellcheck disable=SC2016 # `${CLAUDE_PLUGIN_ROOT}` is literal hooks.json text, not this script's
+expect_equal "removals: the remaining hook commands are unchanged" \
+  'startup|resume|clear|compact "${CLAUDE_PLUGIN_ROOT}/scripts/inject-standards.sh",Bash "${CLAUDE_PLUGIN_ROOT}/scripts/guard-bash.sh",Write|Edit|NotebookEdit "${CLAUDE_PLUGIN_ROOT}/scripts/guard-writes.sh"' \
+  "$(jq -r '[.hooks[][] | "\(.matcher) \(.hooks | map(.command) | join(" "))"] | join(",")' "$hooks_file")"
+leftover_references="$(grep -rlE 'AI_ENGINEERING_HOOK_GATES|gate-fast|GATE FAILED' "$repository_directory/plugins" "$repository_directory/scripts" \
+  "$repository_directory/README.md" "$repository_directory/CONTRIBUTING.md" "$repository_directory"/docs/*.md 2>/dev/null)"
+expect_equal "removals: no hook-gate references outside the ADR history" "" "$leftover_references"
 
-# Regression (F1): by default the hook never executes project code. Reproduces the
-# reported path: a trusted committed gate command runs a script the agent edited.
-hook_repository="$(new_repository hook-repo main)"
-mkdir -p "$hook_repository/.agents" "$hook_repository/scripts"
-printf '%s\n' '{ "fast": "bash scripts/test.sh" }' >"$hook_repository/.agents/gates.json"
-printf '%s\n' 'exit 0' >"$hook_repository/scripts/test.sh"
-commit_all "$hook_repository" "trusted gate"
-printf 'touch "%s"\nexit 1\n' "$work_directory/hook-executed" >"$hook_repository/scripts/test.sh"
-for opt_in_value in unset 0 true yes; do
-  if [ "$opt_in_value" = unset ]; then
-    stdout="$(stop_input agent-g "$hook_repository" | "$scripts/gate-fast.sh" 2>"$work_directory/stderr")"; exit_code=$?
-  else
-    stdout="$(stop_input agent-g "$hook_repository" | AI_ENGINEERING_HOOK_GATES="$opt_in_value" "$scripts/gate-fast.sh" 2>"$work_directory/stderr")"; exit_code=$?
-  fi
-  expect_equal "gate-fast: AI_ENGINEERING_HOOK_GATES=$opt_in_value lets the agent stop" 0 "$exit_code"
-  expect_equal "gate-fast: AI_ENGINEERING_HOOK_GATES=$opt_in_value is silent" "" "$stdout$(cat "$work_directory/stderr")"
-  if [ -e "$work_directory/hook-executed" ]; then fail "gate-fast: AI_ENGINEERING_HOOK_GATES=$opt_in_value executed project code"; else pass; fi
-done
-run_stop_hook agent-g "$hook_repository" >/dev/null; exit_code=$?
-expect_equal "gate-fast: explicit opt-in runs the gate" 2 "$exit_code"
-if [ -e "$work_directory/hook-executed" ]; then pass; else fail "gate-fast: explicit opt-in did not run the gate"; fi
-
-stdout="$(run_stop_hook agent-a "$gate_repository")"; exit_code=$?
-expect_equal "gate-fast: first failure blocks" 2 "$exit_code"
-expect_contains "gate-fast: first failure message" "fix attempt 1 of 2" "$(cat "$work_directory/stderr")"
-run_stop_hook agent-a "$gate_repository" >/dev/null; exit_code=$?
-expect_equal "gate-fast: second failure blocks" 2 "$exit_code"
-expect_contains "gate-fast: second failure message" "fix attempt 2 of 2" "$(cat "$work_directory/stderr")"
-run_stop_hook agent-a "$gate_repository" >/dev/null; exit_code=$?
-expect_equal "gate-fast: third failure blocks for escalation" 2 "$exit_code"
-expect_contains "gate-fast: escalation instruction" "GATE FAILED" "$(cat "$work_directory/stderr")"
-stdout="$(run_stop_hook agent-a "$gate_repository")"; exit_code=$?
-expect_equal "gate-fast: stops after escalation" 0 "$exit_code"
-expect_contains "gate-fast: escalation message to user" "escalation reported" "$stdout"
-
-touch "$gate_repository/pass-marker"
-run_stop_hook agent-b "$gate_repository" >/dev/null; exit_code=$?
-expect_equal "gate-fast: passing gate lets agent stop" 0 "$exit_code"
-rm "$gate_repository/pass-marker"
-
-echo "garbage" >"$CLAUDE_PLUGIN_DATA/gate-attempts/agent-e"
-run_stop_hook agent-e "$gate_repository" >/dev/null; exit_code=$?
-expect_equal "gate-fast: corrupt attempt counter restarts at the first attempt" 2 "$exit_code"
-expect_contains "gate-fast: corrupt counter message" "fix attempt 1 of 2" "$(cat "$work_directory/stderr")"
-
+# run-gate finds the repository root of a linked worktree from a subdirectory (the case the
+# removed hook relied on; /deliver passes the worktree that holds the change).
 git -C "$gate_repository" worktree add -q "$work_directory/gate-worktree" -b worktree-branch
 touch "$work_directory/gate-worktree/pass-marker"
 mkdir -p "$work_directory/gate-worktree/src"
-run_stop_hook agent-c "$work_directory/gate-worktree/src" >/dev/null; exit_code=$?
-expect_equal "gate-fast: runs in the agent's worktree root" 0 "$exit_code"
+output="$("$scripts/run-gate.sh" fast "$work_directory/gate-worktree/src")"; exit_code=$?
+expect_equal "run-gate: runs in a linked worktree's root" 0 "$exit_code"
 
 unconfigured_repository="$(new_repository unconfigured-repo feature)"
-stdout="$(run_stop_hook agent-d "$unconfigured_repository")"; exit_code=$?
-expect_equal "gate-fast: unconfigured gate lets agent stop" 0 "$exit_code"
-expect_contains "gate-fast: unconfigured gate is reported" "NOT CONFIGURED" "$stdout"
-
-stdout="$(run_stop_hook agent-f "$risky_repository")"; exit_code=$?
-expect_equal "gate-fast: refused gate lets agent stop" 0 "$exit_code"
-expect_contains "gate-fast: refused gate is reported" "REFUSED" "$(jq -r .systemMessage <<<"$stdout")"
 
 # ---------------------------------------------------------------- external-review
 review_repository="$(new_repository review-repo main)"

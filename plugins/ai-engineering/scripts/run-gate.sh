@@ -33,16 +33,16 @@ if [ -n "$config_ref" ]; then
     echo "GATE $gate_name: ERROR (config ref $config_ref is not a commit in this repository)"
     exit 4
   fi
-  load_gates "$working_directory" HEAD no
+  load_gates "$working_directory" HEAD
   head_gate_command="$(read_gate_command "$gate_name")"
-  load_gates "$working_directory" "$config_ref" no
+  load_gates "$working_directory" "$config_ref"
   gate_command="$(read_gate_command "$gate_name")"
   config_suffix=" [gate config: committed at $config_ref]"
   if [ "$head_gate_command" != "$gate_command" ]; then
     config_suffix=" [gate config: committed at $config_ref; THIS CHANGE MODIFIES THE \"$gate_name\" GATE - review it: ${head_gate_command:-<removed>}]"
   fi
 else
-  load_gates "$working_directory" HEAD yes
+  load_gates "$working_directory" HEAD
   [ -z "$gates_note" ] || echo "NOTE: $gates_note"
   gate_command="$(read_gate_command "$gate_name")"
 fi
