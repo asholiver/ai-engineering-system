@@ -159,8 +159,8 @@ Included:
     | :- | :- | :- | :- |
     | Full gate (or adapter-verified CI evidence of the trusted gate) at head | yes | yes | yes |
     | QA | spot check against intent | full acceptance-criteria check | full, including negative and failure-path tests |
-    | Internal security review (Opus, delta) | none | only when the classifier flags a security category | yes |
-    | External review | optional | required at head | required at head |
+    | Internal security review (Opus, delta) | none | none (security categories always classify as tier 2; amended 2026-10-20, M4) | yes |
+    | External review | optional (a configured reviewer's blocking findings or error still block; amended 2026-10-20, M3) | required at head | required at head |
     | Explicit residual-risk list | no | no | yes |
 
 12. **One readiness procedure.** A deterministic script evaluates an increment and prints a `READINESS` block. The `review` skill runs it, dispatches the missing assurance, records results and re-runs it. `deliver` uses the same skill at the end of each increment (WORK-002), and there is no separate Prove procedure. The block contains:
@@ -176,6 +176,8 @@ Included:
     - the residual-risk list (tier 2);
     - bootstrap notes;
     - `READY: YES | NO - reasons`.
+
+    *v0.3.0 (amended 2026-10-20; see "v0.3.0 scope and C2 design"):* the block prints tier and reasons, the gate verdict without trust states or rerun labels, QA, security review, external review, the residual-risk status, HIGH-or-above fixes, owner-command and conversation decisions, open decisions and proposals, the open-finding count, pending owner actions, `CERTIFIABLE` and `READY`. Gate trust states, rerun labels, bootstrap notes and per-finding dispositions are deferred to v0.3.x.
 13. **Historical evidence import** for merged increments: external evidence recorded with `historical: true`, for example Landra's CodeRabbit review at `64fbb11`. Historical entries never satisfy a new increment.
 14. **Metrics report.** One script summarises a work item from state, the gate ledger and the guard log:
     - authorisation-to-readiness time per increment;
@@ -395,19 +397,28 @@ End-to-end scenario in a scratch project (self-development protocol, evidence in
 ## v0.3.0 scope and C2 design (owner decisions 2026-10-20)
 - **v0.3.0 scope.** C2: Scope item 2 (effective tier, including the action floor), item 11 (tier-dependent depth), item 12 (one deterministic readiness procedure; without gate trust states, rerun labels or bootstrap notes) and the two C1 readiness requirements in Implementation state. From item 8, only a reviewer kind (`security`, `qa`, `external`) on review evidence. PR D: item 16 removals. Deferred to v0.3.x: items 3–7, the rest of 8, 9, 10, 13 and 14.
 - **PR sequence:** A `docs/work-003-closeout` (this closeout) → B `feature/reviewer-execution-limits` → C `feature/work-003-c2-readiness` → D `feature/work-003-removals` → E v0.3.0 release. Each needs separate owner authorisation. No tag or installation without the owner's approval. The local branch `docs/work-003-c1-closeout` is kept until PR A merges and `96a9687`'s content is verified on `main`.
-- **External review: option 1.** No independent external reviewer is configured. `NOT CONFIGURED` is a non-pass for tiers 1 and 2, so READY stays NO for them. The owner's merge approval is not external-review evidence. Opus and QA reviews never count as external review, and no passing result is invented. Tier 0 follows the depth table: external review is optional, so a genuinely tier-0 increment may be READY: YES when every other applicable requirement passes.
+- **External review: option 1.** No independent external reviewer is configured. `NOT CONFIGURED` is a non-pass for tiers 1 and 2, so READY stays NO for them. The owner's merge approval is not external-review evidence. Opus and QA reviews never count as external review, and no passing result is invented. Tier 0 follows the depth table: external review is optional at tier 0. Amended 2026-10-21 (round 4): READY: YES is not reachable for any tier until base provenance can be verified (see Implementation state).
 - **Effective tier** = max(approved or state tier, trusted classifier floor, action floor). Nothing lowers it below the classifier floor in v0.3.0.
 - **Classifier fallback.** Without a trusted installed classifier, the classifier floor is tier 2 and readiness reports `NOT CERTIFIABLE` (READY: NO). A path outside the repository and the presence of `classify-change.sh` do not prove trust.
-- **Action floor (C2).** Tier 2 when the increment has any trigger-2 decision (new dependency or external service are trigger 2; the category is not finer, so this over-counts), or when the guard log shows any reserved-class `ask` or `deny` in the increment's window, apart from the two exclusions below. Exclusions are exact and deterministic, never command-pattern exemptions:
-  - the increment-start confirmation: the one `ask` event whose command SHA-256 equals that of the exact command `git switch -c <increment branch> origin/<default>` for this increment's recorded branch;
-  - with parallel worktrees explicitly opted in and recorded in state, `ask` events whose command SHA-256 equals that of the exact worktree merge command for a recorded worktree branch.
+- **Action floor (C2).** Tier 2 when the increment has any trigger-2 decision (new dependency or external service are trigger 2; the category is not finer, so this over-counts), or when the guard log shows any `ask` or `deny` after the increment-start anchor (the first matching `ask` at or before the increment's `activeAt`), from any session, apart from the three exclusions below (amended 2026-10-20 by owner decisions G-5 and G-6). Exclusions are exact and deterministic, never command-pattern exemptions, and apply to `ask` events only, never to a `deny`:
+  - the increment-start confirmation: `ask` events whose command SHA-256 equals that of the exact command `git switch -c <increment branch> <recorded base commit>` for this increment's recorded branch. Amended 2026-10-20 (H1 remediation): the command names the full base commit; it was `origin/<default>`. An `ask` proves neither approval nor execution (see Implementation state);
+  - the resume of the increment: `ask` events for the exact command `git switch <increment branch>`;
+  - with parallel worktrees explicitly opted in and recorded in state, `ask` events whose command SHA-256 equals that of the exact worktree merge command (`git merge --no-edit <branch>`) for a recorded worktree branch.
 
   Any deviation from those exact commands counts, which raises the tier.
 - **Guard-log evidence (C2).** Readiness reads `guard-log.jsonl` and its one rotated file. Missing, unreadable, symlinked or malformed log files, or insufficient evidence, are never treated as an empty log: readiness reports `NOT CERTIFIABLE` (READY: NO). Insufficient evidence means the increment-start event (the anchor) is not found, so deleting or losing the log is detected. Rotation keeps everything after the anchor while the anchor is present. Residual: a deliberate local process can edit lines after the anchor; the log is a workflow record, as state is.
-- **Tests (C2):** the exact exclusions and near-miss commands; log rotation; malformed, missing, symlinked and anchor-less logs; tier-0 readiness (YES possible) and tier 1 and 2 with `NOT CONFIGURED` (NO); a state tier of 0 against a classifier floor of 2 gives 2; every fallback path. No READY: YES without every applicable requirement met.
+- **Tests (C2):** the exact exclusions and near-miss commands; log rotation; malformed, missing, symlinked and anchor-less logs; tier-0 readiness (everything met except the unverified base provenance, amended 2026-10-21) and tier 1 and 2 with `NOT CONFIGURED` (NO); a state tier of 0 against a classifier floor of 2 gives 2; every fallback path. No READY: YES without every applicable requirement met.
 ## Open decisions
 - D1–D6 are resolved (see `WORK-001-planning.md`).
-- **Trusted-classifier rule (proposed 2026-10-20; owner approval needed before C2 starts).** Readiness trusts a classifier only when all of these hold, and otherwise uses the fallback above:
+- **Trusted-classifier rule: approved 2026-10-20 and strengthened (T-1).**
+  - Readiness itself must run from the selected registry entry's `installPath` (real paths compared).
+  - The *whole* installed plugin tree must match the tag's plugin directory in bytes and modes, ignoring only the runtime `.in_use/` directory (and everything in it). Extra files and links are not allowed.
+  - The known-marketplace source must equal the base-commit pin.
+  - Registry entries are strictly validated. Local, then project, then user scope; more than one entry at a scope is ambiguous and NOT CERTIFIABLE.
+  - Condition 4 below is subsumed by the `installPath` match.
+  - This establishes local consistency, not cryptographic provenance.
+
+  Original proposal (kept for the record): Readiness trusts a classifier only when all of these hold, and otherwise uses the fallback above:
   1. The installation is read from Claude Code's plugin registry (`installed_plugins.json` in the Claude Code config directory), never from `CLAUDE_PLUGIN_ROOT`, arguments or the repository: the `ai-engineering@ai-engineering-system` entry for this project (local scope for the repository root, else user scope).
   2. The installed version equals the version pinned at the base ref in the project's `.claude/settings.json` (`extraKnownMarketplaces.ai-engineering-system.source.ref` `v<version>`), and is at least 0.3.0. No pin means not trusted.
   3. The registry's `gitCommitSha` equals the commit that tag `v<version>` resolves to in the marketplace clone, and the installed `classify-change.sh` is byte-identical to the blob at that commit (Git object hash comparison).
@@ -423,6 +434,39 @@ End-to-end scenario in a scratch project (self-development protocol, evidence in
   - C1 owner decisions (2026-10-19): (1) under `docs/`, tier 0 only for recognised documentation and asset file types; other files there are tier 1 at least; (2) `role(s)` and `polic(y|ies)` added to the auth/permission word parts; `security` and `signin`/`signup` deferred pending Landra evidence; (3) see the requirement below; (4) Markdown additions containing destructive statements stay tier 2. Non-empty `.git/info/attributes` fails closed (tier 2, clear error, file never modified): accepted.
   - Requirement for the later readiness integration (not C1): readiness must run the trusted installed classifier (not the copy in the branch under review) against the merge-base of the head with `main`, never a caller-chosen base. It must also treat scripts referenced as hook commands in the base `.claude/settings.json` as tier 2 (security re-check; not C1).
   - C1 follow-ups (minor QA gaps, not in C1 scope): (a) done in PR #9 review: a test that `check.sh`'s documentation version step fails the gate; (b) no test pinning that only the two documented pin shapes are recognised; (c) destructive-statement detection is single-line only (documented in the script header).
+- Increment C2 (PR C; owner-authorised 2026-10-20; branch `feature/work-003-c2-readiness` from `a5e7796`; Scope items 2, 11, 12 and the two C1 readiness requirements). **Status:** implemented locally (`6f24c6c`); four rounds of internal reviews and remediation implemented locally (`61cda34`, `429aae3`, `74c72a2`, then round 4); not pushed, no PR.
+  - Built:
+    - `scripts/readiness.sh` (effective tier with the action floor, trust check, guard-log anchor and exact exclusions, the full gate in a fresh clone of HEAD, external review, tier-dependent depth, the `READINESS` block);
+    - `workstate.sh`: evidence `--reviewer` and `--sha`, `residual-risks`, `increment-worktree`, a write-once `--base-sha`, a validator and state rules that fail closed;
+    - `classify-change.sh`: base hook command targets are tier 2;
+    - `review` and `deliver` skills; docs; CHANGELOG.
+  - First implementation: `GATE full: PASSED (exit 0) command: scripts/check.sh` (3636 passed, 0 failed). Internal Opus security and QA reviews of `6f24c6c` (not external review): 1 High, 2 Medium and 6 Low (security); 6 Medium and 5 Low (QA). Remediation decisions are in the log entry of 2026-10-20 ("PR C remediation").
+  - C2 resolves the C1 requirement above as follows (owner decisions H1, 2026-10-20). The base is the full `origin/<default>` commit, never a hard-coded `main` and never the current local ref:
+    - it is recorded only when the increment moves from planned to active, verified against `origin/<default>` at that moment, and never changed (late recording and re-anchoring are refused);
+    - the start command names it (`git switch -c <branch> <commit>`), and that exact command is the guard-log anchor;
+    - the local ref must still equal it, the base must be an ancestor of HEAD, and the branch reflog must show the branch created from it.
+
+    Trust boundary (owner decisions, 2026-10-20 and 2026-10-21): an `ask` event proves neither the owner's approval nor the command's execution, and nothing authenticates the base against the remote. Readiness therefore reports `BASE PROVENANCE: UNVERIFIED` and fails closed: READY is NO on every increment, and no workflow reaches READY: YES until the separate guard trust-boundary change (proposed in the log entry "PR C remediation round 3") is approved and implemented.
+  - Prerequisite for v0.3.0 adoption in Landra (owner decision M2, 2026-10-20): Landra's `full` gate must become self-contained, installing its own dependencies, because readiness runs it in a fresh clone. Until then, Landra's readiness reports a failed gate (READY: NO). Landra is not changed in PR C; this is addressed in PR E planning or a separately approved Landra change.
+  - Deferred to v0.3.x (owner decision 2026-10-20): per-task recomputation of the effective tier (C2 computes it only during readiness), and every item listed in "v0.3.0 scope and C2 design". Not available in v0.3.0: an explicit, auditable workflow to re-anchor an increment whose default-branch ref legitimately moved (owner decision H1).
+  - Accepted limitations (owner decisions 2026-10-20):
+    - Guard-log writes killed by the guard's deadline can be lost silently, and the guard's logging is unchanged.
+    - The guard log and the evidence records are workflow records, neither complete nor tamper-proof.
+    - Any logged event after the anchor raises the tier, including denials and other sessions' events.
+    - Standalone `/review` without valid state and an anchor is NOT CERTIFIABLE and READY: NO.
+    - Trust is local consistency, not provenance.
+    - Readiness runs the full gate on every evaluation, in a fresh clone of HEAD.
+    - The default-branch ref and branch reflog are local records; remote authenticity is not verified (no `ls-remote`). The start command's `ask` record is not evidence of approval or execution, so base provenance is unverified and READY: YES is unreachable in v0.3.0 (round 4).
+    - Binary changes are certifiable only for allowlisted image and font assets (`binaryAssets` at the base commit); readiness's environment hardening is defence in depth against injected environment, not against a caller that controls the system tool directories or runs the script through another shell.
+    - Revalidation after the gate, and parsing readiness completely before it runs, are defence in depth: they catch persistent or accidental changes, not a determined hostile gate.
+    - Practical limits (documented in `docs/consuming-project.md`):
+      - `origin/HEAD` must be set;
+      - the default-branch ref must not move during an increment (including IDE auto-fetch);
+      - reflog expiry;
+      - partial clones, alternates, sparse checkouts, submodules and LFS;
+      - user-level diff settings are neutralised in the clones, but an effective `diff.external` and diff or filter drivers on changed files block readiness;
+      - a run can take up to 50 minutes.
+    - Running the project's gate is not a security sandbox: it runs with the user's privileges and can reach user-level resources and absolute paths unless separately isolated.
 ## Review state
 <!-- v0.2 review records its status block here. -->
 -

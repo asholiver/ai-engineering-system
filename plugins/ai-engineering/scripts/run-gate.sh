@@ -60,7 +60,26 @@ fi
 output_file="$(mktemp "${TMPDIR:-/tmp}/ai-engineering-gate.XXXXXX")"
 trap 'rm -f "$output_file"' EXIT
 
-(cd "$repository_directory" && bash -c "$gate_command") >"$output_file" 2>&1
+# Readiness runs this script with controlled tools, the C locale and a private HOME, and passes
+# the caller's PATH, HOME, locale, library paths and Perl settings for the configured command
+# only (AI_ENGINEERING_COMMAND_PATH, _HOME and _SAVED_<name>); unset when run directly.
+command_environment=()
+if [ -n "${AI_ENGINEERING_COMMAND_PATH+set}" ]; then
+  for saved_name in LC_ALL LD_LIBRARY_PATH DYLD_LIBRARY_PATH DYLD_FALLBACK_LIBRARY_PATH DYLD_FRAMEWORK_PATH \
+    DYLD_FALLBACK_FRAMEWORK_PATH PERL5LIB PERLLIB PERL5OPT; do
+    saved_variable="AI_ENGINEERING_COMMAND_SAVED_$saved_name"
+    if [ -n "${!saved_variable+set}" ]; then
+      command_environment+=("$saved_name=${!saved_variable}")
+    else
+      command_environment=(-u "$saved_name" "${command_environment[@]+"${command_environment[@]}"}")
+    fi
+  done
+fi
+(
+  cd "$repository_directory" &&
+  PATH="${AI_ENGINEERING_COMMAND_PATH:-$PATH}" HOME="${AI_ENGINEERING_COMMAND_HOME:-${HOME-}}" \
+    /usr/bin/env "${command_environment[@]+"${command_environment[@]}"}" bash -c "$gate_command"
+) >"$output_file" 2>&1
 exit_code=$?
 
 total_lines=$(wc -l <"$output_file" | tr -d ' ')

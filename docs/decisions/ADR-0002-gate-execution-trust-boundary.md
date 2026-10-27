@@ -14,6 +14,7 @@ Two properties must be kept apart:
 - Project gates run through the Claude Code Bash tool by default. `deliver` runs the fast gate after each implementation agent returns, with a bounded number of fix rounds.
 - `gate-fast.sh` does nothing unless `AI_ENGINEERING_HOOK_GATES=1`. The opt-in restores automatic in-agent gating, with the risk of F1, for users whose host is itself isolated or whose code is trusted.
 - `run-gate.sh` accepts a config ref. `/ai-engineering:review` reads the full gate from the base ref, never from the change. A change that modifies or adds the gate is reported in the verdict line, and a gate defined only by the change counts as not configured.
+  - *Qualified by WORK-003 C2 (ADR-0005):* the base ref is now the increment's recorded base commit. Readiness runs the full gate in a fresh clone of `HEAD`, never in the change's checkout. The isolation limits below still apply.
 - The plugin is documented as not being an isolation boundary. Running untrusted code needs an isolated execution environment with scoped or no host credentials and appropriate network controls.
 ## Alternatives considered
 ### Documentation-only remediation
